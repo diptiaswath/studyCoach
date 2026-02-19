@@ -25,6 +25,23 @@ from string import Template
 from typing import Dict, List, Any
 
 
+def normalize_figure_category(figure_type: str, content_type: str) -> str:
+    """Normalize figure_type to one of: 'plot', 'figure', 'table'.
+    
+    Shared with generate_congruent_samples.py to ensure consistency.
+    """
+    if "N/A" in figure_type:
+        figure_category = content_type
+    else:
+        figure_category = figure_type
+    
+    figure_category = figure_category.strip().lower()
+    if figure_category not in ['plot', 'table', 'figure']:
+        figure_category = 'figure'
+    
+    return figure_category
+
+
 FACTUAL, OMISSION, CONCEPTUAL = (0, 0, 0)
 DEFAULT_SYSTEM_PROMPT = \
 Template('''
@@ -221,21 +238,21 @@ def run_inference(
         for qa_idx, qa in enumerate(qa_list, 1):
             question = (qa.get("question", "") or "").strip()
             figure = (qa.get("reference", "") or "").strip()
+            correct_answer = (qa.get("answer", "") or "").strip()  # Store for validator.py
             
             # Normalize figure category to be one of 'plot', 'figure' or 'table'
             figure_details = all_figures.get(figure, None) if figure != "" else None
             figure_path = images_root/ paper_key / figure if figure_details else None
             
+            if not figure_details:
+                continue  # Skip if no figure details
+            
             figure_content_type = figure_details.get("content_type", "") 
             figure_type = figure_details.get("figure_type", "")
-            figure_category = figure_content_type if "N/A" in figure_type else figure_type
+            figure_category = normalize_figure_category(figure_type, figure_content_type)  # Use shared function
             
             if figure_category not in exemplars:
                 continue
-
-            figure_category = figure_category.strip()
-            if figure_category not in ['plot', 'table', 'figure']:
-                figure_category = 'figure'
 
             # Build the message list (system prompt passed via top-level instructions)
             messages, texts = build_exemplar_messages(exemplars[figure_category])
@@ -290,6 +307,7 @@ def run_inference(
             qa["verdict"] = parsed["verdict"]
             qa["error_category"] = parsed["error_category"]
             qa["feedback"] = parsed["feedback"]
+            qa["correct_answer"] = correct_answer  # Add for validator.py compatibility
             
         if FACTUAL > 0 and OMISSION > 0 and CONCEPTUAL > 0:
             break
