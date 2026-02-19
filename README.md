@@ -93,6 +93,59 @@ Generates one exemplar with these 4 fields (the core 4-tuple components):
 | `student_answer` | Multi-sentence | `The C-Tarone method is generally similar to the binarization method...` | User Answer |
 | `feedback` | Multi-sentence coaching | `Your answer omits key details... According to the figure, C-Tarone consistently has higher precision...` | Model Response (Feedback) |
 
+**Mapping: seed.py Output → icl.py Exemplar Tuple**
+
+The seed.py output gets transformed into icl.py's exemplar tuple format `(user_prompt, assistant_response, image_path)`:
+
+| Exemplar Tuple Part | Source | Content | Example |
+|---|---|---|---|
+| `user_prompt` | seed.py **Inputs** | Caption + Question | `"Caption:\nFigure 3: Results...\n\nQuestion:\nHow does C-Tarone compare..."` |
+| `assistant_response` | seed.py **Output** (all 4 fields combined) | Formatted as: `Student:\n<student_answer>\n\nAgent:\nVerdict = <verdict>\nError Category = <error_category>\nFeedback = <feedback>` | `"Student:\nThe C-Tarone method is generally similar...\n\nAgent:\nVerdict = Incorrect\nError Category = Omission\nFeedback = Your answer omits..."` |
+| `image_path` | seed.py **Input** | Image file path | `'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'` |
+
+**Example: Complete Transformation**
+
+**seed.py call (with inputs):**
+```python
+generate_seed_example(
+    image_path='data/test-A/.../1702.08694v3-Figure3-1.png',  # Input 1
+    caption='Figure 3: Results on real data...',               # Input 2
+    question='How does C-Tarone compare to binarization?',    # Input 3
+    answer='C-Tarone has higher precision...',                # Input 4
+    verdict='incorrect',                                      # Input 5
+    error_category='omission',                                # Input 6
+    verdict_explanation='an answer which gets none of the required key insights correct',  # Input 7
+    error_category_explanation='an error due to omitting key details in the answer'        # Input 8
+)
+```
+
+**seed.py output (4 fields):**
+```
+Verdict: Incorrect
+Error Category: Omission
+Student Answer: The C-Tarone method is generally similar to the binarization method across all datasets.
+Feedback: Your answer omits key details regarding the differences between the two methods. According to the figure, C-Tarone consistently has higher precision and F-measure than binarization.
+```
+
+**Becomes icl.py exemplar tuple:**
+```python
+(
+    # user_prompt (from seed.py inputs 2+3)
+    "Caption:\nFigure 3: Results on real data...\n\nQuestion:\nHow does C-Tarone compare to binarization?",
+    
+    # assistant_response (from seed.py output, all 4 fields)
+    "Student:\nThe C-Tarone method is generally similar to the binarization method across all datasets.\n\nAgent:\nVerdict = Incorrect\nError Category = Omission\nFeedback = Your answer omits key details regarding the differences between the two methods. According to the figure, C-Tarone consistently has higher precision and F-measure than binarization.",
+    
+    # image_path (from seed.py input 1)
+    'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'
+)
+```
+
+**Key Points:**
+- `user_prompt` and `image_path` come from seed.py **inputs** (pre-selected from SPIQA)
+- `assistant_response` is entirely from seed.py **output** (LLM-generated)
+- These tuples are then hardcoded into icl.py's exemplars dict for Step 6
+
 **Process**
 1. Provide image, caption, question, and ground truth answer
 2. Specify desired error type (verdict + error_category) — choose from the **3 error types**
@@ -114,7 +167,7 @@ Generates one exemplar with these 4 fields (the core 4-tuple components):
 python src/seed.py
 ```
 
-**Output Destination**
+**Desired Output Destination**
 Generated exemplars should be saved to `data/seed_exemplars.json` for Step 6 (icl.py) to load dynamically during the main inference pipeline.
 
 ---
@@ -222,3 +275,15 @@ Each QA item in the output JSON gains 5 new fields following the 4-tuple + suppl
 python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images \
   --output data/SPIQA_testA_part1_output.json
 ```
+
+**Output Destination**
+The updated JSON with all synthetic data is written to the `--output` path. Example output structure:
+- File: `data/SPIQA_testA_part1_output.json`
+- Contains: Original SPIQA structure (118 papers, 666 QAs) with 5 new fields added to each QA:
+  - `student` (synthetic wrong answer)
+  - `verdict` (Incorrect/Partially Correct/Correct)
+  - `error_category` (Omission/Factual/Conceptual)
+  - `feedback` (study coach explanation)
+  - `correct_answer` (ground truth for validation)
+- Formatted: Pretty-printed JSON with 2-space indentation
+- Ready for: Feature branch validation pipeline (Steps 5-10)
