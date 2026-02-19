@@ -1,3 +1,47 @@
+"""Seed Example Generator for SPIQA+ Dataset
+
+This module generates synthetic "seed" exemplar examples for in-context learning (ICL) bootstrapping.
+Seed examples are used as reference examples in icl.py to teach the model how to generate different
+types of student errors (Omission, Factual, Conceptual) on scientific paper figure questions.
+
+WORKFLOW:
+1. User provides: image, caption, question, correct_answer + desired error_type
+2. generate_seed_example() calls OpenAI API with image + prompt
+3. OpenAI generates: wrong_student_answer + coaching_feedback
+4. Output is a SeedExample object, printed for manual review & curation
+5. User manually copies high-quality examples to icl.py as hardcoded exemplars
+
+INPUT FORMAT (to generate_seed_example):
+- image_path (str): Path to image file, e.g., 'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'
+- caption (str): Figure caption from SPIQA metadata
+- question (str): Question from SPIQA qa.question
+- answer (str): Correct answer from SPIQA qa.answer
+- verdict (str): 'incorrect' or 'partially correct' - what type of wrong answer to generate
+- error_category (str): 'omission', 'factual', or 'conceptual' - what type of error to induce
+- verdict_explanation (str): Definition of verdict, e.g., "an answer which gets none of the required key insights correct"
+- error_category_explanation (str): Definition of error type, e.g., "an error due to omitting key details in the answer"
+
+OUTPUT FORMAT (SeedExample):
+A pipe-delimited string with 4 fields:
+  verdict | error_category | student_answer | feedback
+
+Example:
+  Incorrect | Omission | The C-Tarone method is generally similar to the binarization method... | Your answer omits key details...
+
+Each field:
+- verdict: "Incorrect" or "Partially Correct"
+- error_category: "Omission", "Factual", or "Conceptual"
+- student_answer: Generated wrong answer (1-3 sentences)
+- feedback: Study coach explanation of the error (2-4 sentences, instructional tone)
+
+TYPICAL USAGE:
+  python src/seed.py  # Generates one OMISSION example for chart1 (currently active)
+                      # Uncomment lines 197-246 to generate additional examples
+
+NOTE: seed.py is a ONE-TIME curation tool. Generated examples are manually reviewed and then
+      hardcoded into icl.py (lines 319-368) as exemplars for the main inference pipeline.
+"""
+
 import base64
 from openai import OpenAI
 
