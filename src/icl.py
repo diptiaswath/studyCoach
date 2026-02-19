@@ -11,7 +11,7 @@ Does the following:
     - Runs the inference and updates the JSON with model outputs (student answer, verdict, error category, feedback).
 
 Example usage:
-python icl.py test-A/SPIQA_testA_part1.json test-A/SPIQA_testA_Images --output test-A/SPIQA_testA_part1_output.json
+python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images --output data/SPIQA_testA_part1_output.json
 """
 from __future__ import annotations
 
@@ -372,9 +372,9 @@ The goal is to minimize loss, not keep it high.'''
 
     exemplars = {
         'plot' : [
-            (chart_incorrect_omission_user, chart_incorrect_omission_assistant, 'test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'),
-            (chart_incorrect_factual_user, chart_incorrect_factual_assistant, 'test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png'),
-            (chart_incorrect_conceptual_user, chart_incorrect_conceptual_assistant, 'test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure15-1.png')
+            (chart_incorrect_omission_user, chart_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'),
+            (chart_incorrect_factual_user, chart_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png'),
+            (chart_incorrect_conceptual_user, chart_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure15-1.png')
         ]
     }
 
