@@ -94,7 +94,7 @@ if __name__ == "__main__":
     }
     
     ### Charts ###
-    chart1 = 'test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png' # Incorrect, Omission 
+    chart1 = 'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png' # Incorrect, Omission 
     chart1_caption = \
 '''Figure 3: Results on real data. Regarding the scale of precision and F-measure, see the comment at the last paragraph just before Section 3. 
 The y-axis is in logarithmic scale. C-Tarone is shown in red and the binarization approach is shown in blue. Higher (taller) is better in precision, i
@@ -106,7 +106,7 @@ recall, and F-measure, while lower is better in running time.'''
 than the binarization method. The running time of the C-Tarone method is competitive with the binarization method.
 '''
 
-    chart2 = 'test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png' # Incorrect, Factual 
+    chart2 = 'data/test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png' # Incorrect, Factual 
     chart2_caption = \
 '''Experiments with synthetic data: error is reported against the size of the conditional probability table (lower is better). 
 The error is the estimated total variation distance to the ground truth Bayes net. We use the error of MLE without noise as our benchmark. 
@@ -118,7 +118,7 @@ We report two settings: the underlying structure of the Bayes net is a random tr
 The figure shows that the error of the Filtering algorithm is lower than the error of MLE with noise for all values of the number of parameters. 
 This is true for both the random tree and random graph settings.'''
 
-    chart3 = 'test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure15-1.png' # Incorrect, Conceptual 
+    chart3 = 'data/test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure15-1.png' # Incorrect, Conceptual 
     chart3_caption = \
 '''Training with different gradient approximations: validation loss with a simplified advection (red), and the correct gradient from forward advection (green). The simplified version does not converge.'''
     chart3_question = \
@@ -126,7 +126,7 @@ This is true for both the random tree and random graph settings.'''
     chart3_answer = \
 '''The corrected gradient method leads to a more stable and lower loss value, so leads to a better training. Simplified advection method doesn't converge.'''
 
-    chart4 = 'test-A/SPIQA_testA_Images/1706.08146v3/1706.08146v3-Figure2-1.png' # Partially Correct, Omission
+    chart4 = 'data/test-A/SPIQA_testA_Images/1706.08146v3/1706.08146v3-Figure2-1.png' # Partially Correct, Omission
     chart4_caption = \
 '''Approximation errors Err(X,X∗) := ‖X −X∗‖F /‖X∗‖F for sparse PCA and NMF on synthetic data with varying column sparsity k of W and projection dimension d. 
 The values of d correspond to 10×, 5×, and 2.5× compression respectively. Err(W̃ , PW ) measures the distance between factors in the compressed domain: low error here is necessary for accurate sparse recovery. 
@@ -137,7 +137,7 @@ Err(Ŵ ,W ) measures the error after sparse recovery: the recovered factors Ŵ
 '''Increasing the projection dimension d decreases the approximation error for both sparse PCA and NMF. he figure shows that the approximation error decreases as the projection dimension d increases. 
 This is because a higher projection dimension allows for a more accurate representation of the original data.'''
 
-    chart5 = 'test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png' # Partially Correct, Factual 
+    chart5 = 'data/test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png' # Partially Correct, Factual 
     chart6 = 'test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png' # Partially Correct, Conceptual 
 
     chart_incorrect_omission = generate_seed_example(chart1, chart1_caption, chart1_question, chart1_answer, 'incorrect', 'omission', verdicts['incorrect'], error_categories['omission'])
@@ -167,19 +167,19 @@ This is because a higher projection dimension allows for a more accurate represe
 
 
     ### Figures ###
-    figure1 = 'test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Figure1-1.png'  # Incorrect, Omission 
-    figure2 = 'test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Incorrect, Factual 
-    figure3 = 'test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Incorrect, Conceptual
-    figure4 = 'test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Partially Correct, Omission 
-    figure5 = 'test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Partially Correct, Factual 
+    figure1 = 'data/test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Figure1-1.png'  # Incorrect, Omission 
+    figure2 = 'data/test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Incorrect, Factual 
+    figure3 = 'data/test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Incorrect, Conceptual
+    figure4 = 'data/test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Partially Correct, Omission 
+    figure5 = 'data/test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Partially Correct, Factual 
     figure6 = 'test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure12-1.png' # Partiallly Correct, Conceptual 
 
     ### Tables ###
-    table1 = 'test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Incorrect, Omission
-    table2 = 'test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Incorrect, Factual 
-    table3 = 'test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Incorrect, Conceptual 
-    table4 = 'test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Partially Correct, Omission
-    table5 = 'test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Partially Correct, Factual 
-    table6 = 'test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Partially Correct, Conceptual 
+    table1 = 'data/test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Incorrect, Omission
+    table2 = 'datatest-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Incorrect, Factual 
+    table3 = 'data/test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Incorrect, Conceptual 
+    table4 = 'data/test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Partially Correct, Omission
+    table5 = 'data/test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Partially Correct, Factual 
+    table6 = 'data/test-A/SPIQA_testA_Images/1703.04887v4/1703.04887v4-Table1-1.png' # Partially Correct, Conceptual 
     
     
