@@ -48,222 +48,86 @@ Every generated example follows a standardized **4-tuple** format matching the S
 ## Core Scripts
 
 ### seed.py - Exemplar Generation
-**Report Reference:** Phase 2, Step 4 — Hand-Curate ICL Seed Set
 
-**Report Requirement:**
-> "Manually create 20–30 high-quality 4-tuple examples (5–8 per error category across figure types)."
+**Purpose:** Generate high-quality exemplar examples that teach icl.py how to generate realistic student errors across the 3 error types.
 
-**Purpose:** Generate high-quality exemplar examples for in-context learning (ICL) bootstrapping. Seed examples teach the LLM how to generate different types of student errors (Omission, Factual, Conceptual) on scientific paper figure questions. Once manually curated, these exemplars are used by icl.py during Phase 2, Step 6 for the main inference pipeline.
+**Inputs (8 Parameters)**
 
-**Required Inputs (8 Parameters)**
+| # | Parameter | Type | Source |
+|---|-----------|------|--------|
+| 1 | `image_path` | str | SPIQA image file path |
+| 2 | `caption` | str | SPIQA figure caption |
+| 3 | `question` | str | SPIQA question text |
+| 4 | `answer` | str | SPIQA ground truth answer |
+| 5 | `verdict` | str | 'incorrect' or 'partially correct' |
+| 6 | `error_category` | str | 'omission', 'factual', or 'conceptual' |
+| 7 | `verdict_explanation` | str | Definition of chosen verdict |
+| 8 | `error_category_explanation` | str | Definition of chosen error type |
 
-| # | Parameter | Type | Example | Source |
-|---|-----------|------|---------|--------|
-| 1 | `image_path` | str | `'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'` | SPIQA image file |
-| 2 | `caption` | str | `'Figure 3: Results on real data...'` | SPIQA figure metadata |
-| 3 | `question` | str | `'How does C-Tarone compare to binarization?'` | SPIQA qa.question |
-| 4 | `answer` | str | `'The C-Tarone method has higher precision...'` | SPIQA qa.answer (ground truth) |
-| 5 | `verdict` | str | `'incorrect'` or `'partially correct'` | From verdicts dict — one of the 4-tuple values |
-| 6 | `error_category` | str | `'omission'`, `'factual'`, or `'conceptual'` | From error_categories dict — one of the 3 error types |
-| 7 | `verdict_explanation` | str | `'an answer which gets none of the required key insights correct'` | verdicts[verdict] |
-| 8 | `error_category_explanation` | str | `'an error due to omitting key details in the answer'` | error_categories[error_category] |
+**Outputs (4 Fields)**
 
-**Example Function Call**
-```python
-chart_incorrect_omission = generate_seed_example(
-    image_path=chart1,                                    # ← Input 1
-    caption=chart1_caption,                               # ← Input 2
-    question=chart1_question,                             # ← Input 3
-    answer=chart1_answer,                                 # ← Input 4 (ground truth)
-    verdict='incorrect',                                  # ← Input 5 (4-tuple component)
-    error_category='omission',                            # ← Input 6 (error type from system)
-    verdict_explanation=verdicts['incorrect'],            # ← Input 7
-    error_category_explanation=error_categories['omission']  # ← Input 8
-)
-```
+| Field | 4-Tuple Role |
+|-------|-------------|
+| `student_answer` | User Answer |
+| `verdict` | Model Response (Verdict) |
+| `error_category` | Model Response (Error Category) |
+| `feedback` | Model Response (Feedback) |
 
-**Output Structure**
+**Exemplar Distribution**
 
-Generates one exemplar with these 4 fields (the core 4-tuple components):
+Target 18 exemplars covering all combinations:
 
-| Field | Format | Example | 4-Tuple Role |
-|-------|--------|---------|-------------|
-| `verdict` | Single word | `Incorrect` | Model Response (Verdict) |
-| `error_category` | Single word | `Omission` | Model Response (Error Category) |
-| `student_answer` | Multi-sentence | `The C-Tarone method is generally similar to the binarization method...` | User Answer |
-| `feedback` | Multi-sentence coaching | `Your answer omits key details... According to the figure, C-Tarone consistently has higher precision...` | Model Response (Feedback) |
+| Figure Type | Error Categories (×3) | Verdicts (×2) |
+|---|---|---|
+| plot | Omission, Factual, Conceptual | Incorrect, Partially Correct |
+| figure | Omission, Factual, Conceptual | Incorrect, Partially Correct |
+| table | Omission, Factual, Conceptual | Incorrect, Partially Correct |
 
-**Mapping: seed.py Output → icl.py Exemplar Tuple**
-
-The seed.py output gets transformed into icl.py's exemplar tuple format `(user_prompt, assistant_response, image_path)`:
-
-| Exemplar Tuple Part | Source | Content | Example |
-|---|---|---|---|
-| `user_prompt` | seed.py **Inputs** | Caption + Question | `"Caption:\nFigure 3: Results...\n\nQuestion:\nHow does C-Tarone compare..."` |
-| `assistant_response` | seed.py **Output** (all 4 fields combined) | Formatted as: `Student:\n<student_answer>\n\nAgent:\nVerdict = <verdict>\nError Category = <error_category>\nFeedback = <feedback>` | `"Student:\nThe C-Tarone method is generally similar...\n\nAgent:\nVerdict = Incorrect\nError Category = Omission\nFeedback = Your answer omits..."` |
-| `image_path` | seed.py **Input** | Image file path | `'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'` |
-
-**Example: Complete Transformation**
-
-**seed.py call (with inputs):**
-```python
-generate_seed_example(
-    image_path='data/test-A/.../1702.08694v3-Figure3-1.png',  # Input 1
-    caption='Figure 3: Results on real data...',               # Input 2
-    question='How does C-Tarone compare to binarization?',    # Input 3
-    answer='C-Tarone has higher precision...',                # Input 4
-    verdict='incorrect',                                      # Input 5
-    error_category='omission',                                # Input 6
-    verdict_explanation='an answer which gets none of the required key insights correct',  # Input 7
-    error_category_explanation='an error due to omitting key details in the answer'        # Input 8
-)
-```
-
-**seed.py output (4 fields):**
-```
-Verdict: Incorrect
-Error Category: Omission
-Student Answer: The C-Tarone method is generally similar to the binarization method across all datasets.
-Feedback: Your answer omits key details regarding the differences between the two methods. According to the figure, C-Tarone consistently has higher precision and F-measure than binarization.
-```
-
-**Becomes icl.py exemplar tuple:**
-```python
-(
-    # user_prompt (from seed.py inputs 2+3)
-    "Caption:\nFigure 3: Results on real data...\n\nQuestion:\nHow does C-Tarone compare to binarization?",
-    
-    # assistant_response (from seed.py output, all 4 fields)
-    "Student:\nThe C-Tarone method is generally similar to the binarization method across all datasets.\n\nAgent:\nVerdict = Incorrect\nError Category = Omission\nFeedback = Your answer omits key details regarding the differences between the two methods. According to the figure, C-Tarone consistently has higher precision and F-measure than binarization.",
-    
-    # image_path (from seed.py input 1)
-    'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'
-)
-```
-
-**Key Points:**
-- `user_prompt` and `image_path` come from seed.py **inputs** (pre-selected from SPIQA)
-- `assistant_response` is entirely from seed.py **output** (LLM-generated)
-- These tuples are then hardcoded into icl.py's exemplars dict for Step 6
-
-**Process**
-1. Provide image, caption, question, and ground truth answer
-2. Specify desired error type (verdict + error_category) — choose from the **3 error types**
-3. Call `generate_seed_example()` with all 8 required inputs
-4. LLM generates a synthetic wrong student answer + coaching feedback matching the error type
-5. Manually review output for quality
-6. Hardcode high-quality exemplars into icl.py (currently lines 330–368)
-
-**Curation Guidelines**
-- Target: 20–30 total exemplars across all figure types
-- Distribution: 5–8 per error category (Omission, Factual, Conceptual)
-- Figure types: Include exemplars for 'plot', 'figure', and 'table'
-- Quality: Prefer subtle, realistic errors over obvious mistakes
-- Manual review: All generated exemplars must be reviewed before use
-- Error balance: Ensure all 3 error types are well-represented for Step 6 to learn diverse error patterns
-
-**Recommended Exemplar Combinations (18 Total)**
-
-For comprehensive coverage, generate exemplars across all combinations of figure types, error categories, and verdicts:
-
-| # | Figure Type | Error Category | Verdict | Example Call |
-|---|---|---|---|---|
-| 1 | plot | Omission | Incorrect | `generate_seed_example(chart_img, ..., verdict='incorrect', error_category='omission')` |
-| 2 | plot | Omission | Partially Correct | `generate_seed_example(chart_img, ..., verdict='partially correct', error_category='omission')` |
-| 3 | plot | Factual | Incorrect | `generate_seed_example(chart_img, ..., verdict='incorrect', error_category='factual')` |
-| 4 | plot | Factual | Partially Correct | `generate_seed_example(chart_img, ..., verdict='partially correct', error_category='factual')` |
-| 5 | plot | Conceptual | Incorrect | `generate_seed_example(chart_img, ..., verdict='incorrect', error_category='conceptual')` |
-| 6 | plot | Conceptual | Partially Correct | `generate_seed_example(chart_img, ..., verdict='partially correct', error_category='conceptual')` |
-| 7 | figure | Omission | Incorrect | `generate_seed_example(fig_img, ..., verdict='incorrect', error_category='omission')` |
-| 8 | figure | Omission | Partially Correct | `generate_seed_example(fig_img, ..., verdict='partially correct', error_category='omission')` |
-| 9 | figure | Factual | Incorrect | `generate_seed_example(fig_img, ..., verdict='incorrect', error_category='factual')` |
-| 10 | figure | Factual | Partially Correct | `generate_seed_example(fig_img, ..., verdict='partially correct', error_category='factual')` |
-| 11 | figure | Conceptual | Incorrect | `generate_seed_example(fig_img, ..., verdict='incorrect', error_category='conceptual')` |
-| 12 | figure | Conceptual | Partially Correct | `generate_seed_example(fig_img, ..., verdict='partially correct', error_category='conceptual')` |
-| 13 | table | Omission | Incorrect | `generate_seed_example(table_img, ..., verdict='incorrect', error_category='omission')` |
-| 14 | table | Omission | Partially Correct | `generate_seed_example(table_img, ..., verdict='partially correct', error_category='omission')` |
-| 15 | table | Factual | Incorrect | `generate_seed_example(table_img, ..., verdict='incorrect', error_category='factual')` |
-| 16 | table | Factual | Partially Correct | `generate_seed_example(table_img, ..., verdict='partially correct', error_category='factual')` |
-| 17 | table | Conceptual | Incorrect | `generate_seed_example(table_img, ..., verdict='incorrect', error_category='conceptual')` |
-| 18 | table | Conceptual | Partially Correct | `generate_seed_example(table_img, ..., verdict='partially correct', error_category='conceptual')` |
-
-**Distribution Summary:**
-
-These are **overlapping distributions** (not additive) across 18 total exemplars:
-
-| Dimension | Count | Calculation |
-|-----------|-------|-------------|
-| **Total exemplars** | 18 | 3 figure types × 3 error categories × 2 verdicts |
-| **Per figure type** | 6 | 18 ÷ 3 (plot, figure, table) |
-| **Per error category** | 6 | 18 ÷ 3 (Omission, Factual, Conceptual) |
-| **Per verdict** | 9 | 18 ÷ 2 (Incorrect, Partially Correct) |
-
-This ensures icl.py learns all combinations during Step 6, making synthetic generation robust across different contexts and error types.
-
-**Usage**
-```bash
-python src/seed.py
-```
-
-**Output Destination**
-Generated exemplars should be saved to `data/seed_exemplars.json` for Step 6 (icl.py) to load dynamically during the main inference pipeline.
+**Result: 3 types × 3 categories × 2 verdicts = 18 exemplars**
 
 ---
 
 ### icl.py - Inference Engine
-**Report Reference:** Phase 2, Step 6 — ICL-Based Synthetic Generation
 
-**Report Requirement:**
-> "Prompt an LLM with 2–3 seed examples to generate 1–2 incongruent user answers + structured model responses per QA."
+**Purpose:** Generate synthetic student responses at scale using exemplars from seed.py. Takes curated exemplar set (with all 3 error types represented) and uses them to teach the LLM how to generate realistic student errors across the entire SPIQA Test-A dataset.
 
-**Purpose:** Generate synthetic student responses using in-context learning across entire SPIQA Test-A dataset. Takes curated seed exemplars from Step 4 (with all 3 error types represented) and uses them to teach the LLM how to generate realistic student errors on scientific paper figure questions. Produces 1–2 synthetic incongruent (wrong) answers per QA with structured model responses (verdict + error category + feedback) — all following the 4-tuple format.
+**Inputs (4 Parameters)**
 
-**Required Inputs (4 Parameters)**
+| # | Parameter | Type | Source |
+|---|-----------|------|--------|
+| 1 | `json_path` | str/Path | SPIQA Test-A JSON file (provides context + questions) |
+| 2 | `images_root` | str/Path | Directory containing paper image folders (provides visual context) |
+| 3 | `exemplars` | dict | seed.py output: `{'plot': [...], 'figure': [...], 'table': [...]}` |
+| 4 | `output_path` | str/Path | Where to write the updated JSON with inference results |
 
-| # | Parameter | Type | Example | Source | Notes |
-|---|-----------|------|---------|--------|-------|
-| 1 | `json_path` | str/Path | `'data/SPIQA_testA_part1.json'` | SPIQA Test-A dataset | Nested JSON: paper_id → all_figures → qa list (context + question for 4-tuples) |
-| 2 | `images_root` | str/Path | `'data/test-A/SPIQA_testA_Images'` | Image directory | Contains paper folders with figure images (visual context for 4-tuples) |
-| 3 | `exemplars` | dict | `{'plot': [...], 'figure': [...], 'table': [...]}` | seed.py output | 2–3 exemplars per figure type; each exemplar has Omission/Factual/Conceptual error example |
-| 4 | `output_path` | str/Path | `'data/SPIQA_testA_part1_output.json'` | Output file | Updated JSON with inference results (4-tuples with all fields) |
+**Exemplar Input Format**
 
-**Example Command**
-```bash
-python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images \
-  --output data/SPIQA_testA_part1_output.json
-```
-
-**Exemplar Format (Input 3)**
-Shows how seed.py exemplars feed into icl.py — each exemplar demonstrates one error type:
+Each exemplar tuple teaches one error type:
 
 ```python
 exemplars = {
     'plot': [
-        # Exemplar 1: OMISSION error
-        (user_prompt_omission, assistant_response_omission, 'image_path_1.png'),
-        # Exemplar 2: FACTUAL error
-        (user_prompt_factual, assistant_response_factual, 'image_path_2.png'),
-        # Exemplar 3: CONCEPTUAL error
-        (user_prompt_conceptual, assistant_response_conceptual, 'image_path_3.png')
+        (user_prompt_omission, assistant_response_omission, image_path_1),
+        (user_prompt_factual, assistant_response_factual, image_path_2),
+        (user_prompt_conceptual, assistant_response_conceptual, image_path_3)
     ],
-    'figure': [...],  # Same 3 error types
-    'table': [...]    # Same 3 error types
+    'figure': [(...), (...), (...)],  # Same 3 error types
+    'table': [(...), (...), (...)]    # Same 3 error types
 }
 ```
 
-**Output Structure**
+**Outputs (5 Fields Added Per QA)**
 
-Each QA item in the output JSON gains 5 new fields following the 4-tuple + supplementary format:
+| Field | 4-Tuple Role | Description |
+|-------|-------------|-------------|
+| `student` | User Answer | Synthetic wrong student answer |
+| `verdict` | Model Response (Verdict) | Correct / Partially Correct / Incorrect |
+| `error_category` | Model Response (Error Category) | Omission / Factual / Conceptual / N/A |
+| `feedback` | Model Response (Feedback) | Study coach explanation (2–4 sentences) |
+| `correct_answer` | Context (supplementary) | Ground truth for validation |
 
-| Field | Type | Example | 4-Tuple Role | Purpose |
-|-------|------|---------|-------------|---------|
-| `student` | str | `'The C-Tarone method is generally similar...'` | User Answer | Generated wrong student answer (synthetic) |
-| `verdict` | str | `'Incorrect'` | Model Response (Verdict) | Classification: Correct / Partially Correct / Incorrect |
-| `error_category` | str | `'Omission'` | Model Response (Error Category) | Error type: Omission / Factual / Conceptual / N/A (from 3-type system) |
-| `feedback` | str | `'Your answer omits key details...'` | Model Response (Feedback) | Study coach explanation of the error (2–4 sentences) |
-| `correct_answer` | str | `'The C-Tarone method has higher precision...'` | Context (supplementary) | Ground truth answer (from SPIQA) — used for validation |
+**Example Output**
 
-**Example Output QA Item (Complete 4-Tuple + Context)**
 ```json
 {
   "question": "How does the C-Tarone method compare to the binarization method?",
@@ -277,51 +141,9 @@ Each QA item in the output JSON gains 5 new fields following the 4-tuple + suppl
 }
 ```
 
-**Process**
-
-1. **Load Data** — Reads SPIQA JSON (118 papers, 666 QA pairs) - provides context + questions for 4-tuples
-2. **Iterate in Sorted Order** — Processes papers alphabetically (deterministic for reproducibility)
-3. **For Each QA:**
-   - Extract question, figure reference, caption from SPIQA metadata
-   - Look up figure details: content_type, figure_type
-   - Normalize to figure_category ('plot', 'figure', or 'table')
-   - Load 2–3 seed exemplars matching that figure category (which contain all 3 error types)
-   - If no exemplars exist for that figure type, skip QA
-4. **Build Multimodal Prompt:**
-   - System instructions (with dynamic error counts: $FACTUAL, $OMISSION, $CONCEPTUAL)
-   - 2–3 exemplar messages showing Omission/Factual/Conceptual examples (from seed.py)
-   - Final user message (caption + question + current image as base64)
-5. **Call OpenAI API:**
-   - Model: gpt-5.1
-   - Endpoint: `client.responses.create()` with `instructions` parameter
-   - Include metadata (paper_id, qa_index) for debugging
-6. **Parse Output:**
-   - Use regex to extract: Student answer, Verdict, Error Category, Feedback (the 4-tuple components)
-   - Clean whitespace and handle edge cases
-   - If verdict is "Correct", auto-set error_category and feedback to "N/A"
-7. **Update JSON:**
-   - Add parsed fields to QA item (completes the 4-tuple)
-   - Track error distribution by error_category (increment FACTUAL/OMISSION/CONCEPTUAL counters)
-8. **Exit Condition:**
-   - Stop early when all three error types (FACTUAL > 0, OMISSION > 0, CONCEPTUAL > 0) have been generated at least once
-9. **Write Output:**
-   - Save updated JSON to output_path
-   - Print final error distribution counts showing balance across 3 error types
-
 **Usage**
+
 ```bash
 python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images \
   --output data/SPIQA_testA_part1_output.json
 ```
-
-**Output Destination**
-The updated JSON with all synthetic data is written to the `--output` path. Example output structure:
-- File: `data/SPIQA_testA_part1_output.json`
-- Contains: Original SPIQA structure (118 papers, 666 QAs) with 5 new fields added to each QA:
-  - `student` (synthetic wrong answer)
-  - `verdict` (Incorrect/Partially Correct/Correct)
-  - `error_category` (Omission/Factual/Conceptual)
-  - `feedback` (study coach explanation)
-  - `correct_answer` (ground truth for validation)
-- Formatted: Pretty-printed JSON with 2-space indentation
-- Ready for: Feature branch validation pipeline (Steps 5-10)
