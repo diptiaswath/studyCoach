@@ -116,7 +116,7 @@ exemplars = {
 }
 ```
 
-**Outputs (5 Fields Added Per QA)**
+**Outputs (4 Fields Added Per QA)**
 
 | Field | 4-Tuple Role | Description |
 |-------|-------------|-------------|
@@ -124,7 +124,6 @@ exemplars = {
 | `verdict` | Model Response (Verdict) | Correct / Partially Correct / Incorrect |
 | `error_category` | Model Response (Error Category) | Omission / Factual / Conceptual / N/A |
 | `feedback` | Model Response (Feedback) | Study coach explanation (2–4 sentences) |
-| `explanation` | Context (supplementary) | Ground truth reasoning from SPIQA |
 
 **Example Output**
 
