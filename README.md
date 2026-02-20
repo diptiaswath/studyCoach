@@ -162,12 +162,50 @@ Feedback: Your answer omits key details regarding the differences between the tw
 - Manual review: All generated exemplars must be reviewed before use
 - Error balance: Ensure all 3 error types are well-represented for Step 6 to learn diverse error patterns
 
+**Recommended Exemplar Combinations (18 Total)**
+
+For comprehensive coverage, generate exemplars across all combinations of figure types, error categories, and verdicts:
+
+| # | Figure Type | Error Category | Verdict | Example Call |
+|---|---|---|---|---|
+| 1 | plot | Omission | Incorrect | `generate_seed_example(chart_img, ..., verdict='incorrect', error_category='omission')` |
+| 2 | plot | Omission | Partially Correct | `generate_seed_example(chart_img, ..., verdict='partially correct', error_category='omission')` |
+| 3 | plot | Factual | Incorrect | `generate_seed_example(chart_img, ..., verdict='incorrect', error_category='factual')` |
+| 4 | plot | Factual | Partially Correct | `generate_seed_example(chart_img, ..., verdict='partially correct', error_category='factual')` |
+| 5 | plot | Conceptual | Incorrect | `generate_seed_example(chart_img, ..., verdict='incorrect', error_category='conceptual')` |
+| 6 | plot | Conceptual | Partially Correct | `generate_seed_example(chart_img, ..., verdict='partially correct', error_category='conceptual')` |
+| 7 | figure | Omission | Incorrect | `generate_seed_example(fig_img, ..., verdict='incorrect', error_category='omission')` |
+| 8 | figure | Omission | Partially Correct | `generate_seed_example(fig_img, ..., verdict='partially correct', error_category='omission')` |
+| 9 | figure | Factual | Incorrect | `generate_seed_example(fig_img, ..., verdict='incorrect', error_category='factual')` |
+| 10 | figure | Factual | Partially Correct | `generate_seed_example(fig_img, ..., verdict='partially correct', error_category='factual')` |
+| 11 | figure | Conceptual | Incorrect | `generate_seed_example(fig_img, ..., verdict='incorrect', error_category='conceptual')` |
+| 12 | figure | Conceptual | Partially Correct | `generate_seed_example(fig_img, ..., verdict='partially correct', error_category='conceptual')` |
+| 13 | table | Omission | Incorrect | `generate_seed_example(table_img, ..., verdict='incorrect', error_category='omission')` |
+| 14 | table | Omission | Partially Correct | `generate_seed_example(table_img, ..., verdict='partially correct', error_category='omission')` |
+| 15 | table | Factual | Incorrect | `generate_seed_example(table_img, ..., verdict='incorrect', error_category='factual')` |
+| 16 | table | Factual | Partially Correct | `generate_seed_example(table_img, ..., verdict='partially correct', error_category='factual')` |
+| 17 | table | Conceptual | Incorrect | `generate_seed_example(table_img, ..., verdict='incorrect', error_category='conceptual')` |
+| 18 | table | Conceptual | Partially Correct | `generate_seed_example(table_img, ..., verdict='partially correct', error_category='conceptual')` |
+
+**Distribution Summary:**
+
+These are **overlapping distributions** (not additive) across 18 total exemplars:
+
+| Dimension | Count | Calculation |
+|-----------|-------|-------------|
+| **Total exemplars** | 18 | 3 figure types × 3 error categories × 2 verdicts |
+| **Per figure type** | 6 | 18 ÷ 3 (plot, figure, table) |
+| **Per error category** | 6 | 18 ÷ 3 (Omission, Factual, Conceptual) |
+| **Per verdict** | 9 | 18 ÷ 2 (Incorrect, Partially Correct) |
+
+This ensures icl.py learns all combinations during Step 6, making synthetic generation robust across different contexts and error types.
+
 **Usage**
 ```bash
 python src/seed.py
 ```
 
-**Desired Output Destination**
+**Output Destination**
 Generated exemplars should be saved to `data/seed_exemplars.json` for Step 6 (icl.py) to load dynamically during the main inference pipeline.
 
 ---
