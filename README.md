@@ -89,7 +89,7 @@ Generate 18 exemplars across three consolidated figure types (based on SPIQA Tes
 
 ### icl.py - Inference Engine
 
-**Purpose:** Generate synthetic student responses at scale using exemplars from seed.py. Takes curated exemplar set (with all 3 error types represented) and uses them to teach the LLM how to generate realistic student errors across the entire SPIQA Test-A dataset.
+**Purpose:** Augment SPIQA dataset with realistic student errors to produce **SPIQA+**. Uses exemplars from seed.py to generate synthetic student responses (incorrect/partially correct answers + structured model responses) at scale across the entire SPIQA Test-A dataset. Outputs SPIQA+ — the enhanced dataset with complete 4-tuple examples ready for evaluation research.
 
 **Inputs (4 Parameters)**
 
