@@ -124,20 +124,20 @@ exemplars = {
 | `verdict` | Model Response (Verdict) | Correct / Partially Correct / Incorrect |
 | `error_category` | Model Response (Error Category) | Omission / Factual / Conceptual / N/A |
 | `feedback` | Model Response (Feedback) | Study coach explanation (2–4 sentences) |
-| `correct_answer` | Context (supplementary) | Ground truth for validation |
+| `explanation` | Context (supplementary) | Ground truth reasoning from SPIQA |
 
 **Example Output**
 
 ```json
 {
-  "question": "How does the C-Tarone method compare to the binarization method?",
-  "answer": "The C-Tarone method has higher precision and F-measure...",
-  "reference": "1702.08694v3-Figure3-1.png",
-  "student": "The C-Tarone method is generally similar to the binarization method across all datasets.",
+  "question": "What is the relationship between BLEU score and human ranking for CCA and SMT systems?",
+  "answer": "The correlation between BLEU scores and human ranking is not high for either CCA or SMT systems.",
+  "explanation": "The passage states that the correlation between the x-axis (ranking) and y-axis (BLEU scores) for CCA is 0.3 and for the SMT system 0.31. This indicates a weak positive correlation.",
+  "reference": "1608.02784v2-Figure4-1.png",
+  "student": "For both CCA and SMT systems, there is basically no relationship between BLEU score and human ranking; the BLEU scores stay about the same regardless of the rating.",
   "verdict": "Incorrect",
-  "error_category": "Omission",
-  "feedback": "Your answer omits key details regarding the differences between the two methods. According to the figure, C-Tarone consistently has higher precision and F-measure than binarization.",
-  "correct_answer": "The C-Tarone method has higher precision and F-measure..."
+  "error_category": "Conceptual",
+  "feedback": "You're misunderstanding the overall trend in the scatter plot. Even though the points are scattered, BLEU scores for both CCA (red) and SMT (blue) tend to be higher at higher human ratings."
 }
 ```
 
