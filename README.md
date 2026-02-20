@@ -75,13 +75,13 @@ Every generated example follows a standardized **4-tuple** format matching the S
 
 **Exemplar Distribution**
 
-Target 18 exemplars covering all combinations:
+Generate 18 exemplars across three consolidated figure types (based on SPIQA Test-A breakdown):
 
-| Figure Type | Error Categories (×3) | Verdicts (×2) |
-|---|---|---|
-| plot | Omission, Factual, Conceptual | Incorrect, Partially Correct |
-| figure | Omission, Factual, Conceptual | Incorrect, Partially Correct |
-| table | Omission, Factual, Conceptual | Incorrect, Partially Correct |
+| Figure Type | Dataset Distribution | Error Categories | Verdicts | Exemplars |
+|---|---|---|---|---|
+| **Table** | 923 items (44.3%) | Omission, Factual, Conceptual | Incorrect, Partially Correct | 6 |
+| **Plot** | 585 items (28.1%) | Omission, Factual, Conceptual | Incorrect, Partially Correct | 6 |
+| **Figure** | 565 items (27.6%): Schematics (363), Photos (173), Other (40) | Omission, Factual, Conceptual | Incorrect, Partially Correct | 6 |
 
 **Result: 3 types × 3 categories × 2 verdicts = 18 exemplars**
 
