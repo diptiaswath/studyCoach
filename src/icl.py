@@ -356,7 +356,52 @@ Verdict = incorrect
 Error Category = conceptual
 Feedback = This is incorrect for two reasons. The observed error starts approximately similar to the underlying true error, not higher (see the first two data points). Also, observed error does not converge to the true error. While both errors converge as time progresses, the observed error (blue curve) is consistently lower than the underlying true error (red curve) after the third data point. While the difference between the converged error values is small (around 0.001) the observed error is an underestimation of the underlying true error.'''
 
-    ## --> TBD(Dipti): Add partially incorrect exemplars for the plots here.
+    ############ Plot - Partially Correct Exemplars ############
+
+    plot_partially_correct_omission_user = \
+'''Caption:
+Approximation errors Err(X,X*) := ||X - X*||_F / ||X*||_F for sparse PCA and NMF on synthetic data with varying column sparsity k of W and projection dimension d. The values of d correspond to 10x, 5x, and 2.5x compression respectively. Err(W_tilde, PW) measures the distance between factors in the compressed domain: low error here is necessary for accurate sparse recovery. Err(W_hat, W) measures the error after sparse recovery: the recovered factors W_hat typically incur only slightly higher error than the oracle lower bound (dotted lines) where PW is known exactly.
+
+Question:
+What is the effect of increasing the projection dimension d on the approximation error for sparse PCA and NMF?'''
+    plot_partially_correct_omission_assistant = \
+'''Student:
+As d increases, the approximation error becomes lower for both sparse PCA and NMF.
+
+Agent:
+Verdict = partially correct
+Error Category = omission
+Feedback = Your answer is partially correct because you noticed that increasing d lowers the approximation error. However, you omitted the explanation of why this happens and what the impact is on recovering the original factors. The key reason is that a higher projection dimension d enables a more accurate representation of the original data, leading to improved approximation and sparse recovery. This insight is important for fully understanding the figure.'''
+
+    plot_partially_correct_factual_user = \
+'''Caption:
+Figure 4: Scatter plot of SMT (statistical machine translation) and CCA BLEU scores versus human ratings.
+
+Question:
+What is the relationship between BLEU score and human ranking for CCA and SMT systems?'''
+    plot_partially_correct_factual_assistant = \
+'''Student:
+Higher BLEU scores are strongly associated with higher human rankings for both CCA and SMT systems, as seen in the scatter plot where points with higher BLEU scores generally correspond to higher ratings.
+
+Agent:
+Verdict = partially correct
+Error Category = factual
+Feedback = Your answer is partially correct because you noticed that BLEU scores and human rankings are being compared, but the factual error is in stating that the association is strong. The correlation values reported (0.3 for CCA and 0.31 for SMT) are quite low, indicating only a weak positive correlation. This means that, although there is a slight trend where higher BLEU scores may correspond to higher ratings, it is not a strong relationship—higher BLEU scores do not consistently equate to higher human rankings.'''
+
+    plot_partially_correct_conceptual_user = \
+'''Caption:
+Results of LSTNet in the ablation tests on the Solar-Energy, Traffic and Electricity dataset
+
+Question:
+How does the performance of LSTNet-attn vary with the horizon on the Solar-Energy dataset?'''
+    plot_partially_correct_conceptual_assistant = \
+'''Student:
+As the horizon increases on the Solar-Energy dataset, the performance of LSTNet-attn gets worse because the RMSE values get higher and the correlation goes down.
+
+Agent:
+Verdict = partially correct
+Error Category = conceptual
+Feedback = Your answer is partially correct because you correctly observed that RMSE is one measure of performance and correlation is another. However, your conceptual error is misunderstanding the direction of improvement: for the Solar-Energy dataset, lower RMSE values actually indicate better performance, while higher correlation values are also better. In the LSTNet-attn case, as the horizon increases, RMSE decreases and correlation increases, which means performance is actually improving with longer horizons, not worsening.'''
 
     ############ Table Exemplars ############
 
@@ -408,7 +453,52 @@ Verdict = incorrect
 Error Category = conceptual
 Feedback = This answer is incorrect because it misunderstands the relationship between cake complexity and the number of blanks in the partition. The table shows that while simple polygons and general polygons can be partitioned without blanks, more complex shapes (such as axes-parallel rectangles or rectilinear polygons with reflex vertices) require a larger minimum number of blanks, as indicated by nonzero formulas that grow with the cake's complexity. Thus, as the shape becomes more complex, the minimum number of blanks required also tends to increase.'''
 
-    ## --> TBD(Dipti): Add partially incorrect exemplars for the tables here.
+    ############ Table - Partially Correct Exemplars ############
+
+    table_partially_correct_omission_user = \
+'''Caption:
+Table 4: Evaluation results on response selection
+
+Question:
+Which model performs the best for response selection, and how can we tell?'''
+    table_partially_correct_omission_assistant = \
+'''Student:
+The KEHNN model performs the best because it has the highest score in R2@1.
+
+Agent:
+Verdict = partially correct
+Error Category = omission
+Feedback = Your answer is partially correct because you identified that KEHNN has the top score for one of the metrics (R2@1). However, you omitted that KEHNN actually has the highest scores across all evaluation metrics (R2@1, R10@1, R10@2, R10@5) in the table. To fully justify which model performs best, you need to consider performance across all reported metrics, not just one.'''
+
+    table_partially_correct_factual_user = \
+'''Caption:
+Table 2. Results on unsupervised monocular depth estimation using the KITTI dataset, building upon the model from "Baseline". By replacing the per-pixel loss used by Baseline with several variants of our own per-wavelet general loss function in which our loss's shape parameters are fixed, annealed, or adaptive, we see a significant performance improvement. The top three techniques are colored red, orange, and yellow for each metric.
+
+Question:
+Which method for setting the shape parameter of the proposed loss function achieved the best performance in terms of average error? How much improvement did it offer compared to the reproduced baseline?'''
+    table_partially_correct_factual_assistant = \
+'''Student:
+Ours, fixed alpha = 0 achieved the best average error and improved over the baseline by about 11%.
+
+Agent:
+Verdict = partially correct
+Error Category = factual
+Feedback = Your answer is partially correct because, although "Ours, fixed alpha = 0" does show improvement over the baseline, it is not the best performing method in terms of average error. The "adaptive alpha in (0, 2)" strategy actually achieves the lowest (best) average error, with 0.332, which is a greater improvement—about 17% over the reproduced baseline value of 0.398. Make sure to carefully compare all values and look for the lowest number in the Avg column, which represents better performance since lower is better.'''
+
+    table_partially_correct_conceptual_user = \
+'''Caption:
+Table 4: Test set accuracies (%) for all models; Match. represents test set performance on the MultiNLI genres that are also represented in the training set, Mis. represents test set performance on the remaining ones; Most freq. is a trivial 'most frequent class' baseline.
+
+Question:
+How does the performance of the ESIM model differ when trained on MNLI alone versus trained on both MNLI and SNLI combined?'''
+    table_partially_correct_conceptual_assistant = \
+'''Student:
+When trained on MNLI alone, ESIM achieves its highest accuracy on the MNLI matched and mismatched genres, but when trained on both MNLI and SNLI, the improvement is mainly in SNLI accuracy, and MNLI performance stays about the same.
+
+Agent:
+Verdict = partially correct
+Error Category = conceptual
+Feedback = Your answer is partially correct because you have noticed that ESIM's SNLI accuracy improves significantly when training data is combined, but there is a conceptual error in your comparison of MNLI results. The improvement in ESIM's SNLI performance from 60.7% (MNLI only) to 79.7% (MNLI+SNLI) is correct, but for MNLI genres, the accuracy actually shows slight changes—72.3% to 72.4% (matched) and 72.1% to 71.9% (mismatched). Make sure to interpret small differences accurately and note that improvement is primarily SNLI-specific.'''
 
     ############ Figure Exemplars ############
  
@@ -462,7 +552,52 @@ Verdict = incorrect
 Error Category = conceptual
 Feedback = This answer is incorrect because the fLSTM processes frame-level features sequentially and maintains temporal information through hidden states, but it does not explicitly determine the importance or weight of each frame for the final prediction. Instead, the Reinforced Temporal Attention (RTA) unit fw, highlighted in red in the diagram, is specifically designed to assign weights (wt) to each frame based on their relevance to the task. These weights are then used to compute a weighted sum of frame predictions, identifying which frames are most critical for re-identification. Thus, the RTA unit—not the LSTM—makes decisions about frame importance.'''
 
-    ## --> TBD(Dipti): Add partially incorrect exemplars for the figures here.
+    ############ Figure - Partially Correct Exemplars ############
+
+    figure_partially_correct_omission_user = \
+'''Caption:
+Figure 2: An overview of the Long- and Short-term Time-series network (LSTNet)
+
+Question:
+What are the different types of layers in the LSTNet model and how are they connected?'''
+    figure_partially_correct_omission_assistant = \
+'''Student:
+The LSTNet model contains a convolutional layer, a recurrent layer, and a fully connected output layer. The convolutional layer processes the input data first and passes it to the recurrent layer, which then passes its output to the fully connected layer to generate the prediction.
+
+Agent:
+Verdict = partially correct
+Error Category = omission
+Feedback = Your answer is partially correct because you identified several important layers and some connections in the LSTNet model, but you omitted key components. You did not mention the autoregressive layer, which is a crucial part of the model since it directly receives the input data and provides a linear bypass to the non-linear neural network path. Additionally, you combined the recurrent and recurrent-skip layers as just a recurrent layer, leaving out that LSTNet explicitly separates these for better capturing long-term dependencies.'''
+
+    figure_partially_correct_factual_user = \
+'''Caption:
+Cost Volumes
+
+Question:
+What is the difference between a standard cost volume and a deformable cost volume?'''
+    figure_partially_correct_factual_assistant = \
+'''Student:
+In a standard cost volume, the matching costs are computed between a neighborhood in the first image and a neighborhood in the second image directly. In a deformable cost volume, the matching costs are computed using a larger neighborhood around each location, but it uses the same locations in both images, just with a bigger region.
+
+Agent:
+Verdict = partially correct
+Error Category = factual
+Feedback = Your answer is partially correct because you acknowledge that the deformable cost volume uses a larger (dilated) neighborhood compared to the standard version. However, you missed a key distinction: in the deformable cost volume, the neighborhood in the second image is not centered at the same location as in the first image, but is instead offset by a flow vector. This offset allows the cost computation to account for motion or deformation between the two images, which is not the case in the standard cost volume.'''
+
+    figure_partially_correct_conceptual_user = \
+'''Caption:
+No single saliency map can perform best in all metrics even when the true fixation distribution is known. This problem can be solved by separating saliency models from saliency maps. a) Fixations are distributed according to a ground truth fixation density p(x, y | I) for some stimulus I. b) This ground truth density predicts different saliency maps depending on the intended metric. c) Performances of the saliency maps from b) under seven saliency metrics on a large number of fixations sampled from the model distribution in a).
+
+Question:
+What is the relationship between the ground truth fixation density and the saliency maps?'''
+    figure_partially_correct_conceptual_assistant = \
+'''Student:
+The ground truth fixation density generates a single optimal saliency map, and this map is then evaluated with different metrics. The performance of the saliency map might vary across metrics because not all metrics are equally suited, but the saliency map itself is determined just by the fixation density.
+
+Agent:
+Verdict = partially correct
+Error Category = conceptual
+Feedback = Your answer is partially correct because you recognize the central role of the ground truth fixation density and acknowledge that metric choice affects performance outcomes. However, the key conceptual error is thinking that a single optimal saliency map arises from the fixation density. In fact, each metric requires a different saliency map to achieve optimal performance—the fixation density predicts different best saliency maps depending on which metric you want to optimize. Each map is specifically tailored to its corresponding metric, which is why they look different and perform best only for their metric.'''
 
     exemplars = {
         'plot' : 
@@ -473,8 +608,9 @@ Feedback = This answer is incorrect because the fLSTM processes frame-level feat
                 (plot_incorrect_conceptual_user, plot_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1702.03584v3/1702.03584v3-Figure1-1.png')
             ], 
             'partially correct' : [
-                ## --> TBD(Dipti): Add partially incorrect exemplars for the plots here.
-
+                (plot_partially_correct_omission_user, plot_partially_correct_omission_assistant, 'data/test-A/SPIQA_testA_Images/1706.08146v3/1706.08146v3-Figure2-1.png'),
+                (plot_partially_correct_factual_user, plot_partially_correct_factual_assistant, 'data/test-A/SPIQA_testA_Images/1608.02784v2/1608.02784v2-Figure4-1.png'),
+                (plot_partially_correct_conceptual_user, plot_partially_correct_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1703.07015v3/1703.07015v3-Figure5-1.png')
             ]
         },
         'table' : 
@@ -485,8 +621,9 @@ Feedback = This answer is incorrect because the fLSTM processes frame-level feat
                 (table_incorrect_conceptual_user, table_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1603.00286v5/1603.00286v5-Table1-1.png')
             ], 
             'partially correct' : [
-                ## --> TBD(Dipti): Add partially incorrect exemplars for the tables here.
-
+                (table_partially_correct_omission_user, table_partially_correct_omission_assistant, 'data/test-A/SPIQA_testA_Images/1611.04684v1/1611.04684v1-Table4-1.png'),
+                (table_partially_correct_factual_user, table_partially_correct_factual_assistant, 'data/test-A/SPIQA_testA_Images/1701.03077v10/1701.03077v10-Table2-1.png'),
+                (table_partially_correct_conceptual_user, table_partially_correct_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1704.05426v4/1704.05426v4-Table4-1.png')
             ]
         },
         'figure' : 
@@ -497,8 +634,9 @@ Feedback = This answer is incorrect because the fLSTM processes frame-level feat
                 (figure_incorrect_conceptual_user, figure_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1705.09882v2/1705.09882v2-Figure3-1.png')
             ], 
             'partially correct' : [
-                ## --> TBD(Dipti): Add partially incorrect exemplars for the figures here.
-
+                (figure_partially_correct_omission_user, figure_partially_correct_omission_assistant, 'data/test-A/SPIQA_testA_Images/1703.07015v3/1703.07015v3-Figure2-1.png'),
+                (figure_partially_correct_factual_user, figure_partially_correct_factual_assistant, 'data/test-A/SPIQA_testA_Images/1802.07351v2/1802.07351v2-Figure2-1.png'),
+                (figure_partially_correct_conceptual_user, figure_partially_correct_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1704.08615v2/1704.08615v2-Figure1-1.png')
             ]
         }
     }
