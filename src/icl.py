@@ -11,7 +11,7 @@ Does the following:
     - Runs the inference and updates the JSON with model outputs (student answer, verdict, error category, feedback).
 
 Example usage:
-python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images --output data/SPIQA_testA_part1_output.json
+python icl.py test-A/SPIQA_testA_part1.json test-A/SPIQA_testA_Images --output test-A/SPIQA_testA_part1_output.json
 """
 from __future__ import annotations
 
@@ -24,6 +24,8 @@ from pathlib import Path
 from string import Template
 from typing import Dict, List, Any
 
+ANSWER_TYPE = "incorrect"
+ANSWER_TYPE_DESCRIPTION = ""
 
 FACTUAL, OMISSION, CONCEPTUAL = (0, 0, 0)
 DEFAULT_SYSTEM_PROMPT = \
@@ -38,17 +40,16 @@ Factual: An error due to student giving factual data which contradicts the infor
 Conceptual: An error due to student misunderstanding a concept or using figure/chat/table data to come to a wrong conclusion
 
 You are given a question (and the associated image and caption) and your task is to generate 
-  1. A wrong answer a student is likely to give when posed the question
+  1. A $ANSWER_TYPE answer a student is likely to give when posed the question
   2. The study coach feedback on why the student answer is wrong. 
+  
+$ANSWER_TYPE_DESCRIPTION
 
 Follow below guidelines
 
 - Use examples given above to figure out what type of error (i.e.: Omission, Factual, Conceptual) the student is most likely to make for the given question.
-- You've generated $FACTUAL factual, $OMISSION omission and $CONCEPTUAL conceptual error examples so far. Try to balance the error types across all examples. 
+- Assume that you have previously generated $FACTUAL factual, $OMISSION omission and $CONCEPTUAL conceptual error examples so far. Try to balance the error types across all examples. 
   For instance, if you have already generated 2 examples of Omission and 0 examples of Factual and Conceptual, then for the current example you should try to generate a Factual or Conceptual error if it makes sense for the question.
-- At the end of the instructions you are given how many examples of each error type (i.e., Omission, Factual, Conceptual) you've generated before.
-  When you generate the current example, try to balance the error types across all examples. For instance, if you have already generated 2 examples of Omission 
-  and 0 examples of Factual and Conceptual, then for the current example you should try to generate a Factual or Conceptual error if it makes sense for the question. 
 - You need to generate the wrong answer having one of the errors above (i.e.: Omission, Factual, Conceptual).
 - Use a second person instructional tone in study coach feedback. Aim to explain what the student's misunderstanding or confusion is. 
 - Make the feedback constructive but as concise as possible without missing any important points which aids student understanding.
@@ -61,7 +62,7 @@ Student:
 <Wrong student answer>
 
 Agent:
-Verdict = Incorrect
+Verdict = $ANSWER_TYPE 
 Error Category = <Error type - One of Omission, Factual, Conceptual> 
 Feedback = <Study coach explanation on why student answer is wrong> 
 ''')
@@ -118,43 +119,6 @@ def parse_inference_output(output_text: str) -> Dict[str, str]:
         "feedback": feedback if feedback else "N/A",
     }
 
-def add_inference_results_to_json(
-    json_path: str | Path,
-    inference_outputs: List[str],
-    output_path: str | Path | None = None,
-) -> Dict[str, Any]:
-    """Update a JSON with inference outputs.
-
-    The inference outputs must be ordered to match the iteration order used in
-    build_inference_calls (sorted paper keys, then QA order).
-    """
-    json_path = Path(json_path)
-    output_path = Path(output_path) if output_path is not None else json_path
-
-    data = load_json(json_path)
-
-    output_idx = 0
-    for paper_key in sorted(data.keys()):
-        paper = data[paper_key]
-        qa_list = paper.get("qa", [])
-        for qa in qa_list:
-            if output_idx >= len(inference_outputs):
-                raise ValueError("Not enough inference outputs for all QA items.")
-
-            parsed = parse_inference_output(inference_outputs[output_idx])
-            qa["student"] = parsed["student"]
-            qa["verdict"] = parsed["verdict"]
-            qa["error_category"] = parsed["error_category"]
-            qa["feedback"] = parsed["feedback"]
-
-            output_idx += 1
-
-    if output_idx != len(inference_outputs):
-        raise ValueError("Extra inference outputs provided beyond QA items.")
-
-    output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    return data
-
 def to_data_url(path: str) -> str:
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -196,7 +160,7 @@ def run_inference(
     exemplars: dict
     ):
     """Run inference and inline-update JSON with model outputs."""
-    global FACTUAL, OMISSION, CONCEPTUAL
+    global FACTUAL, OMISSION, CONCEPTUAL, ANSWER_TYPE, ANSWER_TYPE_DESCRIPTION
 
     json_path = Path(json_path)
     images_root = Path(images_root)
@@ -208,10 +172,23 @@ def run_inference(
 
     data = load_json(json_path)
 
-    for paper_key in sorted(data.keys()):
+    # num_papers = len(data)
+    num_papers = 9
+    partially_correct_split, incorrect_split, correct_split = num_papers // 3, num_papers * 2 // 3, num_papers
+    for paper_idx, paper_key in enumerate(sorted(data.keys()), 1):
         print('++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
         print(f"Processing paper - {paper_key}")
         print('++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n')
+
+        if paper_idx <= partially_correct_split:
+            ANSWER_TYPE = "partially correct"
+            ANSWER_TYPE_DESCRIPTION = "A partially correct answer is an answer which gets some aspects correct with respect to the question posed in the context of the provided image and caption. But not all aspects are correct."
+        elif paper_idx <= incorrect_split:
+            ANSWER_TYPE = "incorrect"
+            ANSWER_TYPE_DESCRIPTION = "An incorrect answer is an answer which is incorrect with respect to the question posed in the context of the provided image and caption."
+        else:
+            ANSWER_TYPE = "correct"
+            ANSWER_TYPE_DESCRIPTION = "A correct answer is an answer which is provides the accurate and complete information to the question posed in the context of the provided image and caption."
 
         paper = data[paper_key]
         all_figures = paper.get("all_figures", {})
@@ -256,42 +233,51 @@ def run_inference(
             # texts.append("\n\n" + user_input)
             # prompt = "\n".join(texts) 
 
-            call = {
-                    "model": DEFAULT_MODEL,
-                    "instructions": DEFAULT_SYSTEM_PROMPT.safe_substitute(FACTUAL=FACTUAL, OMISSION=OMISSION, CONCEPTUAL=CONCEPTUAL),
-                    "input": messages,
-                    "metadata": {
-                        "paper": paper_key,
-                        "qa_index": f'{qa_idx}',
-                    },
-                }
+            # Only run inference for incorrect and partially correct answers since correct answers can be sourced from the SPIQA ground truth answers.
+            if ANSWER_TYPE != "correct":
+                call = {
+                        "model": DEFAULT_MODEL,
+                        "instructions": DEFAULT_SYSTEM_PROMPT.safe_substitute(FACTUAL=FACTUAL, OMISSION=OMISSION, CONCEPTUAL=CONCEPTUAL, ANSWER_TYPE=ANSWER_TYPE, ANSWER_TYPE_DESCRIPTION=ANSWER_TYPE_DESCRIPTION),
+                        "input": messages,
+                        "metadata": {
+                            "paper": paper_key,
+                            "qa_index": f'{qa_idx}',
+                        },
+                    }
 
-            print(f'\n--------------------------------- Question {qa_counter} ---------------------------------')
-            print('Prompt>\n')
-            print(call["instructions"] + "\n\n" + user_input)
-            print('==============================================================================')
+                print(f'\n--------------------------------- Question {qa_counter} ---------------------------------')
+                print('Prompt>\n')
+                print(call["instructions"] + "\n\n" + user_input)
+                print('==============================================================================')
+                
+                resp = client.responses.create(**call)
+
+                print('Output>\n')
+                print(f'{resp.output_text}')
+                print('------------------------------------------------------------------------------\n')
+
+                if "Factual" in resp.output_text:
+                    FACTUAL += 1 
+                elif "Omission" in resp.output_text:
+                    OMISSION += 1
+                elif "Conceptual" in resp.output_text:
+                    CONCEPTUAL += 1
+                qa_counter += 1
+
+                parsed = parse_inference_output(resp.output_text)
+                qa["student"] = parsed["student"]
+                qa["verdict"] = parsed["verdict"]
+                qa["error_category"] = parsed["error_category"]
+                qa["feedback"] = parsed["feedback"]
+                
+            else:
+                qa["student"] = qa.get("answer", "").strip()
+                qa["student"] = qa["student"] + " " + qa.get("explanation", "").strip() if qa["student"].endswith(".") else qa["student"] + ". " + qa.get("explanation", "").strip()
+                qa["verdict"] = "correct"
+                qa["error_category"] = "N/A"
+                qa["feedback"] = "Your answer is correct. Great job!"
             
-            resp = client.responses.create(**call)
-
-            print('Output>\n')
-            print(f'{resp.output_text}')
-            print('------------------------------------------------------------------------------\n')
-
-            if "Factual" in resp.output_text:
-                FACTUAL += 1 
-            elif "Omission" in resp.output_text:
-                OMISSION += 1
-            elif "Conceptual" in resp.output_text:
-                CONCEPTUAL += 1
-            qa_counter += 1
-
-            parsed = parse_inference_output(resp.output_text)
-            qa["student"] = parsed["student"]
-            qa["verdict"] = parsed["verdict"]
-            qa["error_category"] = parsed["error_category"]
-            qa["feedback"] = parsed["feedback"]
-            
-        if FACTUAL > 0 and OMISSION > 0 and CONCEPTUAL > 0:
+        if FACTUAL > 4 and OMISSION > 4 and CONCEPTUAL > 4: 
             break
 
     print(f"\nFactual: {FACTUAL}")
