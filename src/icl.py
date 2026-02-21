@@ -11,7 +11,7 @@ Does the following:
     - Runs the inference and updates the JSON with model outputs (student answer, verdict, error category, feedback).
 
 Example usage:
-python icl.py test-A/SPIQA_testA_part1.json test-A/SPIQA_testA_Images --output test-A/SPIQA_testA_part1_output.json
+python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images --output data/test-A/SPIQA_testA_part1_output.json
 """
 from __future__ import annotations
 
@@ -35,9 +35,9 @@ Students are required to answer a question based on an image (and its caption) o
 You are given examples questions and student answers where students have made particular a type of mistake
 as described below.
 
-Omission: An error due to omitting one or more key points in the answer
-Factual: An error due to student giving factual data which contradicts the information in the figure/chart/table, or misreading the figure/chart/table (e.g., misreading axes, legends, trends, etc.) 
-Conceptual: An error due to student misunderstanding a concept or using figure/chat/table data to come to a wrong conclusion
+omission: An error due to omitting one or more key points in the answer
+factual: An error due to student giving factual data which contradicts the information in the figure/chart/table, or misreading the figure/chart/table (e.g., misreading axes, legends, trends, etc.)
+conceptual: An error due to student misunderstanding a concept or using figure/chat/table data to come to a wrong conclusion
 
 You are given a question (and the associated image and caption) and your task is to generate 
   1. A $ANSWER_TYPE answer a student is likely to give when posed the question
@@ -47,10 +47,10 @@ $ANSWER_TYPE_DESCRIPTION
 
 Follow below guidelines
 
-- Use examples given above to figure out what type of error (i.e.: Omission, Factual, Conceptual) the student is most likely to make for the given question.
+- Use examples given above to figure out what type of error (i.e.: omission, factual, conceptual) the student is most likely to make for the given question.
 - Assume that you have previously generated $FACTUAL factual, $OMISSION omission and $CONCEPTUAL conceptual error examples so far. Try to balance the error types across all examples. 
-  For instance, if you have already generated 2 examples of Omission and 0 examples of Factual and Conceptual, then for the current example you should try to generate a Factual or Conceptual error if it makes sense for the question.
-- You need to generate the wrong answer having one of the errors above (i.e.: Omission, Factual, Conceptual).
+  For instance, if you have already generated 2 examples of omission and 0 examples of factual and conceptual, then for the current example you should try to generate a factual or conceptual error if it makes sense for the question.
+- You need to generate the wrong answer having one of the errors above (i.e.: omission, factual, conceptual).
 - Use a second person instructional tone in study coach feedback. Aim to explain what the student's misunderstanding or confusion is. 
 - Make the feedback constructive but as concise as possible without missing any important points which aids student understanding.
 - Do not repeat information. 
@@ -63,7 +63,7 @@ Student:
 
 Agent:
 Verdict = $ANSWER_TYPE 
-Error Category = <Error type - One of Omission, Factual, Conceptual> 
+Error Category = <Error type - One of omission, factual, conceptual>
 Feedback = <Study coach explanation on why student answer is wrong> 
 ''')
 DEFAULT_MODEL = "gpt-5.1"
@@ -207,12 +207,11 @@ def run_inference(
             figure_type = figure_details.get("figure_type", "")
             figure_category = figure_content_type if "N/A" in figure_type else figure_type
             
-            if figure_category not in exemplars:
-                continue
-
             figure_category = figure_category.strip()
             if figure_category not in ['plot', 'table', 'figure']:
                 figure_category = 'figure'
+
+            assert figure_category in exemplars, f"Figure category {figure_category} not found in exemplars. Please check the figure content type and figure type in the JSON and ensure it is one of 'plot', 'table' or 'figure'."
 
             # Build the message list (system prompt passed via top-level instructions)
             messages, texts = build_exemplar_messages(exemplars[figure_category])
@@ -256,11 +255,11 @@ def run_inference(
                 print(f'{resp.output_text}')
                 print('------------------------------------------------------------------------------\n')
 
-                if "Factual" in resp.output_text:
+                if "factual" in resp.output_text:
                     FACTUAL += 1 
-                elif "Omission" in resp.output_text:
+                elif "omission" in resp.output_text:
                     OMISSION += 1
-                elif "Conceptual" in resp.output_text:
+                elif "conceptual" in resp.output_text:
                     CONCEPTUAL += 1
                 qa_counter += 1
 
@@ -272,12 +271,12 @@ def run_inference(
                 
             else:
                 qa["student"] = qa.get("answer", "").strip()
-                qa["student"] = qa["student"] + " " + qa.get("explanation", "").strip() if qa["student"].endswith(".") else qa["student"] + ". " + qa.get("explanation", "").strip()
+                qa["student"] = qa["student"] if qa["student"].endswith(".") else qa["student"] + "."
                 qa["verdict"] = "correct"
                 qa["error_category"] = "N/A"
                 qa["feedback"] = "Your answer is correct. Great job!"
             
-        if FACTUAL > 4 and OMISSION > 4 and CONCEPTUAL > 4: 
+        if FACTUAL > 15 and OMISSION > 15 and CONCEPTUAL > 15:
             break
 
     print(f"\nFactual: {FACTUAL}")
@@ -295,72 +294,181 @@ if __name__ == "__main__":
     parser.add_argument("images_root", help="Path to images root folder")
     parser.add_argument("--output", required=True, help="Path to write updated JSON output")
     args = parser.parse_args()
-    
-    chart_incorrect_omission_user = \
+
+    ############ Plot Exemplars ############
+
+    plot_incorrect_factual_user = \
 '''Caption:
-Figure 3: Results on real data. Regarding the scale of precision and F-measure, see the comment at the last paragraph just before Section 3. 
-The y-axis is in logarithmic scale. C-Tarone is shown in red and the binarization approach is shown in blue. 
-Higher (taller) is better in precision, recall, and F-measure, while lower is better in running time.
+Goodput: CoAP vs. HTTP/TCP.
 
 Question:
-How does the C-Tarone method compare to the binarization method in terms of precision, recall, F-measure, and running time?'''
-    chart_incorrect_omission_assistant = \
+What is the difference in response time between CoAP and HTTP for a response size of 50 KiB?'''
+    plot_incorrect_factual_assistant = \
 '''Student:
-The C-Tarone method is generally similar to the binarization method across all datasets.
+Difference is around 5 seconds, with HTTP being slower.
 
 Agent:
-Verdict = Incorrect
-Error Category = Omission
-Feedback = Your answer omits key details regarding the differences between the two methods. 
-You should specify how C-Tarone compares to binarization in terms of precision, recall, F-measure, and running time. 
-According to the figure, C-Tarone consistently has higher precision and F-measure than binarization across all datasets. 
-Its recall is generally better or at least competitive, and its running time is also competitive with binarization.'''
+Verdict = incorrect
+Error Category = factual
+Feedback = The answer is incorrect for two reasons. Firstly, the difference is approximately 15 seconds. You probably read the chart (b) y-axis scale wrong. It is easier to determine this difference at 50KB using chart (a). Secondly, HTTP has the lower response time of around 25 seconds while CoAP is around 40 seconds, meaning that HTTP is actually faster (less response time is faster!).'''
 
-    chart_incorrect_factual_user = \
+
+    plot_incorrect_omission_user = \
 '''Caption:
-Experiments with synthetic data: error is reported against the size of the conditional probability table (lower is better). 
-The error is the estimated total variation distance to the ground truth Bayes net. We use the error of MLE without noise as our benchmark. 
-We plot the performance of our algorithm (Filtering), empirical mean with noise (MLE), and RANSAC. 
-We report two settings: the underlying structure of the Bayes net is a random tree (left) or a random graph (right).
+The average number of k-hop neighbors that two items share in the KG w.r.t. whether they have common raters in (a) MovieLens-1M, (b) Book-Crossing, and (c) BingNews datasets. (d) The ratio of the two average numberswith different hops.
+
+Question:
+How does the number of common k-hop neighbors change as the hop distance increases for items with and without common raters?'''
+    plot_incorrect_omission_assistant = \
+'''Student:
+As the hop distance increases, the number of common k-hop neighbors changes for both items with and without common raters.
+
+Agent:
+Verdict = incorrect
+Error Category = omission
+Feedback = The answer is incomplete as you did not specify how the number of common k-hop neighbors changes — it increases as hop distance increases for both types of items. Additionally, the items with common raters consistently have more common neighbors than items without common raters across all datasets and hop distances. However, the ratio of common neighbors for both item types at a given hop tends lower when the number of hops increases.'''
+
+    plot_incorrect_conceptual_user = \
+'''Caption:
+Figure 1: Two error rates as a function of CPU time on UCR Non-Invasive Fetal ECG Thorax1 dataset.
+
+Question:
+How does the observed error compare to the underlying true error as CPU time increases?'''
+    plot_incorrect_conceptual_assistant = \
+'''Student:
+The observed error is initially higher than the underlying true error, but it quickly decreases and converges to the true error as CPU time increases.
+
+Agent:
+Verdict = incorrect
+Error Category = conceptual
+Feedback = This is incorrect for two reasons. The observed error starts approximately similar to the underlying true error, not higher (see the first two data points). Also, observed error does not converge to the true error. While both errors converge as time progresses, the observed error (blue curve) is consistently lower than the underlying true error (red curve) after the third data point. While the difference between the converged error values is small (around 0.001) the observed error is an underestimation of the underlying true error.'''
+
+    ## --> TBD(Dipti): Add partially incorrect exemplars for the plots here.
+
+    ############ Table Exemplars ############
+
+    table_incorrect_factual_user = \
+'''Caption:
+Table 1. Single-shot and multi-shot person re-identification performance on the test set of DPI-T, BIWI and IIT PAVIS.
+Dashes indicate that no published result is available.
 
 Question: 
-How does the performance of the Filtering algorithm compare to the performance of MLE with noise?'''
-    chart_incorrect_factual_assistant = \
+Which method achieves the highest Top-1 Accuracy for multi-shot person re-identification on the BIWI dataset, and how does it compare to the best single-shot method on the same dataset?'''
+    table_incorrect_factual_assistant = \
 '''Student: 
-Filtering performs about the same as MLE with noise since their error lines overlap for both the random tree and random graph cases.
+The authors method with RTA attention does best for the multi-shot task with 76.3% accuracy. It has a better accuracy than the best single-shot method which is the authors proposed method using CNN. That only has an accuracy of 66.8%.
 
 Agent:
-Verdict = Incorrect
-Error Category = Factual
-Feedback = This answer is incorrect because it misreads the figure. 
-When looking at both plots, the Filtering algorithm (black, xx line) always lies below the red line for MLE with noise, indicating Filtering consistently achieves lower error.
-In this chart, a lower value on the y-axis (Estimated d_{TV}) means better performance.
-So, Filtering clearly outperforms MLE with noise for all numbers of parameters in both the random tree (left) and random graph (right) experiments.'''
+Verdict = incorrect
+Error Category = factual
+Feedback = This answer is incorrect mainly due to the fact that you quoted the wrong data-set numbers. Above answer would be correct for DPI-T dataset but the question asks the comparison with respect to the BIWI dataset. For BIWI dataset authors method with RTA attention is the best performer with 50% Top-1 accuracy and performs much better than the best single-shot performer which is the 3D-RAM method that only achieves 30.1% Top-1 accuracy.'''
 
-    chart_incorrect_conceptual_user = \
+    table_incorrect_omission_user = \
 '''Caption:
-Training with different gradient approximations: validation loss with a simplified advection (red), and the correct gradient from forward advection (green).
-The simplified version does not converge.
+Table 2: Scene description evaluation results on the test set, comparing the systems from Ortiz et al. to our CCA inference algorithm (the first six results are reported from the Ortiz et al. paper).
+The CCA result uses m = 120 and η = 0.05, tuned on the development set.
+See text for details about each of the first six baselines.
 
 Question: 
-Which gradient approximation method trains better?'''
-    chart_incorrect_conceptual_assistant = \
+Which system from Ortiz et al. achieved the highest BLEU and METEOR scores, and how does it compare to the CCA inference algorithm in terms of performance?'''
+    table_incorrect_omission_assistant = \
 '''Student: 
-The naive gradient approximation trains better because its loss stays high and stable, which I think means it’s not overfitting, while the corrected gradient’s loss keeps dropping and fluctuates more.
+The Template method.
 
 Agent:
-Verdict = Incorrect
-Error Category = Conceptual
-Feedback = Your answer is incorrect because a higher loss means the model is performing worse, not better. 
-The y-axis shows loss, and lower values indicate better model performance. The "naive gradient" loss stays high and does not decrease, showing it doesn’t converge or improve with training. 
-The "corrected gradient" results in a steadily decreasing loss, reaching much lower values, which demonstrates better training and generalization. 
-The goal is to minimize loss, not keep it high.'''
+Verdict = incorrect
+Error Category = omission
+Feedback = Your answer is incorrect for two reasons. Firstly, the SMT method has the best BLUE(43.7) and METEOR(36.6) scores. Secondly, the answer didn’t compare it against the CCA method. The CCA method has much lower BLEU(26.1) and METEOR(25.6) scores than the SMT method.'''
+
+    table_incorrect_conceptual_user = \
+'''Caption:
+Table 1 Worst-case number of blanks in a maximal arrangement of pairwise-disjoint Spieces contained in a cake C. From Akopyan and Segal-Halevi (2018).
+
+Question:
+What can you say about the relationship between the complexity of a cake shape and the minimum number of blanks required for a complete partition into smaller pieces?'''
+    table_incorrect_conceptual_assistant = \
+'''Student:
+The number of blanks doesn’t depend on the complexity of the cake shape; as long as you use the right kind of pieces, you can always partition the cake without any blanks.
+
+Agent:
+Verdict = incorrect
+Error Category = conceptual
+Feedback = This answer is incorrect because it misunderstands the relationship between cake complexity and the number of blanks in the partition. The table shows that while simple polygons and general polygons can be partitioned without blanks, more complex shapes (such as axes-parallel rectangles or rectilinear polygons with reflex vertices) require a larger minimum number of blanks, as indicated by nonzero formulas that grow with the cake's complexity. Thus, as the shape becomes more complex, the minimum number of blanks required also tends to increase.'''
+
+    ## --> TBD(Dipti): Add partially incorrect exemplars for the tables here.
+
+    ############ Figure Exemplars ############
+ 
+    figure_incorrect_factual_user = \
+'''Caption:
+Overview of Step 2 of TFBA. Induction of higher-order schemata from the tri-partite graph formed from the columns of matrices A, B, and C. 
+Triangles in this graph (solid) represent a 3-ary schema, n-ary schemata for n > 3 can be induced from the 3-ary schemata. 
+Please refer to Section 3.2.2 for details.
+
+Question:
+What does the induced schema Win <A4, B3, C2> represent?'''
+    figure_incorrect_factual_assistant = \
+'''Student:
+Player B3 won tournament C2, defeating player A4.
+
+Agent:
+Verdict = incorrect
+Error Category = factual
+Feedback = Your answer reverses the roles of the players in the schema. In the induction of the schema Win <A4, B3, C2>, A4 is listed first, which consistently represents the winner, while B3 is the defeated player, and C2 is the tournament. It is critical to follow the schema’s structure, where the first argument is the winner. So, Win <A4, B3, C2> specifically means that player A4 won tournament C2, with B3 being the player defeated by A4.'''
+
+    figure_incorrect_omission_user = \
+'''Caption:
+Figure 2: The dialog history and KB tuples stored in the memory have memory cell representations and token representations.
+The encoder understands the last user utterance using only the memory cell representations.
+The decoder generates the next response using both representations.
+
+Question:
+How does the encoder understand the last user utterance?'''
+    figure_incorrect_omission_assistant = \
+'''Student:
+It uses the dialog history to understand the last user utterance.
+
+Agent:
+Verdict = incorrect
+Error Category = omission
+Feedback = Your answer is incomplete because it leaves out a key detail: the encoder does not just use the dialog history, but specifically uses the memory cell representations of both the dialog history and the KB (knowledge base) tuples.'''
+
+    figure_incorrect_conceptual_user = \
+'''Caption:
+Fig. 3. Our model architecture consists of a frame-level feature embedding fCNN , which provides input to both a recurrent layer fLSTM and the Reinforced Temporal Attention (RTA) unit fw (highlighted in red).
+The classifier is attached to the hidden state ht and its video prediction is the weighted sum of single-frame predictions, where the weights wt for each frame t are predicted by the RTA unit.
+
+Question:
+Which part of the model is responsible for deciding which frames are most important for the re-identification task?'''
+    figure_incorrect_conceptual_assistant = \
+'''Student:
+The fLSTM (recurrent layer).
+
+Agent:
+Verdict = incorrect
+Error Category = conceptual
+Feedback = This answer is incorrect because the fLSTM processes frame-level features sequentially and maintains temporal information through hidden states, but it does not explicitly determine the importance or weight of each frame for the final prediction. Instead, the Reinforced Temporal Attention (RTA) unit fw, highlighted in red in the diagram, is specifically designed to assign weights (wt) to each frame based on their relevance to the task. These weights are then used to compute a weighted sum of frame predictions, identifying which frames are most critical for re-identification. Thus, the RTA unit—not the LSTM—makes decisions about frame importance.'''
+
+    ## --> TBD(Dipti): Add partially incorrect exemplars for the figures here.
 
     exemplars = {
         'plot' : [
-            (chart_incorrect_omission_user, chart_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1702.08694v3/1702.08694v3-Figure3-1.png'),
-            (chart_incorrect_factual_user, chart_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1606.07384v2/1606.07384v2-Figure1-1.png'),
-            (chart_incorrect_conceptual_user, chart_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1704.07854v4/1704.07854v4-Figure15-1.png')
+            (plot_incorrect_factual_user, plot_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1811.02721v3/1811.02721v3-Figure8-1.png'),
+            (plot_incorrect_omission_user, plot_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1803.03467v4/1803.03467v4-Figure4-1.png'),
+            (plot_incorrect_conceptual_user, plot_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1702.03584v3/1702.03584v3-Figure1-1.png')
+            ## --> TBD(Dipti): Add partially incorrect exemplars for the plots here.
+        ],
+        'table' : [
+            (table_incorrect_factual_user, table_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1705.09882v2/1705.09882v2-Table1-1.png'),
+            (table_incorrect_omission_user, table_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1608.02784v2/1608.02784v2-Table2-1.png'),
+            (table_incorrect_conceptual_user, table_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1603.00286v5/1603.00286v5-Table1-1.png')
+            ## --> TBD(Dipti): Add partially incorrect exemplars for the tables here.
+        ],
+        'figure' : [
+            (figure_incorrect_factual_user, figure_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1805.01216v3/1805.01216v3-Figure2-1.png'),
+            (figure_incorrect_omission_user, figure_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1805.01216v3/1805.01216v3-Figure2-1.png'),
+            (figure_incorrect_conceptual_user, figure_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1705.09882v2/1705.09882v2-Figure3-1.png')
+            ## --> TBD(Dipti): Add partially incorrect exemplars for the figures here.
         ]
     }
 
