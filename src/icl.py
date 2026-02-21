@@ -213,27 +213,27 @@ def run_inference(
 
             assert figure_category in exemplars, f"Figure category {figure_category} not found in exemplars. Please check the figure content type and figure type in the JSON and ensure it is one of 'plot', 'table' or 'figure'."
 
-            # Build the message list (system prompt passed via top-level instructions)
-            messages, texts = build_exemplar_messages(exemplars[figure_category])
-
-            # Final user message with placeholders for unspecified content
-            caption = figure_details.get("caption", "").strip() 
-            user_input = f'Caption:\n{caption}\nQuestion:\n{question}'
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": f"{user_input}"},
-                        {"type": "input_image", "image_url": to_data_url(figure_path)}
-                    ],
-                }
-            )
-
-            # texts.append("\n\n" + user_input)
-            # prompt = "\n".join(texts) 
-
             # Only run inference for incorrect and partially correct answers since correct answers can be sourced from the SPIQA ground truth answers.
             if ANSWER_TYPE != "correct":
+                # Build the message list (system prompt passed via top-level instructions)
+                messages, texts = build_exemplar_messages(exemplars[figure_category][ANSWER_TYPE])
+
+                # Final user message with placeholders for unspecified content
+                caption = figure_details.get("caption", "").strip() 
+                user_input = f'Caption:\n{caption}\nQuestion:\n{question}'
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": f"{user_input}"},
+                            {"type": "input_image", "image_url": to_data_url(figure_path)}
+                        ],
+                    }
+                )
+
+                # texts.append("\n\n" + user_input)
+                # prompt = "\n".join(texts) 
+
                 call = {
                         "model": DEFAULT_MODEL,
                         "instructions": DEFAULT_SYSTEM_PROMPT.safe_substitute(FACTUAL=FACTUAL, OMISSION=OMISSION, CONCEPTUAL=CONCEPTUAL, ANSWER_TYPE=ANSWER_TYPE, ANSWER_TYPE_DESCRIPTION=ANSWER_TYPE_DESCRIPTION),
@@ -452,24 +452,42 @@ Feedback = This answer is incorrect because the fLSTM processes frame-level feat
     ## --> TBD(Dipti): Add partially incorrect exemplars for the figures here.
 
     exemplars = {
-        'plot' : [
-            (plot_incorrect_factual_user, plot_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1811.02721v3/1811.02721v3-Figure8-1.png'),
-            (plot_incorrect_omission_user, plot_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1803.03467v4/1803.03467v4-Figure4-1.png'),
-            (plot_incorrect_conceptual_user, plot_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1702.03584v3/1702.03584v3-Figure1-1.png')
-            ## --> TBD(Dipti): Add partially incorrect exemplars for the plots here.
-        ],
-        'table' : [
-            (table_incorrect_factual_user, table_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1705.09882v2/1705.09882v2-Table1-1.png'),
-            (table_incorrect_omission_user, table_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1608.02784v2/1608.02784v2-Table2-1.png'),
-            (table_incorrect_conceptual_user, table_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1603.00286v5/1603.00286v5-Table1-1.png')
-            ## --> TBD(Dipti): Add partially incorrect exemplars for the tables here.
-        ],
-        'figure' : [
-            (figure_incorrect_factual_user, figure_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1805.01216v3/1805.01216v3-Figure2-1.png'),
-            (figure_incorrect_omission_user, figure_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1805.01216v3/1805.01216v3-Figure2-1.png'),
-            (figure_incorrect_conceptual_user, figure_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1705.09882v2/1705.09882v2-Figure3-1.png')
-            ## --> TBD(Dipti): Add partially incorrect exemplars for the figures here.
-        ]
+        'plot' : 
+        { 
+            'incorrect' : [
+                (plot_incorrect_factual_user, plot_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1811.02721v3/1811.02721v3-Figure8-1.png'),
+                (plot_incorrect_omission_user, plot_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1803.03467v4/1803.03467v4-Figure4-1.png'),
+                (plot_incorrect_conceptual_user, plot_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1702.03584v3/1702.03584v3-Figure1-1.png')
+            ], 
+            'partially correct' : [
+                ## --> TBD(Dipti): Add partially incorrect exemplars for the plots here.
+
+            ]
+        },
+        'table' : 
+        { 
+            'incorrect' : [
+                (table_incorrect_factual_user, table_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1705.09882v2/1705.09882v2-Table1-1.png'),
+                (table_incorrect_omission_user, table_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1608.02784v2/1608.02784v2-Table2-1.png'),
+                (table_incorrect_conceptual_user, table_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1603.00286v5/1603.00286v5-Table1-1.png')
+            ], 
+            'partially correct' : [
+                ## --> TBD(Dipti): Add partially incorrect exemplars for the tables here.
+
+            ]
+        },
+        'figure' : 
+        { 
+            'incorrect' : [
+                (figure_incorrect_factual_user, figure_incorrect_factual_assistant, 'data/test-A/SPIQA_testA_Images/1805.01216v3/1805.01216v3-Figure2-1.png'),
+                (figure_incorrect_omission_user, figure_incorrect_omission_assistant, 'data/test-A/SPIQA_testA_Images/1805.01216v3/1805.01216v3-Figure2-1.png'),
+                (figure_incorrect_conceptual_user, figure_incorrect_conceptual_assistant, 'data/test-A/SPIQA_testA_Images/1705.09882v2/1705.09882v2-Figure3-1.png')
+            ], 
+            'partially correct' : [
+                ## --> TBD(Dipti): Add partially incorrect exemplars for the figures here.
+
+            ]
+        }
     }
 
     updated_json = run_inference(args.json, args.images_root, exemplars=exemplars)
