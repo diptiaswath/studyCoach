@@ -172,9 +172,15 @@ def run_inference(
 
     data = load_json(json_path)
 
-    # num_papers = len(data)
-    num_papers = 9
-    partially_correct_split, incorrect_split, correct_split = num_papers // 3, num_papers * 2 // 3, num_papers
+    stats = {
+        'correct' : 0, 
+        'incorrect' : {'factual' : 0, 'omission' : 0, 'conceptual' : 0}, 
+        'partially correct' : {'factual' : 0, 'omission' : 0, 'conceptual' : 0}
+    }
+    paper_count = len(data.keys())
+    total_qa_count = 0
+
+    partially_correct_split, incorrect_split, correct_split = paper_count // 3, paper_count * 2 // 3, paper_count
     for paper_idx, paper_key in enumerate(sorted(data.keys()), 1):
         print('++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
         print(f"Processing paper - {paper_key}")
@@ -196,6 +202,7 @@ def run_inference(
         qa_list = paper.get("qa", [])
         qa_counter = 1
         for qa_idx, qa in enumerate(qa_list, 1):
+            total_qa_count += 1
             question = (qa.get("question", "") or "").strip()
             figure = (qa.get("reference", "") or "").strip()
             
@@ -257,10 +264,13 @@ def run_inference(
 
                 if "factual" in resp.output_text:
                     FACTUAL += 1 
+                    stats[ANSWER_TYPE]['factual'] += 1
                 elif "omission" in resp.output_text:
                     OMISSION += 1
+                    stats[ANSWER_TYPE]['omission'] += 1
                 elif "conceptual" in resp.output_text:
                     CONCEPTUAL += 1
+                    stats[ANSWER_TYPE]['conceptual'] += 1
                 qa_counter += 1
 
                 parsed = parse_inference_output(resp.output_text)
@@ -275,13 +285,16 @@ def run_inference(
                 qa["verdict"] = "correct"
                 qa["error_category"] = "N/A"
                 qa["feedback"] = "Your answer is correct. Great job!"
+                
+                stats['correct'] += 1
             
-        if FACTUAL > 15 and OMISSION > 15 and CONCEPTUAL > 15:
-            break
-
-    print(f"\nFactual: {FACTUAL}")
-    print(f"Omission: {OMISSION}")
-    print(f"Conceptual: {CONCEPTUAL}")
+    # Print stats
+    print(f"\nStats:\n")
+    print(f"Total Papers Processed: {paper_count}")
+    print(f"Total QA Pairs Processed: {total_qa_count}")
+    print(f"Correct: {stats['correct']}")
+    print(f"Incorrect: {stats['incorrect']}")
+    print(f"Partially Correct: {stats['partially correct']}")
 
     return data
 
