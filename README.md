@@ -265,3 +265,18 @@ This will:
 - Skip already annotated files
 
 ---
+
+### 4. Human vs. Automatic Metrics Comparison
+
+After completing human annotation, you can generate a summary comparison between:
+
+- Human judgments (`match / unmatched / partial`)
+- Automatic metrics (F1, ROUGE-L, BLEU)
+
+Run:
+
+```bash
+python -m src.eval.summarize_human_vs_metrics \
+  --in_dir data/human_annotated \
+  --out_dir data/eval_summary
+```
