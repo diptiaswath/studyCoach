@@ -151,6 +151,7 @@
 | High | Test 72B+ model (Qwen2.5-VL-72B or GPT-4o) |
 | High | Filter to factual errors (where visual grounding matters most) |
 | Medium | Chain-of-thought: Force model to describe figure before judging |
+| Medium | Larger eval sample (200+) to detect smaller differences reliably |
 
 **The bet:** A stronger model will show visual input helps BOTH metrics.
 
