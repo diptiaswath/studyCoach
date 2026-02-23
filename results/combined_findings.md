@@ -131,6 +131,21 @@ At 8B scale, adding visual input:
 
 The 8B model *can* use visual information for reasoning — that's why its explanations are better. But it can't yet use that information reliably enough to improve verdict classification. The visual signal adds noise to the decision, but adds value to the explanation.
 
+### Why Text-Only "Wins" (But For The Wrong Reasons)
+
+In **text_only (C1)**, the model receives only the question and student answer — no figure, no caption, no reference answer. So the model evaluates based on:
+
+1. **Pre-trained knowledge** — does the student's claim sound plausible given what the model learned during training?
+2. **Internal consistency** — does the answer contradict itself or make logical errors?
+3. **Language patterns** — does the phrasing suggest confidence/hedging/confusion?
+
+**The tradeoff:**
+- Text-only classifies better but is doing **plausibility checking**, not **verification against the figure**
+- It can't actually confirm "BERT achieves 84.6%" — it's just judging if the claim sounds reasonable
+- Multimodal classifies worse but **explains better** because it actually uses the figure
+
+**This is why scaling matters:** We want the model to verify claims against the actual figure, not just guess based on training knowledge.
+
 ---
 
 ## One-Liner

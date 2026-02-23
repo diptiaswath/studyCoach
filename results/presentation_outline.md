@@ -177,6 +177,12 @@ flowchart TB
 
 > "The model classifies better without images but explains better with them."
 
+**Why text-only "wins" (but for the wrong reasons):**
+- Text-only has no figure, no caption — just question + student answer
+- Model does **plausibility checking** based on pre-trained knowledge, not **verification against the figure**
+- It can't confirm "BERT achieves 84.6%" — it just judges if the claim *sounds* reasonable
+- Multimodal classifies worse but explains better because it *actually uses* the figure
+
 **Bonus surprise:** Auto metrics (F1, ROUGE-L, BLEU) showed ~0.30 across ALL scenarios — they completely missed the 2x difference in feedback quality that human evaluation revealed.
 
 ---
