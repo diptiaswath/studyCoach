@@ -14,14 +14,13 @@ flowchart LR
     end
 
     subgraph Phase2["Phase 2: Generate"]
-        C --> D[Hand-curate ICL seed<br/>20-30 exemplars]
+        C --> D[Hand-curate ICL seed<br/>18 exemplars]
         D --> E[ICL synthetic generation<br/>GPT-4.1]
         E --> F[Generate student answers<br/>Correct/Partial/Incorrect]
     end
 
-    subgraph Phase3["Phase 3: Validate"]
-        F --> G[LLM Validator]
-        G --> H[Human spot-check<br/>~50-100 samples]
+    subgraph Phase3["Phase 3: Baseline and Human Evaluation"]
+        F --> H[Human spot-check<br/>~50-100 samples]
         H --> I[Quality gate<br/>≥90% agreement]
     end
 
@@ -33,15 +32,15 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph Input
-        A[SPIQA+<br/>174 examples]
+        A[SPIQA+<br/>174 total → 50 sampled]
         B[Qwen3-VL-8B]
     end
 
     subgraph Scenarios["4 Scenarios"]
-        C1[text_only<br/>Q + Student]
-        C2[caption_only<br/>Q + Caption + Student]
-        C3[vision_only<br/>Q + Image + Student]
-        C4[multimodal<br/>Q + Caption + Image + Student]
+        C1[text_only<br/>Q + Student Answer]
+        C2[caption_only<br/>Q + Caption + Student Answer]
+        C3[vision_only<br/>Q + Image + Student Answer]
+        C4[multimodal<br/>Q + Caption + Image + Student Answer]
     end
 
     A --> C1 & C2 & C3 & C4
@@ -80,6 +79,29 @@ Each example in the augmented dataset:
 │     Truth       │                                       │
 └─────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## ICL Exemplars Breakdown (18 total)
+
+The 18 hand-curated exemplars in `src/icl.py` cover all combinations:
+
+| Figure Type | Verdict | Error Types | Count |
+|-------------|---------|-------------|-------|
+| Plot | Incorrect | Factual, Omission, Conceptual | 3 |
+| Plot | Partially Correct | Factual, Omission, Conceptual | 3 |
+| Table | Incorrect | Factual, Omission, Conceptual | 3 |
+| Table | Partially Correct | Factual, Omission, Conceptual | 3 |
+| Figure/Schematic | Incorrect | Factual, Omission, Conceptual | 3 |
+| Figure/Schematic | Partially Correct | Factual, Omission, Conceptual | 3 |
+| | | **Total** | **18** |
+
+**Formula:** 3 figure types × 2 verdicts × 3 error types = 18 exemplars
+
+Each exemplar includes:
+- User prompt (caption + question + student answer)
+- Assistant response (verdict + error category + feedback)
+- Image path (for multimodal ICL)
 
 ---
 
