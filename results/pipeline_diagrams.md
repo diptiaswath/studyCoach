@@ -105,6 +105,24 @@ Each exemplar includes:
 
 ---
 
+## Dataset Quality: Error Distribution
+
+**Problem:** Initial generation defaulted to factual errors (63%), missing realistic student mistakes.
+
+**Solution:** Refined ICL exemplars to balance error types.
+
+| Error Type | Before | After | Change |
+|------------|--------|-------|--------|
+| Factual    | 63%    | 48%   | ↓ 15pp |
+| Conceptual | 19%    | 38%   | ↑ 19pp |
+| Omission   | 19%    | 14%   | ↓ 5pp  |
+
+**Result:** More diverse, realistic student mistakes — conceptual errors nearly doubled.
+
+*Note: 174 total examples → 50 stratified samples used for evaluation.*
+
+---
+
 ## Key Finding Visualization
 
 ```
