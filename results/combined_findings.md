@@ -14,7 +14,7 @@ We ran two evaluations to answer each part.
 
 ## Evaluation Approach
 
-### Phase 1: Baseline Evaluation (main branch)
+### Phase 1: Baseline Evaluation
 
 | Aspect | Details |
 |--------|---------|
@@ -23,7 +23,7 @@ We ran two evaluations to answer each part.
 | **Sample size** | 50 examples per scenario |
 | **Output** | Verdict accuracy (%) |
 
-### Phase 2: Human Evaluation (origin branch)
+### Phase 2: Human Evaluation
 
 | Aspect | Details |
 |--------|---------|
@@ -53,6 +53,10 @@ We ran two evaluations to answer each part.
 | caption_only | Yes | - |
 | vision_only | - | Yes |
 | multimodal | Yes | Yes |
+
+### Why No-Answer Condition?
+
+We also evaluated scenarios where the reference answer was provided to the model. Including it reduced variation across modalities and lowered alignment with human judgment — likely because the task shifted from reasoning-based evaluation to textual similarity matching. We focused on the no-answer condition as it better reflects a realistic coaching scenario where the model must reason from the figure itself.
 
 ---
 
@@ -97,6 +101,8 @@ We ran two evaluations to answer each part.
 
 **Finding:** Human evaluation reveals dramatic differences that auto metrics missed. Multimodal feedback is twice as useful as text-only (80% vs 40%).
 
+*Soft Match = Match + Partial (feedback that is at least partially useful). Multimodal achieves 100% soft match (8+2) vs text-only at 90% (4+5).*
+
 **Key insight:** F1/ROUGE/BLEU are poor proxies for feedback quality. Human evaluation was necessary to reveal the true differences.
 
 ---
@@ -138,6 +144,8 @@ The 8B model *can* use visual information for reasoning — that's why its expla
 - **Sample size**: With n=50, differences <5pp are noise
 - **Reliable comparisons**: text_only vs multimodal (8pp gap) is meaningful
 - **Unreliable comparisons**: vision_only vs caption_only (2pp gap) is noise
+- **Human eval sample size**: With n=10 per scenario, each example shifts the match rate by 10 percentage points. The observed 40pp spread (40% to 80%) may narrow as we scale annotation. However, the directional finding — multimodal explains better than text-only — is consistent with the soft match rates (100% for multimodal vs 90% for text-only).
+
 pp = percentage points
 
 ---
@@ -155,19 +163,12 @@ pp = percentage points
 
 ## Source Files
 
-### Main Branch (Baseline Evaluation)
-
 | File | Description |
 |------|-------------|
 | `results/baseline_eval_summary.md` | Detailed baseline eval results |
 | `results/human_eval_summary.md` | Human annotation results |
 | `data/eval/*_no_answer_results.json` | Raw eval outputs |
 | `baseline_findings/FINDINGS.md` | Full analysis notes |
-
-### Origin Branch (Human Evaluation)
-
-| File | Description |
-|------|-------------|
 | `HUMAN_FINDINGS.md` | Human evaluation methodology and findings |
 | `human_vs_metrics_summary.csv` | Human match labels per scenario |
 | `eval_metrics_summary.csv` | Auto metrics (F1, ROUGE-L, BLEU) per scenario |
