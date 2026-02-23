@@ -1,0 +1,111 @@
+# Study Coach: Pipeline Diagrams
+
+## Mermaid Diagrams
+
+Render these at https://mermaid.live or in any Markdown viewer that supports Mermaid.
+
+### Dataset Construction Pipeline
+
+```mermaid
+flowchart LR
+    subgraph Phase1["Phase 1: Prepare"]
+        A[SPIQA Test-A<br/>666 QA pairs] --> B[Filter figure-grounded QAs]
+        B --> C[Annotate figure types<br/>Plot/Table/Schematic]
+    end
+
+    subgraph Phase2["Phase 2: Generate"]
+        C --> D[Hand-curate ICL seed<br/>20-30 exemplars]
+        D --> E[ICL synthetic generation<br/>GPT-4.1]
+        E --> F[Generate student answers<br/>Correct/Partial/Incorrect]
+    end
+
+    subgraph Phase3["Phase 3: Validate"]
+        F --> G[LLM Validator]
+        G --> H[Human spot-check<br/>~50-100 samples]
+        H --> I[Quality gate<br/>≥90% agreement]
+    end
+
+    I --> J[SPIQA+<br/>174 validated examples]
+```
+
+### Evaluation Pipeline
+
+```mermaid
+flowchart TB
+    subgraph Input
+        A[SPIQA+<br/>174 examples]
+        B[Qwen3-VL-8B]
+    end
+
+    subgraph Scenarios["4 Scenarios"]
+        C1[text_only<br/>Q + Student]
+        C2[caption_only<br/>Q + Caption + Student]
+        C3[vision_only<br/>Q + Image + Student]
+        C4[multimodal<br/>Q + Caption + Image + Student]
+    end
+
+    A --> C1 & C2 & C3 & C4
+    B --> C1 & C2 & C3 & C4
+
+    subgraph Phase1["Phase 1: Baseline Eval"]
+        D[Verdict Accuracy<br/>n=50 per scenario]
+    end
+
+    subgraph Phase2["Phase 2: Human Eval"]
+        E[Auto Metrics<br/>F1, ROUGE-L, BLEU]
+        F[Human Annotation<br/>n=10 per scenario]
+    end
+
+    C1 & C2 & C3 & C4 --> D
+    D --> E --> F
+
+    F --> G[Combined Findings]
+```
+
+---
+
+## SPIQA+ 4-Tuple Structure
+
+Each example in the augmented dataset:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    SPIQA+ 4-TUPLE                       │
+├─────────────────────────────────────────────────────────┤
+│  1. Context     │  Figure image + caption               │
+│  2. Question    │  Figure-grounded question from SPIQA  │
+│  3. Student     │  Synthetic answer (correct/partial/   │
+│     Answer      │  incorrect)                           │
+│  4. Ground      │  Verdict + Error Category + Feedback  │
+│     Truth       │                                       │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Key Finding Visualization
+
+```
+                    VERDICT ACCURACY              FEEDBACK QUALITY
+                    (Classification)              (Explanation)
+
+    text_only       ████████████████ 56%         ████████ 40%        (Soft: 90%)
+    vision_only     ██████████████ 50%           ████████████ 60%    (Soft: 80%)
+    caption_only    █████████████ 48%            ██████████ 50%      (Soft: 90%)
+    multimodal      █████████████ 48%            ████████████████ 80% (Soft: 100%)
+
+                         WINNER: text_only            WINNER: multimodal
+
+    ─────────────────────────────────────────────────────────────────────
+
+    Soft Match = Match + Partial (feedback at least partially useful)
+
+    INSIGHT: The model classifies better WITHOUT images
+             but explains better WITH them.
+```
+
+---
+
+## Note: Why No-Answer Condition?
+
+We focused on scenarios where the **reference answer was withheld** from the model. Including reference answers reduced variation across modalities and lowered alignment with human judgment — the task shifted from reasoning-based evaluation to textual similarity matching. The no-answer condition better reflects a realistic coaching scenario where the model must reason from the figure itself.
