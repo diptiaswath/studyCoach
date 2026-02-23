@@ -18,20 +18,42 @@
 
 **Title:** Can AI Coach Students on Scientific Figure Interpretation?
 
-| Question | Details |
-|----------|---------|
-| **Task** | Given a student's explanation of a scientific figure, can an LLM detect if it's correct and provide useful coaching feedback? |
-| **Two capabilities needed** | 1) Classification: Correct / Partially Correct / Incorrect |
-|  | 2) Coaching: Feedback that helps the student learn |
-| **Why multimodal?** | Must verify text claims against visual evidence (e.g., "BERT achieves 89%" when figure shows 84.6%) |
+**Task:** **Incongruence detection** between user (textual) explanations and visual content in scientific figures.
+
+**Three capabilities needed:**
+
+| # | Capability | Example |
+|---|------------|---------|
+| 1 | **Detect mismatch** — verdict: Correct / Partially Correct / Incorrect | "Is this explanation right?" |
+| 2 | **Categorize error type** — Factual / Conceptual / Omission | "What kind of mistake?" |
+| 3 | **Provide coaching feedback** — localize the mismatch and explain | "Here's what you missed..." |
+
+**Why fundamentally multimodal?** (Not VQA or captioning — we evaluate *someone else's* text-image alignment)
+
+| Reason | Example |
+|--------|---------|
+| **Visual grounding essential** | To evaluate "BERT achieves 89%" as incorrect, model must read actual bar height (84.6%) from figure |
+| **Language understanding essential** | Must parse claims like "outperforms" or "plateaus" to know what visual evidence to seek |
+| **Cross-modal reasoning required** | Wrong conclusion errors (e.g., "loss decreases throughout" when it plateaus) require mapping verbal interpretations onto visual patterns |
 
 ---
 
 ## Slide 2: Hypotheses (2 pts)
 
-**H1 (Multimodal Advantage):** Adding visual input (the figure) will improve both classification accuracy AND feedback quality compared to text-only.
+**Tested with 8B Baseline:**
+
+**H1 (Multimodal Advantage):** Multimodal models can classify above random baseline, and visual input specifically improves performance over text-only.
 
 **H2 (Metric Alignment):** Verdict accuracy and feedback quality will be correlated — models that classify correctly will also explain well.
+
+---
+
+**To Evaluate with Competitive Baseline (72B+):**
+
+| # | Hypothesis | Next Step |
+|---|------------|-----------|
+| H3 | Factual errors (visually-obvious) will be detected more reliably than conceptual errors, and paper context will help more with the latter | Filter to Factual errors; Add C2/C3 context conditions |
+| H4 | Detection accuracy varies by figure type: tables easiest (structured), diagrams hardest (spatial reasoning) | Analyze by figure type |
 
 ---
 

@@ -182,6 +182,8 @@ The 8pp gap favoring text-only (56% vs 48%) might **shrink** if we tested on fac
 | High | Filter to Factual errors | Where visual grounding matters most |
 | Medium | Chain-of-thought prompting | Force model to describe figure first |
 | Medium | Larger eval sample (200+) | Detect smaller differences reliably |
+| Medium | Add paper context (C2/C3 conditions) | Test if broader context helps reasoning-dependent errors more than factual errors |
+| Medium | Analyze by figure type | Test if tables are easier than plots/schematics (structured vs spatial reasoning) |
 
 ---
 
