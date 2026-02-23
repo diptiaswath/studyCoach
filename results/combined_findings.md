@@ -182,8 +182,83 @@ The 8pp gap favoring text-only (56% vs 48%) might **shrink** if we tested on fac
 | High | Filter to Factual errors | Where visual grounding matters most |
 | Medium | Chain-of-thought prompting | Force model to describe figure first |
 | Medium | Larger eval sample (200+) | Detect smaller differences reliably |
-| Medium | Add paper context (C2/C3 conditions) | Test if broader context helps reasoning-dependent errors more than factual errors |
+| Optional | Add paper context (C5 condition) | Test if relevant paragraphs help reasoning-dependent errors more than factual errors |
 | Medium | Analyze by figure type | Test if tables are easier than plots/schematics (structured vs spatial reasoning) |
+
+### Why Test Stronger Model (72B+)?
+
+At 8B scale, visual input hurts classification (56% → 48%) but helps explanation (40% → 80%). This suggests the model *can* use visual information for reasoning but can't yet use it reliably for verdict classification.
+
+**The hypothesis:** Larger models have better visual grounding capabilities. A 72B+ model (e.g., Qwen2.5-VL-72B, GPT-4o) might show visual input helping *both* metrics — closing the classification gap while maintaining the explanation advantage.
+
+**What we'd look for:**
+- Multimodal accuracy ≥ text-only accuracy (currently 8pp behind)
+- Maintained or improved feedback quality (currently 80% human match)
+
+### Why Filter to Factual Errors?
+
+*See Dataset Composition Note above.* Factual errors (48% of dataset) require high visual grounding — the model must read actual values from the figure. The 8pp gap favoring text-only might shrink or reverse if we test on factual errors only.
+
+### Why Chain-of-Thought Prompting?
+
+The surprising finding was that visual input *hurts* classification but *helps* explanation. One theory: the 8B model doesn't properly attend to visual details during classification — it gets distracted by the image without systematically extracting information from it.
+
+**Current approach (direct verdict):**
+```
+Prompt: Here's the figure, student answer, question. Give verdict.
+Model: Verdict = Incorrect
+```
+
+**Chain-of-thought approach (describe first, then judge):**
+```
+Prompt: First describe what you see in the figure. Then evaluate the student's answer.
+Model:
+  Step 1: The figure shows a bar chart with BERT at 84.6%, RoBERTa at 87.2%...
+  Step 2: The student claims "BERT achieves 89%" — this contradicts the figure.
+  Verdict = Incorrect
+```
+
+**The bet:** If the model must explicitly describe the figure before judging, it might use visual information more effectively for classification — not just explanation. This could close the gap between text-only (56%) and multimodal (48%) accuracy.
+
+### Why Larger Eval Sample (200+)?
+
+With n=50, differences <5pp are noise (~7pp confidence intervals). The current 8pp gap (text-only 56% vs multimodal 48%) is borderline significant.
+
+**With n=200+:**
+- Confidence intervals shrink to ~3-4pp
+- Can reliably detect 5pp differences
+- Can compare vision_only vs caption_only (currently 2pp gap = noise)
+
+This is especially important for testing H3/H4 hypotheses with a competitive baseline — we need statistical power to detect meaningful differences.
+
+### Why Add Paper Context (C5 Condition)?
+
+The current 4 scenarios (C1-C4) vary caption and image, but don't test paper context. Adding relevant paragraphs creates a new condition:
+
+| Condition | Input | Status |
+|-----------|-------|--------|
+| C1 | text_only (Q + Student Answer) | Tested |
+| C2 | caption_only (Q + Caption + Student Answer) | Tested |
+| C3 | vision_only (Q + Image + Student Answer) | Tested |
+| C4 | multimodal (Q + Caption + Image + Student Answer) | Tested |
+| **C5** | **multimodal + relevant paragraphs** | **Optional** |
+
+**Hypothesis (H3):** Paper context will help reasoning-dependent errors (conceptual, omission) more than visually-obvious errors (factual). For factual errors like "BERT achieves 89%", the figure alone suffices. For conceptual errors like "this shows BERT is best for all tasks", context about experimental setup might help the model reason better.
+
+### Why Analyze by Figure Type?
+
+The dataset contains different figure types with different reasoning demands:
+
+| Figure Type | % of Dataset | Reasoning Type |
+|-------------|--------------|----------------|
+| Tables | ~44% | Structured lookup — explicit rows/columns |
+| Plots | ~28% | Trend reading — spatial patterns |
+| Schematics | ~17% | Architecture understanding — distributed relationships |
+| Other | ~11% | Mixed |
+
+**Hypothesis (H4):** Tables should be easiest (explicit, localized information), while architecture diagrams should be hardest (require understanding spatial relationships between components).
+
+**Why this matters:** If accuracy varies significantly by figure type, Study Coach could route different figure types to different models or prompting strategies.
 
 ---
 

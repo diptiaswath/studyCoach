@@ -52,7 +52,7 @@
 
 | # | Hypothesis | Next Step |
 |---|------------|-----------|
-| H3 | Factual errors (visually-obvious) will be detected more reliably than conceptual errors, and paper context will help more with the latter | Filter to Factual errors; Add C2/C3 context conditions |
+| H3 | Factual errors (visually-obvious) will be detected more reliably than conceptual errors, and paper context will help more with the latter | Filter to Factual errors; Add C5 context condition (optional) |
 | H4 | Detection accuracy varies by figure type: tables easiest (structured), diagrams hardest (spatial reasoning) | Analyze by figure type |
 
 ---
