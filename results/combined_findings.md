@@ -5,8 +5,8 @@
 Can a small vision-language model (8B) grade student answers about scientific figures — and provide useful feedback?
 
 This question has two parts:
-1. **Classification**: Can the model correctly identify if an answer is Correct, Partially Correct, or Incorrect?
-2. **Coaching**: Can the model provide feedback that would actually help a student learn?
+1. **Verdict Classification**: Can the model correctly identify if an answer is Correct, Partially Correct, or Incorrect?
+2. **Coaching**: Can the model provide feedback (explanation) that would actually help a student learn?
 
 We ran two evaluations to answer each part.
 
