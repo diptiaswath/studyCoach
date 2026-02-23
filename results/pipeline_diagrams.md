@@ -119,6 +119,16 @@ Each exemplar includes:
 
 **Result:** More diverse, realistic student mistakes — conceptual errors nearly doubled.
 
+**Why error types matter for visual grounding:**
+
+| Error Type | Example | Visual Grounding Needed |
+|------------|---------|------------------------|
+| **Factual** | Student says "BERT achieves 89%" but figure shows 84.6% | **High** — must see figure to verify the number |
+| **Conceptual** | Student says "loss decreases throughout" but figure shows it plateaus | **Medium** — must see pattern being misinterpreted |
+| **Omission** | Student mentions only one result but figure shows four | **Low** — can sometimes detect incompleteness from text alone |
+
+**Impact:** With only 48% factual errors, multimodal has fewer chances to demonstrate classification advantage. The 8pp gap (text-only 56% vs multimodal 48%) might shrink if tested on factual errors only.
+
 *Note: 174 total examples → 50 stratified samples used for evaluation.*
 
 ---

@@ -106,6 +106,17 @@
 | **Partially Correct is hard** | Model collapses "Partially Correct" into "Incorrect" |
 | **Vision adds noise** | Visual input distracts the classifier even while helping the explainer |
 | **Sample size limits** | n=50 (baseline) means <5pp differences are noise; n=10 (human eval) means each example = 10pp shift |
+| **Dataset composition** | Only 48% factual errors — fewer cases where vision is essential (see below) |
+
+**Error types and visual grounding:**
+
+| Error Type | Example | Visual Grounding |
+|------------|---------|------------------|
+| Factual (48%) | "BERT achieves 89%" but figure shows 84.6% | **High** — must see figure |
+| Conceptual (38%) | "loss decreases throughout" but it plateaus | **Medium** — must see pattern |
+| Omission (14%) | Mentions one result, figure shows four | **Low** — detectable from text |
+
+**Implication:** The 8pp gap favoring text-only might shrink if we tested on factual errors only.
 
 ---
 
