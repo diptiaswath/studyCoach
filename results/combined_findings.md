@@ -148,6 +148,30 @@ The 8B model *can* use visual information for reasoning — that's why its expla
 
 pp = percentage points
 
+### Dataset Composition Note
+
+The SPIQA+ dataset error distribution:
+
+| Error Type | % of Dataset |
+|------------|--------------|
+| Factual    | 48%          |
+| Conceptual | 38%          |
+| Omission   | 14%          |
+
+**Why this matters for visual grounding:**
+
+| Error Type | Example | Visual Grounding Needed |
+|------------|---------|------------------------|
+| **Factual** | Student says "BERT achieves 89%" but figure shows 84.6% | **High** — must see figure to verify the number |
+| **Conceptual** | Student says "loss decreases throughout" but figure shows it plateaus | **Medium** — must see pattern being misinterpreted |
+| **Omission** | Student mentions only one result but figure shows four | **Low** — can sometimes detect incompleteness from text alone |
+
+**Impact on findings:**
+
+Factual errors are exactly where visual input should help most — the model must see the figure to verify claims. With only 48% factual errors in the dataset, multimodal has fewer opportunities to demonstrate its classification advantage.
+
+The 8pp gap favoring text-only (56% vs 48%) might **shrink** if we tested on factual errors only — those are the cases where seeing the figure is essential. This supports the "Filter to Factual errors" next step below.
+
 ---
 
 ## Next Steps
