@@ -74,12 +74,13 @@ flowchart LR
         E --> F[Generate student answers<br/>Correct/Partial/Incorrect]
     end
 
-    subgraph Phase3["Phase 3: Validate"]
+    subgraph Phase3["Phase 3: Validate SPIQA+"]
         F --> H[Human spot-check<br/>~50-100 samples]
-        H --> I[Quality gate<br/>≥90% agreement]
+        H --> I[Analyze error distribution]
+        I --> J[Quality gate<br/>≥90% agreement]
     end
 
-    I --> J[SPIQA+<br/>174 validated examples]
+    J --> K[SPIQA+<br/>174 validated examples]
 ```
 
 ### Evaluation Pipeline
@@ -91,7 +92,7 @@ flowchart TB
         B[Qwen3-VL-8B]
     end
 
-    subgraph Scenarios["4 Scenarios (C1-C4)"]
+    subgraph Scenarios["4 Scenarios"]
         C1[text_only<br/>Q + Student Answer]
         C2[caption_only<br/>Q + Caption + Student Answer]
         C3[vision_only<br/>Q + Image + Student Answer]
