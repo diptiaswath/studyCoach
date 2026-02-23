@@ -6,10 +6,10 @@
 |----------|--------|-------|
 | Problem Definition | 1 | Slide 1 |
 | 1-2 Hypotheses | 2 | Slide 2 |
-| Surprising Finding | 2 | Slide 5 |
-| Description of a baseline | 1 | Slide 3 |
-| Where the baseline might fail | 1 | Slide 6 |
-| A pressing question | 1 | Slide 7 |
+| Surprising Finding | 2 | Slide 6 |
+| Description of a baseline | 1 | Slide 4 |
+| Where the baseline might fail | 1 | Slide 7 |
+| A pressing question | 1 | Slide 8 |
 | Overall clarity | 2 | All slides |
 
 ---
@@ -57,7 +57,68 @@
 
 ---
 
-## Slide 3: Baseline Description (1 pt)
+## Slide 3: Methodology
+
+### Dataset Construction Pipeline
+
+```mermaid
+flowchart LR
+    subgraph Phase1["Phase 1: Prepare"]
+        A[SPIQA Test-A<br/>666 QA pairs] --> B[Filter figure-grounded QAs]
+        B --> C[Annotate figure types<br/>Plot/Table/Schematic]
+    end
+
+    subgraph Phase2["Phase 2: Generate"]
+        C --> D[Hand-curate ICL seed<br/>18 exemplars]
+        D --> E[ICL synthetic generation<br/>GPT-4.1]
+        E --> F[Generate student answers<br/>Correct/Partial/Incorrect]
+    end
+
+    subgraph Phase3["Phase 3: Validate"]
+        F --> H[Human spot-check<br/>~50-100 samples]
+        H --> I[Quality gate<br/>≥90% agreement]
+    end
+
+    I --> J[SPIQA+<br/>174 validated examples]
+```
+
+### Evaluation Pipeline
+
+```mermaid
+flowchart TB
+    subgraph Input
+        A[SPIQA+<br/>174 total → 50 sampled]
+        B[Qwen3-VL-8B]
+    end
+
+    subgraph Scenarios["4 Scenarios (C1-C4)"]
+        C1[text_only<br/>Q + Student Answer]
+        C2[caption_only<br/>Q + Caption + Student Answer]
+        C3[vision_only<br/>Q + Image + Student Answer]
+        C4[multimodal<br/>Q + Caption + Image + Student Answer]
+    end
+
+    A --> C1 & C2 & C3 & C4
+    B --> C1 & C2 & C3 & C4
+
+    subgraph Phase1["Phase 1: Baseline Eval"]
+        D[Verdict Accuracy<br/>n=50 per scenario]
+    end
+
+    subgraph Phase2["Phase 2: Human Eval"]
+        E[Auto Metrics<br/>F1, ROUGE-L, BLEU]
+        F[Human Annotation<br/>n=10 per scenario]
+    end
+
+    C1 & C2 & C3 & C4 --> D
+    D --> E --> F
+
+    F --> G[Combined Findings]
+```
+
+---
+
+## Slide 4: Baseline Description (1 pt)
 
 | Parameter | Value |
 |-----------|-------|
@@ -79,7 +140,7 @@
 
 ---
 
-## Slide 4: Baseline Results Summary
+## Slide 5: Baseline Results Summary
 
 **Phase 1: Baseline Verdict Accuracy (Automated)**
 
@@ -103,7 +164,7 @@
 
 ---
 
-## Slide 5: Surprising Finding (2 pts)
+## Slide 6: Surprising Finding (2 pts)
 
 **Both hypotheses were WRONG.**
 
@@ -120,7 +181,7 @@
 
 ---
 
-## Slide 6: Where Baseline Might Fail (1 pt)
+## Slide 7: Where Baseline Might Fail (1 pt)
 
 | Failure Mode | Evidence |
 |--------------|----------|
@@ -142,7 +203,7 @@
 
 ---
 
-## Slide 7: A Pressing Question (1 pt)
+## Slide 8: A Pressing Question (1 pt)
 
 > **At what model scale does visual input start helping classification — not just explanation?**
 
@@ -157,7 +218,7 @@
 
 ---
 
-## Slide 8: Summary (Clarity)
+## Slide 9: Summary (Clarity)
 
 ```
 1. Problem: Can AI evaluate + coach students on scientific figures?
