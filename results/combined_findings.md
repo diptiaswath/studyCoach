@@ -4,6 +4,36 @@
 
 Can a small vision-language model (8B) grade student answers about scientific figures — and provide useful feedback?
 
+This question has two parts:
+1. **Classification**: Can the model correctly identify if an answer is Correct, Partially Correct, or Incorrect?
+2. **Coaching**: Can the model provide feedback that would actually help a student learn?
+
+We ran two evaluations to answer each part.
+
+---
+
+## Evaluation Approach
+
+### Phase 1: Baseline Evaluation (main branch)
+
+| Aspect | Details |
+|--------|---------|
+| **Question answered** | Did the model classify the verdict correctly? |
+| **Method** | Automated comparison of predicted vs ground truth verdict |
+| **Sample size** | 50 examples per scenario |
+| **Output** | Verdict accuracy (%) |
+
+### Phase 2: Human Evaluation (origin branch)
+
+| Aspect | Details |
+|--------|---------|
+| **Question answered** | Was the model's feedback useful to a student? |
+| **Method** | Auto metrics (F1, ROUGE-L, BLEU) + human annotation |
+| **Sample size** | 50 (auto metrics) + 10 (human labels) per scenario |
+| **Output** | Match / Partial / Unmatched labels |
+
+**Why both?** A model could get the verdict wrong but still give useful feedback, or get the verdict right but give a useless explanation. We needed both evaluations to see the full picture.
+
 ---
 
 ## Setup
@@ -26,9 +56,11 @@ Can a small vision-language model (8B) grade student answers about scientific fi
 
 ---
 
-## Results Summary
+## Results
 
-### Verdict Accuracy (Auto-Eval, n=50)
+### Phase 1: Verdict Accuracy (Baseline Eval)
+
+*Question: Did the model classify correctly?*
 
 | Scenario | Accuracy |
 |----------|----------|
@@ -37,16 +69,11 @@ Can a small vision-language model (8B) grade student answers about scientific fi
 | caption_only_no_answer | 48% |
 | multimodal_no_answer | 48% |
 
-### Feedback Quality (Human-Eval, n=10)
+**Finding:** Text-only wins on classification. Adding visual input hurts accuracy at 8B scale.
 
-| Scenario | Match | Partial | Unmatched | Human Match % |
-|----------|------:|--------:|----------:|--------------:|
-| multimodal_no_answer | 8 | 2 | 0 | **80%** |
-| vision_only_no_answer | 6 | 2 | 2 | 60% |
-| caption_only_no_answer | 5 | 4 | 1 | 50% |
-| text_only_no_answer | 4 | 5 | 1 | 40% |
+### Phase 2a: Automated Metrics
 
-### Automated Metrics (n=50)
+*Question: Does predicted feedback match ground truth feedback?*
 
 | Scenario | F1 | ROUGE-L | BLEU |
 |----------|---:|--------:|-----:|
@@ -55,7 +82,22 @@ Can a small vision-language model (8B) grade student answers about scientific fi
 | vision_only_no_answer | 0.29 | 0.18 | 6.7 |
 | multimodal_no_answer | 0.30 | 0.20 | 6.2 |
 
-**Note:** Auto metrics show little variation across scenarios (~0.29-0.30 F1), while human match varies dramatically (40% to 80%). This confirms that **F1/ROUGE/BLEU are poor proxies for feedback quality** in this task. Human evaluation was necessary to reveal the true differences.
+**Finding:** Auto metrics show almost no difference across scenarios (~0.29-0.30 F1). If we stopped here, we'd conclude all scenarios produce similar feedback quality.
+
+### Phase 2b: Human Evaluation
+
+*Question: Is the feedback actually useful to a student?*
+
+| Scenario | Match | Partial | Unmatched | Human Match % |
+|----------|------:|--------:|----------:|--------------:|
+| multimodal_no_answer | 8 | 2 | 0 | **80%** |
+| vision_only_no_answer | 6 | 2 | 2 | 60% |
+| caption_only_no_answer | 5 | 4 | 1 | 50% |
+| text_only_no_answer | 4 | 5 | 1 | 40% |
+
+**Finding:** Human evaluation reveals dramatic differences that auto metrics missed. Multimodal feedback is twice as useful as text-only (80% vs 40%).
+
+**Key insight:** F1/ROUGE/BLEU are poor proxies for feedback quality. Human evaluation was necessary to reveal the true differences.
 
 ---
 
@@ -63,8 +105,8 @@ Can a small vision-language model (8B) grade student answers about scientific fi
 
 | Metric | Winner | Loser |
 |--------|--------|-------|
-| **Verdict Accuracy** (Did model classify correctly?) | text_only (56%) | multimodal (48%) |
-| **Feedback Quality** (Was explanation useful?) | multimodal (80%) | text_only (40%) |
+| **Verdict Accuracy** (Phase 1) | text_only (56%) | multimodal (48%) |
+| **Feedback Quality** (Phase 2b) | multimodal (80%) | text_only (40%) |
 
 ### The Insight
 
@@ -112,7 +154,7 @@ The 8B model *can* use visual information for reasoning — that's why its expla
 
 ## Source Files
 
-### Main Branch
+### Main Branch (Baseline Evaluation)
 
 | File | Description |
 |------|-------------|
@@ -121,7 +163,7 @@ The 8B model *can* use visual information for reasoning — that's why its expla
 | `data/eval/*_no_answer_results.json` | Raw eval outputs |
 | `baseline_findings/FINDINGS.md` | Full analysis notes |
 
-### Origin Branch (human-eval-annotation)
+### Origin Branch (Human Evaluation)
 
 | File | Description |
 |------|-------------|
