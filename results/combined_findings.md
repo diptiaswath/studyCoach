@@ -138,6 +138,7 @@ The 8B model *can* use visual information for reasoning — that's why its expla
 - **Sample size**: With n=50, differences <5pp are noise
 - **Reliable comparisons**: text_only vs multimodal (8pp gap) is meaningful
 - **Unreliable comparisons**: vision_only vs caption_only (2pp gap) is noise
+pp = percentage points
 
 ---
 
