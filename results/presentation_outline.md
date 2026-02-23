@@ -18,7 +18,7 @@
 
 **Title:** Can AI Coach Students on Scientific Figure Interpretation?
 
-**Task:** **Incongruence detection** between user (textual) explanations and visual content in scientific figures.
+**Task:** **Incongruence detection** between student (textual) explanations and visual content in scientific figures.
 
 **Three capabilities needed:**
 
@@ -34,7 +34,7 @@
 |--------|---------|
 | **Visual grounding essential** | To evaluate "BERT achieves 89%" as incorrect, model must read actual bar height (84.6%) from figure |
 | **Language understanding essential** | Must parse claims like "outperforms" or "plateaus" to know what visual evidence to seek |
-| **Cross-modal reasoning required** | Wrong conclusion errors (e.g., "loss decreases throughout" when it plateaus) require mapping verbal interpretations onto visual patterns |
+| **Cross-modal reasoning required** | Wrong conclusion errors (e.g., "loss decreases throughout" when it plateaus) require mapping textual interpretations onto visual patterns |
 
 ---
 
@@ -79,9 +79,9 @@
 
 ---
 
-## Slide 4: Results Summary
+## Slide 4: Baseline Results Summary
 
-**Phase 1: Verdict Accuracy (Automated)**
+**Phase 1: Baseline Verdict Accuracy (Automated)**
 
 | Scenario | Accuracy |
 |----------|----------|
