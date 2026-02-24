@@ -19,12 +19,13 @@ flowchart LR
         E --> F[Generate student answers<br/>Correct/Partial/Incorrect]
     end
 
-    subgraph Phase3["Phase 3: Baseline and Human Evaluation"]
+    subgraph Phase3["Phase 3: Validate SPIQA+"]
         F --> H[Human spot-check<br/>~50-100 samples]
-        H --> I[Quality gate<br/>≥90% agreement]
+        H --> I[Analyze error distribution]
+        I --> J[Quality gate<br/>≥90% agreement]
     end
 
-    I --> J[SPIQA+<br/>174 validated examples]
+    J --> K[SPIQA+<br/>174 validated examples]
 ```
 
 ### Evaluation Pipeline
