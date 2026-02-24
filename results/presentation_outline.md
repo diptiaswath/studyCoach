@@ -70,7 +70,7 @@ flowchart LR
 
     subgraph Phase2["Phase 2: Generate"]
         C --> D[Hand-curate ICL seed<br/>18 exemplars]
-        D --> E[ICL synthetic generation<br/>GPT-4.1]
+        D --> E[ICL synthetic generation<br/>GPT-5.1]
         E --> F[Generate student answers<br/>Correct/Partial/Incorrect]
     end
 
