@@ -230,7 +230,59 @@ We ran a full evaluation on all 108 error examples (excluding correct answers) t
 
 3. **Text-only performs best** for all error types — visual input is a distraction for verdict classification at 8B scale.
 
-**Note:** This tests verdict classification only. Prior human evaluation showed multimodal produces better explanations (80% match) despite worse classification.
+---
+
+## H3 Hypothesis Test: Feedback Quality by Error Type
+
+We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched).
+
+### Match Rate by Error Type × Scenario
+
+| Error Type | text_only | caption_only | vision_only | multimodal | Δ |
+|------------|-----------|--------------|-------------|------------|---|
+| factual (n=52) | 13.5% | 25.0% | 28.8% | 34.6% | **+21.2pp** |
+| conceptual (n=41) | 26.8% | 51.2% | 36.6% | 58.5% | **+31.7pp** |
+| omission (n=15) | 0.0% | 0.0% | 26.7% | 33.3% | **+33.3pp** |
+
+### Context Benefit for Feedback (Δ = multimodal - text_only)
+
+| Error Type | Δ Match | Interpretation |
+|------------|---------|----------------|
+| factual | +21.2pp | Visual context **helps** |
+| conceptual | +31.7pp | Visual context **helps** |
+| omission | +33.3pp | Visual context **helps** |
+
+**Key finding:** All Δ values are positive — visual context helps feedback quality for ALL error types.
+
+### H3 Results (Feedback)
+
+| Part | Hypothesis | Result |
+|------|------------|--------|
+| 2 | Context helps conceptual more than factual? | **PASS** (+31.7pp > +21.2pp) |
+
+---
+
+## H3 Summary: Opposite Effects for Verdict vs Feedback
+
+| Metric | Factual Δ | Conceptual Δ | Omission Δ | Visual Context Effect |
+|--------|-----------|--------------|------------|----------------------|
+| **Verdict Accuracy** | -21.2pp | -14.6pp | -6.7pp | **Hurts all** |
+| **Feedback Quality** | +21.2pp | +31.7pp | +33.3pp | **Helps all** |
+
+### Key Insight
+
+At 8B scale, visual input has **opposite effects** on verdict vs feedback:
+- **Verdict:** Visual context hurts classification for all error types (model gets distracted)
+- **Feedback:** Visual context helps explanation for all error types (model uses figure to explain)
+
+This confirms the baseline finding: **"The model classifies better without images but explains better with them."**
+
+### H3 Overall Verdict
+
+| H3 Part | Verdict Accuracy | Feedback Quality |
+|---------|------------------|------------------|
+| Part 1: Factual > Conceptual? | FAIL | N/A |
+| Part 2: Context helps conceptual more? | FAIL | **PASS** |
 
 ---
 

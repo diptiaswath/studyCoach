@@ -61,6 +61,49 @@ At 8B model scale:
 
 This aligns with the baseline finding: text_only (56%) > multimodal (48%) for overall verdict accuracy.
 
-### Note
+---
 
-This evaluation tests **verdict classification only**, not feedback quality. Prior human evaluation showed multimodal produces better explanations (80% match) despite worse classification (48% accuracy).
+## Feedback Quality by Error Type (LLM Judge)
+
+Using Claude as judge to evaluate feedback quality (Match/Partial/Unmatched).
+
+### Match Rate by Error Type × Scenario
+
+| Error Type | text_only | caption_only | vision_only | multimodal | Δ |
+|------------|-----------|--------------|-------------|------------|---|
+| factual | 13.5% (7/52) | 25.0% (13/52) | 28.8% (15/52) | 34.6% (18/52) | **+21.2pp** |
+| conceptual | 26.8% (11/41) | 51.2% (21/41) | 36.6% (15/41) | 58.5% (24/41) | **+31.7pp** |
+| omission | 0.0% (0/15) | 0.0% (0/15) | 26.7% (4/15) | 33.3% (5/15) | **+33.3pp** |
+
+### Context Benefit for Feedback (Δ = multimodal - text_only)
+
+| Error Type | Δ Match | Interpretation |
+|------------|---------|----------------|
+| factual | +21.2pp | Visual context **helps** |
+| conceptual | +31.7pp | Visual context **helps** |
+| omission | +33.3pp | Visual context **helps** |
+
+**Key finding:** All Δ values are positive — visual context helps feedback quality for ALL error types.
+
+### H3 Part 2 (Feedback): Context helps conceptual more than factual?
+
+- Δ_factual: +21.2pp
+- Δ_conceptual: +31.7pp
+- **Result: PASS**
+
+---
+
+## Combined H3 Summary: Verdict vs Feedback
+
+| Metric | Factual Δ | Conceptual Δ | Omission Δ | Effect |
+|--------|-----------|--------------|------------|--------|
+| **Verdict Accuracy** | -21.2pp | -14.6pp | -6.7pp | **Hurts all** |
+| **Feedback Quality** | +21.2pp | +31.7pp | +33.3pp | **Helps all** |
+
+### Key Insight
+
+Visual input has **opposite effects** at 8B scale:
+- **Verdict:** Hurts classification (model gets distracted)
+- **Feedback:** Helps explanation (model uses figure to explain)
+
+This confirms: **"The model classifies better without images but explains better with them."**
