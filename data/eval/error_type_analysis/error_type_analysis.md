@@ -15,11 +15,13 @@ and visual context helps conceptual errors more than factual errors.
 
 ## Context Benefit (Δ = multimodal - text_only)
 
-| Error Type | Δ (pp) |
-|------------|--------|
-| factual | -21.2 |
-| conceptual | -14.6 |
-| omission | -6.7 |
+| Error Type | Δ (pp) | Interpretation |
+|------------|--------|----------------|
+| factual | -21.2 | Visual context **hurts** by 21.2pp |
+| conceptual | -14.6 | Visual context **hurts** by 14.6pp |
+| omission | -6.7 | Visual context **hurts** by 6.7pp |
+
+**Key finding:** All Δ values are negative — visual context hurts verdict accuracy for ALL error types at 8B scale.
 
 ## H3 Hypothesis Test
 
@@ -33,8 +35,32 @@ and visual context helps conceptual errors more than factual errors.
 
 - Δ_factual: -21.2pp
 - Δ_conceptual: -14.6pp
-- **Result: PASS**
+- **Result: PASS (technically, but misleading)**
+
+**Clarification:** This "passes" only because -14.6 > -21.2 (less negative). Visual context does NOT help conceptual errors — it **hurts** them by 14.6pp. The "pass" only means it hurts factual errors even more (-21.2pp).
 
 ---
 
-**H3 Overall: PARTIAL**
+## Summary
+
+**H3 Overall: FAIL**
+
+Both parts of the hypothesis are effectively wrong:
+
+1. **Part 1 (FAIL):** Factual errors are NOT detected more reliably — conceptual errors are easier to classify (54.3% vs 39.4%)
+
+2. **Part 2 (technically PASS, effectively FAIL):** Visual context does NOT help conceptual errors — it hurts them by 14.6pp. The "pass" only indicates it hurts factual errors even more (-21.2pp).
+
+### Interpretation
+
+At 8B model scale:
+- **Text-only performs best** for all error types
+- **Visual input is a distraction** for verdict classification
+- **Factual errors are hardest** to detect, despite being "visually obvious" — the model struggles to ground specific values from figures
+- **Conceptual errors are easier** — possibly because the model can detect logical inconsistencies in text without needing precise visual grounding
+
+This aligns with the baseline finding: text_only (56%) > multimodal (48%) for overall verdict accuracy.
+
+### Note
+
+This evaluation tests **verdict classification only**, not feedback quality. Prior human evaluation showed multimodal produces better explanations (80% match) despite worse classification (48% accuracy).
