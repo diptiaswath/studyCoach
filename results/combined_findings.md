@@ -304,7 +304,7 @@ This confirms the baseline finding: **"The model classifies better without image
 | Priority | Action | Rationale |
 |----------|--------|-----------|
 | High | Test stronger model (72B+) | See if vision helps classification at scale |
-| High | Filter to Factual errors | Where visual grounding matters most |
+| Done | Filter to Factual errors | H3 tested: visual context hurts factual most (-21.2pp) — needs 72B+ |
 | Medium | Chain-of-thought prompting | Force model to describe figure first |
 | Medium | Larger eval sample (200+) | Detect smaller differences reliably |
 | Optional | Add paper context (C5 condition) | Test if relevant paragraphs help reasoning-dependent errors more than factual errors |
@@ -402,6 +402,10 @@ The dataset contains different figure types with different reasoning demands:
 | `results/human_eval_summary.md` | Human annotation results |
 | `data/eval/*_no_answer_results.json` | Raw eval outputs |
 | `data/eval/error_type_analysis/` | H3 hypothesis test results (verdict by error type) |
+| `data/eval/error_type_analysis/feedback_by_error_type.md` | H3 feedback quality results (LLM judge) |
+| `data/eval/error_type_analysis/feedback_judgments.json` | Raw LLM judge outputs (432 judgments) |
+| `src/analyze_feedback_by_error_type.py` | Script for H3 feedback evaluation using Claude |
+| `src/eval_by_error_type.py` | Script for H3 verdict accuracy evaluation |
 | `baseline_findings/FINDINGS.md` | Full analysis notes |
 | `HUMAN_FINDINGS.md` | Human evaluation methodology and findings |
 | `human_vs_metrics_summary.csv` | Human match labels per scenario |
