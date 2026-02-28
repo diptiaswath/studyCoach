@@ -297,11 +297,6 @@ This confirms the baseline finding: **"The model classifies better without image
 | Part 1: Factual > Conceptual? | FAIL | FAIL |
 | Part 2: Context helps conceptual more? | FAIL | **PASS** |
 
-**Part 1 Feedback Details:**
-- Factual avg match: 25.5%
-- Conceptual avg match: 43.3%
-- Conceptual feedback is better for both verdict and feedback
-
 ---
 
 ## Next Steps
