@@ -5,7 +5,7 @@ Tests H3: "Factual errors detected more reliably than conceptual errors,
 and context (visual input) helps conceptual errors more than factual errors."
 
 This script runs all 4 scenarios on error-type subsets and calculates:
-- Accuracy by error type × scenario
+- Verdict Accuracy by error type × scenario
 - Context benefit (Δ = multimodal - text_only)
 - H3 verdict (Part 1: factual > conceptual; Part 2: Δ_conceptual > Δ_factual)
 
