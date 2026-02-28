@@ -181,11 +181,23 @@ The SPIQA+ dataset error distribution:
 | **Conceptual** | Student says "loss decreases throughout" but figure shows it plateaus | **Medium** — must see pattern being misinterpreted |
 | **Omission** | Student mentions only one result but figure shows four | **Low** — can sometimes detect incompleteness from text alone |
 
-**Impact on findings:**
+**H3 Tested This — Results Were Surprising:**
 
-Factual errors are exactly where visual input should help most — the model must see the figure to verify claims. With only 48% factual errors in the dataset, multimodal has fewer opportunities to demonstrate its classification advantage.
+We predicted factual errors would benefit most from visual context (high grounding needed). The opposite occurred:
 
-The 8pp gap favoring text-only (56% vs 48%) might **shrink** if we tested on factual errors only — those are the cases where seeing the figure is essential. This supports the "Filter to Factual errors" next step below.
+| Error Type | Verdict Δ | Feedback Δ | Verdict Effect | Feedback Effect |
+|------------|-----------|------------|----------------|-----------------|
+| Factual | -21.2pp | +21.2pp | Hurts most | Helps least |
+| Conceptual | -14.6pp | +31.7pp | Hurts medium | Helps medium |
+| Omission | -6.7pp | +33.3pp | Hurts least | Helps most |
+
+**Interpretation:**
+
+- **Verdict accuracy:** Visual context hurts factual errors *most* (-21.2pp), not least. The 8B model cannot reliably ground specific values from figures — visual input adds noise rather than helping verification.
+
+- **Feedback quality:** Visual context helps omission errors *most* (+33.3pp). The model can use the figure to explain what was missing, even if it can't classify correctly.
+
+- **The paradox:** High visual grounding *needed* ≠ high visual grounding *achieved*. At 8B scale, the model struggles most with precisely the errors that require detailed visual verification.
 
 ---
 
