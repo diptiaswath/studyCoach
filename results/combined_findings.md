@@ -189,6 +189,51 @@ The 8pp gap favoring text-only (56% vs 48%) might **shrink** if we tested on fac
 
 ---
 
+## H3 Hypothesis Test: Verdict Accuracy by Error Type
+
+We ran a full evaluation on all 108 error examples (excluding correct answers) to test H3.
+
+**H3:** Factual errors detected more reliably than conceptual errors, and visual context helps conceptual errors more than factual errors.
+
+### Accuracy by Error Type × Scenario
+
+| Error Type | text_only | caption_only | vision_only | multimodal | Avg |
+|------------|-----------|--------------|-------------|------------|-----|
+| factual (n=52) | 51.9% | 40.4% | 34.6% | 30.8% | 39.4% |
+| conceptual (n=41) | 63.4% | 61.0% | 43.9% | 48.8% | 54.3% |
+| omission (n=15) | 53.3% | 33.3% | 46.7% | 46.7% | 45.0% |
+
+### Context Benefit (Δ = multimodal - text_only)
+
+| Error Type | Δ (pp) | Interpretation |
+|------------|--------|----------------|
+| factual | -21.2 | Visual context **hurts** by 21.2pp |
+| conceptual | -14.6 | Visual context **hurts** by 14.6pp |
+| omission | -6.7 | Visual context **hurts** by 6.7pp |
+
+**Key finding:** All Δ values are negative — visual context hurts verdict accuracy for ALL error types at 8B scale.
+
+### H3 Results
+
+| Part | Hypothesis | Result |
+|------|------------|--------|
+| 1 | Factual > Conceptual? | **FAIL** (39.4% < 54.3%) |
+| 2 | Context helps conceptual more? | **FAIL** (hurts both; -14.6pp vs -21.2pp) |
+
+**H3 Overall: FAIL**
+
+### Interpretation
+
+1. **Part 1 failed:** Factual errors are NOT detected more reliably — conceptual errors are easier to classify (54.3% vs 39.4%). The model struggles to ground specific values from figures.
+
+2. **Part 2 failed:** Visual context does NOT help conceptual errors — it hurts them by 14.6pp. It just hurts factual errors even more (-21.2pp).
+
+3. **Text-only performs best** for all error types — visual input is a distraction for verdict classification at 8B scale.
+
+**Note:** This tests verdict classification only. Prior human evaluation showed multimodal produces better explanations (80% match) despite worse classification.
+
+---
+
 ## Next Steps
 
 | Priority | Action | Rationale |
@@ -212,7 +257,9 @@ At 8B scale, visual input hurts classification (56% → 48%) but helps explanati
 
 ### Why Filter to Factual Errors?
 
-*See Dataset Composition Note above.* Factual errors (48% of dataset) require high visual grounding — the model must read actual values from the figure. The 8pp gap favoring text-only might shrink or reverse if we test on factual errors only.
+*See Dataset Composition Note above.* Factual errors (48% of dataset) require high visual grounding — the model must read actual values from the figure.
+
+**Update (H3 tested):** We tested this hypothesis and found the opposite — factual errors are actually *harder* to detect (39.4% avg) than conceptual errors (54.3% avg). Visual context hurts factual errors most severely (-21.2pp). This suggests the 8B model cannot reliably ground specific values from figures, making factual verification particularly difficult.
 
 ### Why Chain-of-Thought Prompting?
 
@@ -284,6 +331,7 @@ The dataset contains different figure types with different reasoning demands:
 | `results/baseline_eval_summary.md` | Detailed baseline eval results |
 | `results/human_eval_summary.md` | Human annotation results |
 | `data/eval/*_no_answer_results.json` | Raw eval outputs |
+| `data/eval/error_type_analysis/` | H3 hypothesis test results (verdict by error type) |
 | `baseline_findings/FINDINGS.md` | Full analysis notes |
 | `HUMAN_FINDINGS.md` | Human evaluation methodology and findings |
 | `human_vs_metrics_summary.csv` | Human match labels per scenario |
