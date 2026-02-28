@@ -31,6 +31,12 @@ Each feedback is classified as Match / Partial / Unmatched.
 
 ## H3 Hypothesis Test (Feedback)
 
+**H3 Part 1:** Are factual errors detected more reliably than conceptual?
+
+- Factual avg (Match %): 25.5%
+- Conceptual avg (Match %): 43.3%
+- **Result: FAIL** (Factual < Conceptual)
+
 **H3 Part 2:** Does visual context help conceptual feedback more than factual?
 
 - Δ_factual (Match %): +21.2pp

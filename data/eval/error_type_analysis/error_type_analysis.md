@@ -85,6 +85,12 @@ Using Claude as judge to evaluate feedback quality (Match/Partial/Unmatched).
 
 **Key finding:** All Δ values are positive — visual context helps feedback quality for ALL error types.
 
+### H3 Part 1 (Feedback): Factual > Conceptual?
+
+- Factual avg: 25.5%
+- Conceptual avg: 43.3%
+- **Result: FAIL** (Factual < Conceptual)
+
 ### H3 Part 2 (Feedback): Context helps conceptual more than factual?
 
 - Δ_factual: +21.2pp
