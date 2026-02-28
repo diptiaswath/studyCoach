@@ -270,6 +270,7 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 
 | Part | Hypothesis | Result |
 |------|------------|--------|
+| 1 | Factual > Conceptual? | **FAIL** (25.5% < 43.3%) |
 | 2 | Context helps conceptual more than factual? | **PASS** (+31.7pp > +21.2pp) |
 
 ---
@@ -293,8 +294,13 @@ This confirms the baseline finding: **"The model classifies better without image
 
 | H3 Part | Verdict Accuracy | Feedback Quality |
 |---------|------------------|------------------|
-| Part 1: Factual > Conceptual? | FAIL | N/A |
+| Part 1: Factual > Conceptual? | FAIL | FAIL |
 | Part 2: Context helps conceptual more? | FAIL | **PASS** |
+
+**Part 1 Feedback Details:**
+- Factual avg match: 25.5%
+- Conceptual avg match: 43.3%
+- Conceptual feedback is better for both verdict and feedback
 
 ---
 
