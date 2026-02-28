@@ -250,11 +250,11 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 
 ### Match Rate by Error Type × Scenario
 
-| Error Type | text_only | caption_only | vision_only | multimodal | Δ |
-|------------|-----------|--------------|-------------|------------|---|
-| factual (n=52) | 13.5% | 25.0% | 28.8% | 34.6% | **+21.2pp** |
-| conceptual (n=41) | 26.8% | 51.2% | 36.6% | 58.5% | **+31.7pp** |
-| omission (n=15) | 0.0% | 0.0% | 26.7% | 33.3% | **+33.3pp** |
+| Error Type | text_only | caption_only | vision_only | multimodal | Avg | Δ |
+|------------|-----------|--------------|-------------|------------|-----|---|
+| factual (n=52) | 13.5% | 25.0% | 28.8% | 34.6% | 25.5% | **+21.2pp** |
+| conceptual (n=41) | 26.8% | 51.2% | 36.6% | 58.5% | 43.3% | **+31.7pp** |
+| omission (n=15) | 0.0% | 0.0% | 26.7% | 33.3% | 15.0% | **+33.3pp** |
 
 ### Context Benefit for Feedback (Δ = multimodal - text_only)
 
