@@ -370,7 +370,12 @@ The current 4 scenarios (C1-C4) vary caption and image, but don't test paper con
 | C4 | multimodal (Q + Caption + Image + Student Answer) | Tested |
 | **C5** | **multimodal + relevant paragraphs** | **Optional** |
 
-**Hypothesis (H3):** Paper context will help reasoning-dependent errors (conceptual, omission) more than visually-obvious errors (factual). For factual errors like "BERT achieves 89%", the figure alone suffices. For conceptual errors like "this shows BERT is best for all tasks", context about experimental setup might help the model reason better.
+**Future hypothesis:** Paper context may help conceptual/omission errors more than factual errors, since these require understanding experimental setup beyond what the figure shows.
+
+**Motivation from H3 findings:**
+- Visual context helped feedback quality most for **omission errors (+33.3pp)** — the model can explain what's missing when it sees the figure
+- Paper context might further improve this by providing the full scope of what should be included
+- Visual context hurt verdict accuracy most for **factual errors (-21.2pp)** — paper context might help ground specific values that the 8B model struggles to read from figures
 
 ### Why Analyze by Figure Type?
 
