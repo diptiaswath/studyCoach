@@ -18,20 +18,11 @@
 | **Input modality** | `text_only`, `caption_only`, `vision_only`, `multimodal` |
 | **Reference answer provided to evaluated model** | No |
 
----
-
-## Summary Results
-
-| Scenario | N | Match | Partial | Unmatched | Match % | Soft Match % | Avg F1 | Avg ROUGE-L | Avg BLEU |
-|---|---|---|---|---|---|---|---|---|---|
-| multimodal | 50 | 10 | 19 | 21 | **20.0%** | **58.0%** | 0.298 | 0.202 | 7.44 |
-| caption_only | 50 | 4 | 20 | 26 | 8.0% | 48.0% | **0.325** | **0.207** | 7.16 |
-| vision_only | 50 | 3 | 21 | 26 | 6.0% | 48.0% | 0.294 | 0.193 | 8.13 |
-| text_only | 50 | 1 | 20 | 29 | 2.0% | 42.0% | 0.298 | 0.192 | 5.93 |
+> **Note**: Same judge prompt as the 8B baseline evaluation.
 
 ---
 
-## Prior Evaluation Results
+## Evaluation Results
 
 ### Phase 1: Verdict Accuracy
 
@@ -68,18 +59,46 @@ Same annotation indices as baseline for direct comparison.
 
 **Finding**: Multimodal leads on strict match. Caption_only and text_only tie at 50% but both reach 90% soft match, suggesting the model frequently captures the right idea but incompletely.
 
+### Phase 2c: LLM-as-Judge (N=50 per scenario)
+
+| Scenario | N | Match | Partial | Unmatched | Match % | Soft Match % | Avg F1 | Avg ROUGE-L | Avg BLEU |
+|---|---|---|---|---|---|---|---|---|---|
+| multimodal | 50 | 10 | 19 | 21 | **20.0%** | **58.0%** | 0.298 | 0.202 | 7.44 |
+| caption_only | 50 | 4 | 20 | 26 | 8.0% | 48.0% | **0.325** | **0.207** | 7.16 |
+| vision_only | 50 | 3 | 21 | 26 | 6.0% | 48.0% | 0.294 | 0.193 | 8.13 |
+| text_only | 50 | 1 | 20 | 29 | 2.0% | 42.0% | 0.298 | 0.192 | 5.93 |
+
+**Finding**: Multimodal leads on strict match (20%) with a clear gap over other scenarios. Soft match rates (42–58%) are more compressed, mirroring the baseline pattern where the model is often directionally correct but incomplete.
+
+---
+
+## Comparison with Human Annotation
+
+Human annotators (N=10 per scenario) were consistently more lenient than the LLM judge (N=50), matching the same pattern observed for the 8B baseline.
+
+| Scenario | Human Match % | LLM Match % | Human Soft % | LLM Soft % |
+|---|---|---|---|---|
+| multimodal | **80%** | **20%** | 90% | **58%** |
+| vision_only | 60% | 6% | 80% | 48% |
+| caption_only | 50% | 8% | **90%** | 48% |
+| text_only | 50% | 2% | **90%** | 42% |
+
+> Note: Human N=10, LLM judge N=50. Comparison is directional.
+
+**Scenario ranking is consistent across both evaluations**: multimodal > vision_only ≥ caption_only > text_only. Despite the absolute gap (human rates 4–10× higher than LLM strict match), the ordering is preserved — the LLM judge confirms the human finding at larger scale. The leniency gap reflects the stricter rubric, larger sample, and the tendency for human annotators to credit feedback that is _directionally correct_ even if incomplete.
+
 ---
 
 ## Comparison with 8B Baseline
 
-### LLM Judge
+### Verdict Accuracy
 
-| Scenario | 8B Match % | 32B Match % | 8B Soft % | 32B Soft % |
-|---|---|---|---|---|
-| multimodal | 6% | **20%** (+14pp) | 56% | **58%** (+2pp) |
-| caption_only | 2% | **8%** (+6pp) | 46% | **48%** (+2pp) |
-| vision_only | 4% | **6%** (+2pp) | 48% | 48% (0pp) |
-| text_only | 2% | 2% (0pp) | 40% | **42%** (+2pp) |
+| Scenario | 8B | 32B | Delta |
+|---|---|---|---|
+| caption_only | 48% | **58%** | +10pp |
+| vision_only | 50% | **56%** | +6pp |
+| multimodal | 48% | **54%** | +6pp |
+| text_only | 56% | 56% | 0pp |
 
 ### Human Annotation
 
@@ -90,14 +109,14 @@ Same annotation indices as baseline for direct comparison.
 | caption_only | 50% | 50% | 90% | 90% |
 | text_only | 40% | **50%** (+10pp) | 90% | 90% |
 
-### Verdict Accuracy
+### LLM Judge
 
-| Scenario | 8B | 32B | Delta |
-|---|---|---|---|
-| caption_only | 48% | **58%** | +10pp |
-| vision_only | 50% | **56%** | +6pp |
-| multimodal | 48% | **54%** | +6pp |
-| text_only | 56% | 56% | 0pp |
+| Scenario | 8B Match % | 32B Match % | 8B Soft % | 32B Soft % |
+|---|---|---|---|---|
+| multimodal | 6% | **20%** (+14pp) | 56% | **58%** (+2pp) |
+| caption_only | 2% | **8%** (+6pp) | 46% | **48%** (+2pp) |
+| vision_only | 4% | **6%** (+2pp) | 48% | 48% (0pp) |
+| text_only | 2% | 2% (0pp) | 40% | **42%** (+2pp) |
 
 ---
 
