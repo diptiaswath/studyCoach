@@ -325,9 +325,9 @@ We evaluated verdict accuracy broken down by figure type to test H4.
 
 ### H4 Results
 
-| Part | Hypothesis | Result |
-|------|------------|--------|
-| 1 | Tables > Schematics? | **PASS** (70.5% > 33.3%) |
+| Metric | Hypothesis | Result |
+|--------|------------|--------|
+| Verdict Accuracy | Tables > Schematics? | **PASS** (70.5% > 33.3%) |
 
 **H4 Overall: PASS**
 
@@ -378,9 +378,9 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 
 ### H4 Results (Feedback)
 
-| Part | Hypothesis | Result |
-|------|------------|--------|
-| 1 | Tables > Schematics? | **PASS** (55.7% > 50.0%) |
+| Metric | Hypothesis | Result |
+|--------|------------|--------|
+| Feedback Quality | Tables > Schematics? | **PASS** (55.7% > 50.0%) |
 
 **H4 Feedback: PASS**
 
