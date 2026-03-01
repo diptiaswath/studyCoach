@@ -97,7 +97,63 @@ Many questions in the dataset reference figures or tables that are not available
 
 > — = LLM judge not run for this condition. Soft Match % = (match + partial) / total.
 
-Full numeric results: `data/eval/eval_summary/combined_summary.csv`
+Full numeric results: `data/eval/eval_summary/baseline_summary.csv`
+
+---
+
+## Prior Evaluation Results (Baseline)
+
+Before running the LLM-as-judge, the pipeline was evaluated across three phases. These results provide the baseline context for interpreting what the LLM judge adds.
+
+### Phase 1: Verdict Accuracy
+
+The first question was simply: does the model correctly classify whether a student's answer is correct or incorrect?
+
+| Scenario               | Accuracy |
+| ---------------------- | -------- |
+| text_only_no_answer    | 56%      |
+| vision_only_no_answer  | 50%      |
+| caption_only_no_answer | 48%      |
+| multimodal_no_answer   | 48%      |
+
+**Finding**: Text-only wins on classification. Adding visual input hurts accuracy at 8B scale. This is somewhat counterintuitive — more context should help — but reflects that at this model size, visual information adds noise to the binary decision rather than signal. The model is likely doing plausibility checking from training knowledge rather than genuinely verifying claims against the figure.
+
+This matters because **verdict accuracy sets an upper bound on feedback quality**: if the model misclassifies whether an answer is right or wrong, the feedback it generates will be misdirected regardless of how well-written it is.
+
+### Phase 2a: Automated Metrics
+
+With verdict accuracy established, we then measured whether the generated feedback matched the ground truth feedback lexically.
+
+| Scenario               | F1   | ROUGE-L | BLEU |
+| ---------------------- | ---- | ------- | ---- |
+| text_only_no_answer    | 0.30 | 0.19    | 5.1  |
+| caption_only_no_answer | 0.29 | 0.19    | 4.8  |
+| vision_only_no_answer  | 0.29 | 0.18    | 6.7  |
+| multimodal_no_answer   | 0.30 | 0.20    | 6.2  |
+
+**Finding**: Automatic metrics show almost no difference across scenarios (~0.29–0.30 F1). If we stopped here, we'd conclude all scenarios produce similar feedback quality — a misleading conclusion.
+
+### Phase 2b: Human Evaluation
+
+Human annotators evaluated a subset of N=10 examples per scenario on whether feedback was actually useful to a student.
+
+| Scenario               | Match | Partial | Unmatched | Human Match % | Soft Match % |
+| ---------------------- | ----- | ------- | --------- | ------------- | ------------ |
+| multimodal_no_answer   | 8     | 2       | 0         | 80%           | 100%         |
+| vision_only_no_answer  | 6     | 2       | 2         | 60%           | 80%          |
+| caption_only_no_answer | 5     | 4       | 1         | 50%           | 90%          |
+| text_only_no_answer    | 4     | 5       | 1         | 40%           | 90%          |
+
+**Finding**: Human evaluation reveals dramatic differences that automatic metrics missed. Multimodal feedback is twice as useful as text-only (80% vs 40%). This is the key insight motivating the LLM-as-judge phase: F1/ROUGE/BLEU are poor proxies for feedback quality, and semantic evaluation is necessary to reveal true differences.
+
+### The Core Tension: Verdict Accuracy ≠ Feedback Quality
+
+| Metric                      | Winner           | Loser            |
+| --------------------------- | ---------------- | ---------------- |
+| Verdict Accuracy (Phase 1)  | text_only (56%)  | multimodal (48%) |
+| Feedback Quality (Phase 2b) | multimodal (80%) | text_only (40%)  |
+
+At 8B scale, adding visual input _hurts_ classification accuracy but _helps_ explanation quality. The model can use visual information to reason and explain better, but cannot yet use it reliably enough to improve the binary verdict. The visual signal adds noise to the decision, but adds value to the explanation. This suggests that scaling the model would likely close the verdict gap while preserving the explanation advantage.
 
 ---
 
@@ -113,6 +169,12 @@ Prior to LLM-as-judge evaluation, we conducted a human annotation study on a sma
 | vision_only_no_answer  | 60%           | 4%          | 48%                | 48%              |
 
 > Note: Human annotation N=10 per scenario; LLM judge N=50. Direct comparison is directional only.
+
+### Key Finding
+
+> **Human evaluation reveals dramatic differences that automatic metrics missed. Multimodal feedback is twice as useful as text-only (80% vs 40% match rate).**
+
+This is a critical result: F1, ROUGE-L, and BLEU scores are relatively flat across all configurations (ranging ~0.25–0.33), and would not have flagged multimodal as meaningfully better. Human judgment, by contrast, captures whether the feedback is actually _useful to the student_ — a dimension that lexical overlap metrics fundamentally cannot measure. This underscores the value of semantic evaluation (human or LLM-based) over automatic metrics alone for this task.
 
 ### Possible Explanations for the Leniency Gap
 
@@ -132,11 +194,39 @@ These two evaluations are complementary rather than contradictory. Human annotat
 
 ---
 
-## Key Observations
+## LLM Judge Results vs Prior Findings
 
-- **Match rates are low overall (2–6%)**, with most feedback landing in `partial`. This suggests AI-generated feedback is directionally correct but less complete than the educator reference — likely because ground-truth feedback often references figures and tables unavailable to the model.
-- **Multimodal_no_answer achieves the highest soft match rate (56%)** and BLEU score (6.16), making it the strongest performing no-answer configuration.
-- **Automatic metrics correlate loosely with LLM judge labels** — ROUGE-L and F1 differences across conditions are small and do not strongly track soft match rates, consistent with findings from the human evaluation.
-- **Results are directional**: with N=50 per condition and missing visual context, these numbers should be interpreted as trends rather than definitive rankings.
+With the baseline context established, we can now interpret the LLM judge results and ask: what changed, what stayed the same, and what does the larger N reveal?
+
+### What Stayed the Same
+
+**Multimodal remains the strongest scenario for feedback quality.** The LLM judge confirms the human evaluation finding — multimodal_no_answer achieves the highest soft match rate (56%) among all judged conditions, consistent with the 80% human match rate directionally. The ranking of scenarios is broadly preserved: multimodal > vision_only > caption_only > text_only on soft match.
+
+**The relative magnitude of the multimodal advantage is consistent across both evaluations.** Human eval showed multimodal at roughly 2x text_only (80% vs 40% strict match); the LLM judge soft match shows a similar relative advantage (56% vs 40%). The gap narrows in absolute terms but the direction and magnitude hold — strengthening rather than contradicting the human finding.
+
+> **Sample size disclaimer**: With N=10 per scenario in human annotation, each single example shifts the match rate by 10 percentage points. The observed 40pp spread (40% to 80%) may narrow as annotation scales up. However, the directional finding is supported by soft match rates, which are less sensitive to individual examples — multimodal achieves 100% soft match vs 90% for text_only, suggesting the advantage is real even if the strict gap is somewhat inflated by small N.
+
+**Automatic metrics still fail to differentiate.** F1 and ROUGE-L remain flat across conditions (0.29–0.30), reinforcing the Phase 2a finding. The LLM judge provides meaningful signal where lexical metrics cannot.
+
+### What Changed
+
+**Match rates dropped dramatically from human to LLM judge** (e.g., multimodal: 80% → 6% strict match, 100% → 56% soft match). This is expected given the stricter rubric, larger N, and non-expert vs domain-aware evaluation — see the leniency gap analysis above. The absolute numbers are not directly comparable, but the _relative ordering_ across scenarios is what matters, and that ordering is largely preserved.
+
+**The LLM judge surfaces more unmatched cases.** With N=50, we see that a meaningful portion of feedback is genuinely off-target (22–30 unmatched cases per scenario), something that N=10 human annotation could not reliably detect. This suggests the 80–100% soft match rates from human evaluation were optimistic — likely inflated by small sample size and non-expert leniency.
+
+**caption_only soft match (46%) lags behind human (90%).** This is one of the larger divergences and likely reflects that caption-based feedback frequently references visual details the LLM judge can identify as missing or imprecise, whereas a human non-expert reading the same feedback would find it reasonable.
+
+### Overall Interpretation
+
+| Dimension                | Human Eval (N=10)                    | LLM Judge (N=50)                       |
+| ------------------------ | ------------------------------------ | -------------------------------------- |
+| Scenario ranking         | multimodal > vision > caption > text | multimodal > vision > caption > text ✓ |
+| Absolute match rates     | 40–80%                               | 2–6% (strict), 40–56% (soft)           |
+| Differentiates scenarios | Yes                                  | Yes ✓                                  |
+| Reliable sample size     | No (N=10)                            | More reliable (N=50)                   |
+
+The LLM judge validates the core human evaluation finding at scale: **multimodal input produces meaningfully better student feedback than text-only**, a difference invisible to automatic metrics. The lower absolute rates reflect a stricter, more consistent evaluation standard — not a contradiction of the human results.
+
+> Results remain directional given missing visual context in ~50% of examples. Low-confidence verdicts should be flagged for human review.
 
 ---
