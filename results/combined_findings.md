@@ -227,18 +227,18 @@ We ran a full evaluation on all 108 error examples (excluding correct answers) t
 
 ### H3 Results
 
-| Part | Hypothesis | Result |
-|------|------------|--------|
-| 1 | Factual > Conceptual? | **FAIL** (39.4% < 54.3%) |
-| 2 | Context helps conceptual more? | **FAIL** (hurts both; -14.6pp vs -21.2pp) |
+| Metric | Hypothesis | Result |
+|--------|------------|--------|
+| Verdict Accuracy | Factual > Conceptual? | **FAIL** (39.4% < 54.3%) |
+| Context Benefit on Verdict Accuracy | Context helps conceptual more? | **FAIL** (hurts both; -14.6pp vs -21.2pp) |
 
 **H3 Overall: FAIL**
 
 ### Interpretation
 
-1. **Part 1 failed:** Factual errors are NOT detected more reliably — conceptual errors are easier to classify (54.3% vs 39.4%). The model struggles to ground specific values from figures.
+1. **Verdict Accuracy failed:** Factual errors are NOT detected more reliably — conceptual errors are easier to classify (54.3% vs 39.4%). The model struggles to ground specific values from figures.
 
-2. **Part 2 failed:** Visual context does NOT help conceptual errors — it hurts them by 14.6pp. It just hurts factual errors even more (-21.2pp).
+2. **Context Benefit on Verdict Accuracy failed:** Visual context does NOT help conceptual errors — it hurts them by 14.6pp. It just hurts factual errors even more (-21.2pp).
 
 3. **Text-only performs best** for all error types — visual input is a distraction for verdict classification at 8B scale.
 
