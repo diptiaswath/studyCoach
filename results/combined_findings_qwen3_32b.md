@@ -382,19 +382,22 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 
 ### What Improved at 32B Scale
 
-1. **Schematics:** Visual context now helps verdict accuracy (+18.8pp vs +0.0pp at 8B)
-2. **Conceptual errors:** Visual context now helps verdict accuracy (+2.4pp vs -14.6pp at 8B)
-3. **Caption understanding:** Caption-only accuracy improved (48% → 58%)
+1. **Multimodal feedback quality:** LLM judge match rate improved dramatically (6% → 20%, +14pp)
+2. **Schematics:** Visual context now helps verdict accuracy (+18.8pp vs +0.0pp at 8B)
+3. **Conceptual errors:** Visual context now helps verdict accuracy (+2.4pp vs -14.6pp at 8B)
+4. **Caption understanding:** Caption-only verdict accuracy improved (48% → 58%)
+5. **Plot feedback quality:** Visual context now helps (+33.8pp vs -5.3pp at 8B)
 
 ### What Remains Challenging
 
 1. **Factual errors:** Still hard to detect (28.4% avg) and visual context still hurts (-7.7pp)
 2. **Plots:** Visual context still hurts verdict accuracy (-4.4pp)
 3. **Tables:** Verdict accuracy lower than expected (51.1%)
+4. **Text-only feedback:** LLM judge match rate remains low (2%) with no improvement over 8B
 
 ### Key Insight
 
-> "At 32B scale, the model can leverage visual context for spatial understanding (schematics +18.8pp) and conceptual reasoning (+2.4pp), but still struggles with precise value extraction (factual -7.7pp)."
+> "At 32B scale, the model can leverage visual context for spatial understanding (schematics +18.8pp), conceptual reasoning (+2.4pp), and feedback quality (multimodal +14pp), but still struggles with precise value extraction (factual -7.7pp)."
 
 ---
 
@@ -407,3 +410,4 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 | `data/eval/qwen3_32b/error_type_analysis/` | H3 results by error type |
 | `data/eval/qwen3_32b/figure_type_analysis/` | H4 results by figure type |
 | `data/eval/qwen3_32b/feedback_judgments.json` | LLM judge outputs |
+| `llm_as_judge/llm_as_judge_findings_qwen3_32b.md` | H2 LLM-as-Judge evaluation (branch: llm-as-judge) |
