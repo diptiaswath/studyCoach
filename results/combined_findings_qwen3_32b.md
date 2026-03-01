@@ -292,7 +292,9 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 
 **Finding:** 32B shows improved performance with captions and visual input.
 
-### H3: Context Benefit by Error Type (Verdict)
+### H3: Context Benefit by Error Type
+
+#### Verdict Accuracy (Δ = C4 - C1)
 
 | Error Type | 8B Δ | 32B Δ | Improved? |
 |------------|------|-------|-----------|
@@ -302,7 +304,19 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 
 **Finding:** 32B shows major improvement for conceptual errors — visual context now helps instead of hurts.
 
-### H4: Context Benefit by Figure Type (Verdict)
+#### Feedback Quality (Δ = C4 - C1)
+
+| Error Type | 8B Δ | 32B Δ | Improved? |
+|------------|------|-------|-----------|
+| factual | +21.2pp | +21.2pp | Same (0pp) |
+| conceptual | +31.7pp | +29.3pp | No (-2.4pp) |
+| omission | +33.3pp | +26.7pp | No (-6.6pp) |
+
+**Finding:** Feedback quality context benefit remains strong at 32B, with slight decreases for conceptual and omission errors.
+
+### H4: Context Benefit by Figure Type
+
+#### Verdict Accuracy (Δ = C4 - C1)
 
 | Figure Type | 8B Δ | 32B Δ | Improved? |
 |-------------|------|-------|-----------|
@@ -311,6 +325,16 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 | schematic | +0.0pp | **+18.8pp** | Yes (+18.8pp) |
 
 **Finding:** 32B shows dramatic improvement for schematics — visual context now helps significantly.
+
+#### Feedback Quality (Δ = C4 - C1)
+
+| Figure Type | 8B Δ | 32B Δ | Improved? |
+|-------------|------|-------|-----------|
+| table | +4.5pp | **+15.7pp** | Yes (+11.2pp) |
+| plot | -5.3pp | **+33.8pp** | Yes (+39.1pp) |
+| schematic | +11.1pp | **+25.0pp** | Yes (+13.9pp) |
+
+**Finding:** 32B shows dramatic improvement in feedback quality for all figure types, especially plots (+39.1pp improvement).
 
 ---
 
