@@ -304,99 +304,105 @@ We evaluated verdict accuracy broken down by figure type to test H4.
 
 | Figure Type | text_only | caption_only | vision_only | multimodal | Avg | Δ |
 |-------------|-----------|--------------|-------------|------------|-----|---|
-| table (n=22) | 72.7% | 72.7% | 68.2% | 68.2% | 70.5% | -4.5pp |
-| plot (n=19) | 68.4% | 68.4% | 57.9% | 57.9% | 63.2% | -10.5pp |
-| schematic (n=9) | 33.3% | 33.3% | 33.3% | 33.3% | 33.3% | +0.0pp |
+| table (n=70) | 52.9% | 51.4% | 51.4% | 50.0% | 51.4% | -2.9pp |
+| plot (n=68) | 55.9% | 47.1% | 42.6% | 45.6% | 47.8% | -10.3pp |
+| schematic (n=32) | 50.0% | 46.9% | 37.5% | 59.4% | 48.4% | +9.4pp |
+| other (n=4) | 25.0% | 100.0% | 25.0% | 50.0% | 50.0% | +25.0pp |
 
 ### Context Benefit (Δ = multimodal - text_only)
 
 | Figure Type | Δ (pp) | Interpretation |
 |-------------|--------|----------------|
-| table | -4.5 | Visual context **hurts** |
-| plot | -10.5 | Visual context **hurts** |
-| schematic | +0.0 | Visual context **neutral** |
+| table | -2.9 | Visual context **hurts** |
+| plot | -10.3 | Visual context **hurts** |
+| schematic | +9.4 | Visual context **helps** |
+| other | +25.0 | Visual context **helps** |
 
-**Key finding:** Visual context hurts verdict accuracy for tables and plots, with no effect on schematics at 8B scale.
+**Key finding:** Visual context hurts verdict accuracy for tables and plots, but helps schematics (+9.4pp) at 8B scale.
 
 ### H4 Results
 
 | Metric | Hypothesis | Result |
 |--------|------------|--------|
-| Verdict Accuracy | Tables > Schematics? | **PASS** (70.5% > 33.3%) |
-| Context Benefit on Verdict Accuracy | Context helps schematics more than tables? | **PASS** (+0.0pp > -4.5pp) |
+| Verdict Accuracy | Tables > Schematics? | **PASS** (51.4% > 48.4%) |
+| Context Benefit on Verdict Accuracy | Context helps schematics more than tables? | **PASS** (+9.4pp > -2.9pp) |
 
 **H4 Overall: PASS**
 
 ### Interpretation
 
-1. **Tables are easiest** (70.5% avg) — structured, explicit data is easier to verify
-2. **Schematics are hardest** (33.3% avg) — spatial relationships require more complex reasoning
-3. **Plots are intermediate** (63.2% avg) — trend reading is easier than architecture understanding but harder than table lookup
-4. **Visual context hurts more for plots** (-10.5pp) than tables (-4.5pp) — the 8B model struggles more with spatial patterns
+1. **Tables are easiest** (51.4% avg) — structured, explicit data is easier to verify
+2. **Schematics are close** (48.4% avg) — only slightly harder than tables
+3. **Plots are hardest** (47.8% avg) — trend reading challenges the 8B model most
+4. **Visual context helps schematics most** (+9.4pp) — spatial relationships benefit from seeing the figure
 
 ### Practical Implications
 
 | Figure Type | Recommendation |
 |-------------|----------------|
-| **Tables** | Best suited for 8B model (70.5% accuracy) |
-| **Plots** | Moderate accuracy; consider 72B+ for trend verification |
-| **Schematics** | Poor accuracy (33.3%); requires larger model or CoT prompting |
+| **Tables** | Best suited for 8B model (51.4% accuracy) |
+| **Schematics** | Visual context helps (+9.4pp); use multimodal mode |
+| **Plots** | Visual context hurts (-10.3pp); consider text-only or 72B+ |
 
 ---
 
 ## H4 Hypothesis Test: Feedback Quality by Figure Type
 
-We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched).
+We also evaluated feedback quality using Claude (claude-sonnet-4-20250514) as LLM judge (Match/Partial/Unmatched).
 
 ### Match Rate by Figure Type × Scenario
 
 | Figure Type | text_only | caption_only | vision_only | multimodal | Avg | Δ |
 |-------------|-----------|--------------|-------------|------------|-----|---|
-| table (n=22) | 54.5% (12/22) | 59.1% (13/22) | 50.0% (11/22) | 59.1% (13/22) | 55.7% | +4.5pp |
-| plot (n=19) | 31.6% (6/19) | 36.8% (7/19) | 31.6% (6/19) | 26.3% (5/19) | 31.6% | -5.3pp |
-| schematic (n=9) | 44.4% (4/9) | 55.6% (5/9) | 44.4% (4/9) | 55.6% (5/9) | 50.0% | +11.1pp |
+| table (n=70) | 1.4% (1/70) | 4.3% (3/70) | 11.4% (8/70) | 8.6% (6/70) | 6.4% | +7.1pp |
+| plot (n=68) | 13.2% (9/68) | 25.0% (17/68) | 16.2% (11/68) | 32.4% (22/68) | 21.7% | +19.1pp |
+| schematic (n=32) | 25.0% (8/32) | 37.5% (12/32) | 28.1% (9/32) | 50.0% (16/32) | 35.2% | +25.0pp |
+| other (n=4) | 0.0% (0/4) | 0.0% (0/4) | 25.0% (1/4) | 50.0% (2/4) | 18.8% | +50.0pp |
 
 ### Soft Match Rate (Match + Partial)
 
 | Figure Type | text_only | caption_only | vision_only | multimodal | Δ |
 |-------------|-----------|--------------|-------------|------------|---|
-| table | 77.3% | 77.3% | 68.2% | 72.7% | -4.5pp |
-| plot | 57.9% | 52.6% | 57.9% | 52.6% | -5.3pp |
-| schematic | 66.7% | 66.7% | 66.7% | 66.7% | +0.0pp |
+| table | 20.0% (14/70) | 15.7% (11/70) | 24.3% (17/70) | 24.3% (17/70) | +4.3pp |
+| plot | 27.9% (19/68) | 33.8% (23/68) | 32.4% (22/68) | 36.8% (25/68) | +8.8pp |
+| schematic | 53.1% (17/32) | 59.4% (19/32) | 50.0% (16/32) | 62.5% (20/32) | +9.4pp |
+| other | 0.0% (0/4) | 25.0% (1/4) | 50.0% (2/4) | 50.0% (2/4) | +50.0pp |
 
 ### Context Benefit for Feedback (Δ = multimodal - text_only)
 
 | Figure Type | Δ Match | Δ Soft Match | Helps? |
 |-------------|---------|--------------|--------|
-| table | +4.5pp | -4.5pp | Mixed |
-| plot | -5.3pp | -5.3pp | No |
-| schematic | +11.1pp | +0.0pp | Yes |
+| table | +7.1pp | +4.3pp | Yes |
+| plot | +19.1pp | +8.8pp | Yes |
+| schematic | +25.0pp | +9.4pp | Yes |
+| other | +50.0pp | +50.0pp | Yes |
 
 ### H4 Results (Feedback)
 
 | Metric | Hypothesis | Result |
 |--------|------------|--------|
-| Feedback Quality | Tables > Schematics? | **PASS** (55.7% > 50.0%) |
-| Context Benefit on Feedback Quality | Context helps schematics more than tables? | **PASS** (+11.1pp > +4.5pp) |
+| Feedback Quality | Tables > Schematics? | **FAIL** (6.4% < 35.2%) |
+| Context Benefit on Feedback Quality | Context helps schematics more than tables? | **PASS** (+25.0pp > +7.1pp) |
 
-**H4 Feedback: PASS**
+**H4 Feedback: MIXED** — Tables are *not* easier for feedback quality, but visual context does help schematics more.
 
 ### Interpretation
 
-1. **Tables have best feedback quality** (55.7% Match) — structured data enables clearer explanations
-2. **Plots have worst feedback quality** (31.6% Match) — trend interpretation is challenging at 8B scale
-3. **Schematics benefit most from visual context** (+11.1pp) — spatial relationships need the image for explanation
-4. **Plots hurt by visual context** (-5.3pp) — model gets distracted by visual patterns
+1. **Schematics have best feedback quality** (35.2% Match) — visual context enables better explanations for spatial relationships
+2. **Tables have lowest feedback quality** (6.4% Match) — model struggles to provide useful feedback for table-based questions
+3. **Plots intermediate** (21.7% Match) — moderate feedback quality
+4. **Visual context helps all figure types for feedback** — unlike verdict accuracy, multimodal mode consistently improves feedback
 
 ### H4 Summary: Verdict Accuracy vs Feedback Quality by Figure Type
 
 | Figure Type | Verdict Accuracy Avg | Verdict Accuracy Δ | Feedback Quality Avg | Feedback Quality Δ |
 |-------------|----------------------|--------------------|----------------------|--------------------|
-| table | 70.5% | -4.5pp | 55.7% | +4.5pp |
-| plot | 63.2% | -10.5pp | 31.6% | -5.3pp |
-| schematic | 33.3% | +0.0pp | 50.0% | +11.1pp |
+| table | 51.4% | -2.9pp | 6.4% | +7.1pp |
+| plot | 47.8% | -10.3pp | 21.7% | +19.1pp |
+| schematic | 48.4% | +9.4pp | 35.2% | +25.0pp |
+| other | 50.0% | +25.0pp | 18.8% | +50.0pp |
 
-**Key Insight:** Tables are easiest for both verdict accuracy (70.5%) and feedback quality (55.7%). Schematics benefit most from visual context for feedback quality (+11.1pp) but show no verdict accuracy improvement. Plots struggle across both metrics and visual context hurts both.
+**Key Insight:** For verdict accuracy, tables are easiest (51.4%), supporting H4. However, for feedback quality, schematics are best (35.2%) and tables are worst (6.4%), contradicting H4. This suggests structured data is easier to *classify* but harder to *explain* — the model can identify correct/incorrect but struggles to articulate why for table data. Visual context helps feedback quality across all figure types, with schematics benefiting most (+25.0pp).
 
 ---
 
@@ -491,25 +497,28 @@ The dataset contains different figure types with different reasoning demands:
 
 **Hypothesis (H4):** Tables should be easiest (explicit, localized information), while architecture diagrams should be hardest (require understanding spatial relationships between components).
 
-**Update (H4 tested):** We tested this hypothesis on the 8B baseline model:
+**Update (H4 tested):** We tested this hypothesis on the 8B baseline model with 174 examples:
 
 | Figure Type | Verdict Avg | Feedback Avg | Visual Context Effect |
 |-------------|-------------|--------------|----------------------|
-| Tables | **70.5%** | **55.7%** | Hurts verdict (-4.5pp), helps feedback (+4.5pp) |
-| Plots | 63.2% | 31.6% | Hurts both (verdict -10.5pp, feedback -5.3pp) |
-| Schematics | 33.3% | 50.0% | Neutral for verdict, helps feedback (+11.1pp) |
+| Tables (n=70) | **51.4%** | 6.4% | Hurts verdict (-2.9pp), helps feedback (+7.1pp) |
+| Plots (n=68) | 47.8% | 21.7% | Hurts verdict (-10.3pp), helps feedback (+19.1pp) |
+| Schematics (n=32) | 48.4% | **35.2%** | Helps both (verdict +9.4pp, feedback +25.0pp) |
+| Other (n=4) | 50.0% | 18.8% | Helps both (verdict +25.0pp, feedback +50.0pp) |
 
-**H4 Result: PASS** — Tables (70.5%) > Schematics (33.3%) as predicted.
+**H4 Result: MIXED**
+- **Verdict Accuracy: PASS** — Tables (51.4%) > Schematics (48.4%) as predicted
+- **Feedback Quality: FAIL** — Tables (6.4%) < Schematics (35.2%), opposite of prediction
 
 **Key findings:**
-- Tables are easiest for both verdict and feedback — structured data is most accessible at 8B scale
-- Schematics are hardest for verdict (33.3%) but benefit most from visual context for feedback (+11.1pp)
-- Plots struggle across both metrics — trend interpretation is challenging and visual context hurts
+- Tables are easiest for verdict classification — structured data is most accessible at 8B scale
+- Schematics are best for feedback quality — visual context enables clearer explanations
+- Plots hurt most by visual input for verdict (-10.3pp) but helped for feedback (+19.1pp)
 
 **Why this matters:** Study Coach should route different figure types to different strategies:
-- **Tables:** 8B model works well (70.5% accuracy)
-- **Plots:** Consider 72B+ or CoT prompting for trend verification
-- **Schematics:** Requires larger model; visual context essential for feedback quality
+- **Tables:** 8B model works well for classification (51.4%); feedback needs improvement
+- **Plots:** Use text-only for classification; multimodal for feedback
+- **Schematics:** Always use multimodal mode — visual context helps both verdict (+9.4pp) and feedback (+25.0pp)
 
 ---
 

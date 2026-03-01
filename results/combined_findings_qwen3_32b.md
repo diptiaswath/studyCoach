@@ -232,10 +232,10 @@ We evaluated verdict accuracy broken down by figure type to test H4.
 
 | Figure Type | 8B Verdict Accuracy | 32B Verdict Accuracy | 8B Δ | 32B Δ |
 |-------------|------------|-------------|------|-------|
-| table | 70.5% | 51.1% | -4.5pp | +1.4pp |
-| schematic | 33.3% | 57.0% | +0.0pp | **+18.8pp** |
+| table | 51.4% | 51.1% | -2.9pp | +1.4pp |
+| schematic | 48.4% | 57.0% | +9.4pp | **+18.8pp** |
 
-**Major improvement:** At 32B, schematics improved dramatically (33.3% → 57.0%) and visual context now helps significantly (+18.8pp vs +0.0pp at 8B).
+**Major improvement:** At 32B, schematics improved (48.4% → 57.0%) and visual context benefit increased (+18.8pp vs +9.4pp at 8B).
 
 ---
 
@@ -360,21 +360,21 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 
 | Figure Type | 8B Δ | 32B Δ | Improved? |
 |-------------|------|-------|-----------|
-| table | -4.5pp | +1.4pp | Yes (+5.9pp) |
-| plot | -10.5pp | -4.4pp | Yes (+6.1pp) |
-| schematic | +0.0pp | **+18.8pp** | Yes (+18.8pp) |
+| table | -2.9pp | +1.4pp | Yes (+4.3pp) |
+| plot | -10.3pp | -4.4pp | Yes (+5.9pp) |
+| schematic | +9.4pp | **+18.8pp** | Yes (+9.4pp) |
 
-**Finding:** 32B shows dramatic improvement for schematics — visual context now helps significantly.
+**Finding:** 32B shows improvement across all figure types, with schematics benefiting most from visual context.
 
 #### Feedback Quality (Δ = C4 - C1)
 
 | Figure Type | 8B Δ | 32B Δ | Improved? |
 |-------------|------|-------|-----------|
-| table | +4.5pp | **+15.7pp** | Yes (+11.2pp) |
-| plot | -5.3pp | **+33.8pp** | Yes (+39.1pp) |
-| schematic | +11.1pp | **+25.0pp** | Yes (+13.9pp) |
+| table | +7.1pp | **+15.7pp** | Yes (+8.6pp) |
+| plot | +19.1pp | **+33.8pp** | Yes (+14.7pp) |
+| schematic | +25.0pp | **+25.0pp** | Same (0pp) |
 
-**Finding:** 32B shows dramatic improvement in feedback quality for all figure types, especially plots (+39.1pp improvement).
+**Finding:** 32B shows improvement in feedback quality for tables and plots, while schematics maintain the same benefit as 8B.
 
 ---
 
@@ -383,10 +383,10 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 ### What Improved at 32B Scale
 
 1. **Multimodal feedback quality:** LLM judge match rate improved dramatically (6% → 20%, +14pp)
-2. **Schematics:** Visual context now helps verdict accuracy (+18.8pp vs +0.0pp at 8B)
+2. **Schematics:** Visual context benefit doubled (+18.8pp vs +9.4pp at 8B)
 3. **Conceptual errors:** Visual context now helps verdict accuracy (+2.4pp vs -14.6pp at 8B)
 4. **Caption understanding:** Caption-only verdict accuracy improved (48% → 58%)
-5. **Plot feedback quality:** Visual context now helps (+33.8pp vs -5.3pp at 8B)
+5. **Plot feedback quality:** Visual context benefit increased (+33.8pp vs +19.1pp at 8B)
 
 ### What Remains Challenging
 
