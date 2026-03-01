@@ -393,15 +393,15 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 3. **Schematics benefit most from visual context** (+11.1pp) — spatial relationships need the image for explanation
 4. **Plots hurt by visual context** (-5.3pp) — model gets distracted by visual patterns
 
-### H4 Summary: Verdict vs Feedback by Figure Type
+### H4 Summary: Verdict Accuracy vs Feedback Quality by Figure Type
 
-| Figure Type | Verdict Avg | Verdict Δ | Feedback Avg | Feedback Δ |
-|-------------|-------------|-----------|--------------|------------|
+| Figure Type | Verdict Accuracy Avg | Verdict Accuracy Δ | Feedback Quality Avg | Feedback Quality Δ |
+|-------------|----------------------|--------------------|----------------------|--------------------|
 | table | 70.5% | -4.5pp | 55.7% | +4.5pp |
 | plot | 63.2% | -10.5pp | 31.6% | -5.3pp |
 | schematic | 33.3% | +0.0pp | 50.0% | +11.1pp |
 
-**Key Insight:** Tables are easiest for both verdict (70.5%) and feedback (55.7%). Schematics benefit most from visual context for feedback (+11.1pp) but show no verdict improvement. Plots struggle across both metrics and visual context hurts both.
+**Key Insight:** Tables are easiest for both verdict accuracy (70.5%) and feedback quality (55.7%). Schematics benefit most from visual context for feedback quality (+11.1pp) but show no verdict accuracy improvement. Plots struggle across both metrics and visual context hurts both.
 
 ---
 
