@@ -328,6 +328,7 @@ We evaluated verdict accuracy broken down by figure type to test H4.
 | Metric | Hypothesis | Result |
 |--------|------------|--------|
 | Verdict Accuracy | Tables > Schematics? | **PASS** (70.5% > 33.3%) |
+| Context Benefit on Verdict Accuracy | Context helps schematics more than tables? | **PASS** (+0.0pp > -4.5pp) |
 
 **H4 Overall: PASS**
 
