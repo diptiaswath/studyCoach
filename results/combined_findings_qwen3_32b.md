@@ -129,7 +129,7 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 | conceptual | 65.9% | 78.0% | 61.0% | 70.7% | +4.9pp |
 | omission | 46.7% | 33.3% | 46.7% | 53.3% | +6.7pp |
 
-### Context Benefit for Feedback (Δ = C4 - C1)
+### Context Benefit for Feedback Quality (Δ = C4 - C1)
 
 | Error Type | Δ Match | Δ Soft Match | Helps? |
 |------------|---------|--------------|--------|
@@ -139,7 +139,7 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 
 **Key finding:** All Δ values are positive — visual context helps feedback quality for ALL error types.
 
-### H3 Results (Feedback)
+### H3 Results (Feedback Quality)
 
 | Metric | Hypothesis | Result |
 |--------|------------|--------|
@@ -208,7 +208,7 @@ We evaluated verdict accuracy broken down by figure type to test H4.
 
 ### Key Difference from 8B
 
-| Figure Type | 8B Verdict | 32B Verdict | 8B Δ | 32B Δ |
+| Figure Type | 8B Verdict Accuracy | 32B Verdict Accuracy | 8B Δ | 32B Δ |
 |-------------|------------|-------------|------|-------|
 | table | 70.5% | 51.1% | -4.5pp | +1.4pp |
 | schematic | 33.3% | 57.0% | +0.0pp | **+18.8pp** |
@@ -239,7 +239,7 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 | schematic | 56.2% | 62.5% | 56.2% | 62.5% | +6.2pp |
 | other | 25.0% | 0.0% | 50.0% | 50.0% | +25.0pp |
 
-### Context Benefit for Feedback (Δ = C4 - C1)
+### Context Benefit for Feedback Quality (Δ = C4 - C1)
 
 | Figure Type | Δ Match | Δ Soft Match | Helps? |
 |-------------|---------|--------------|--------|
@@ -248,14 +248,14 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 | schematic | +25.0pp | +6.2pp | Yes |
 | other | +25.0pp | +25.0pp | Yes |
 
-### H4 Results (Feedback)
+### H4 Results (Feedback Quality)
 
 | Metric | Hypothesis | Result |
 |--------|------------|--------|
 | Feedback Quality | Tables > Schematics? | **FAIL** (12.1% < 46.1%) |
 | Context Benefit on Feedback Quality | Context helps schematics more than tables? | **PASS** (+25.0pp > +15.7pp) |
 
-**H4 Feedback: PARTIAL**
+**H4 Feedback Quality: PARTIAL**
 
 ### Interpretation
 
