@@ -494,7 +494,25 @@ The dataset contains different figure types with different reasoning demands:
 
 **Hypothesis (H4):** Tables should be easiest (explicit, localized information), while architecture diagrams should be hardest (require understanding spatial relationships between components).
 
-**Why this matters:** If accuracy varies significantly by figure type, Study Coach could route different figure types to different models or prompting strategies.
+**Update (H4 tested):** We tested this hypothesis on the 8B baseline model:
+
+| Figure Type | Verdict Avg | Feedback Avg | Visual Context Effect |
+|-------------|-------------|--------------|----------------------|
+| Tables | **70.5%** | **55.7%** | Hurts verdict (-4.5pp), helps feedback (+4.5pp) |
+| Plots | 63.2% | 31.6% | Hurts both (verdict -10.5pp, feedback -5.3pp) |
+| Schematics | 33.3% | 50.0% | Neutral for verdict, helps feedback (+11.1pp) |
+
+**H4 Result: PASS** — Tables (70.5%) > Schematics (33.3%) as predicted.
+
+**Key findings:**
+- Tables are easiest for both verdict and feedback — structured data is most accessible at 8B scale
+- Schematics are hardest for verdict (33.3%) but benefit most from visual context for feedback (+11.1pp)
+- Plots struggle across both metrics — trend interpretation is challenging and visual context hurts
+
+**Why this matters:** Study Coach should route different figure types to different strategies:
+- **Tables:** 8B model works well (70.5% accuracy)
+- **Plots:** Consider 72B+ or CoT prompting for trend verification
+- **Schematics:** Requires larger model; visual context essential for feedback quality
 
 ---
 
