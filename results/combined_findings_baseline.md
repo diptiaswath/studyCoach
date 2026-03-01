@@ -1,5 +1,7 @@
 # Combined Findings: Baseline + Human Evaluation
 
+**Baseline Model: Qwen3-VL-8B**
+
 ## Question
 
 Can a small vision-language model (8B) grade student answers about scientific figures — and provide useful feedback?
