@@ -290,13 +290,6 @@ At 8B scale, visual input has **opposite effects** on verdict accuracy vs feedba
 
 This confirms the baseline finding: **"The model classifies better without images but explains better with them."**
 
-### H3 Overall Verdict
-
-| Hypothesis | Verdict Accuracy | Feedback Quality |
-|------------|------------------|------------------|
-| Factual > Conceptual? | FAIL | FAIL |
-| Context helps conceptual more? | FAIL | **PASS** |
-
 ---
 
 ## H4 Hypothesis Test: Verdict Accuracy by Figure Type
