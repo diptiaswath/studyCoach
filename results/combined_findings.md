@@ -382,6 +382,7 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 | Metric | Hypothesis | Result |
 |--------|------------|--------|
 | Feedback Quality | Tables > Schematics? | **PASS** (55.7% > 50.0%) |
+| Context Benefit on Feedback Quality | Context helps schematics more than tables? | **PASS** (+11.1pp > +4.5pp) |
 
 **H4 Feedback: PASS**
 
