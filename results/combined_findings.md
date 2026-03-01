@@ -275,7 +275,7 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 
 ---
 
-## H3 Summary: Opposite Effects for Verdict vs Feedback
+## H3 Summary: Opposite Effects for Verdict Accuracy vs Feedback Quality by Error Type
 
 | Metric | Factual Δ | Conceptual Δ | Omission Δ | Visual Context Effect |
 |--------|-----------|--------------|------------|----------------------|
@@ -284,9 +284,9 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 
 ### Key Insight
 
-At 8B scale, visual input has **opposite effects** on verdict vs feedback:
-- **Verdict:** Visual context hurts classification for all error types (model gets distracted)
-- **Feedback:** Visual context helps explanation for all error types (model uses figure to explain)
+At 8B scale, visual input has **opposite effects** on verdict accuracy vs feedback quality:
+- **Verdict Accuracy:** Visual context hurts classification for all error types (model gets distracted)
+- **Feedback Quality:** Visual context helps explanation for all error types (model uses figure to explain)
 
 This confirms the baseline finding: **"The model classifies better without images but explains better with them."**
 
