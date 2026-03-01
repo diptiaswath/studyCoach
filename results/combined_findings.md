@@ -299,6 +299,110 @@ This confirms the baseline finding: **"The model classifies better without image
 
 ---
 
+## H4 Hypothesis Test: Verdict Accuracy by Figure Type
+
+We evaluated verdict accuracy broken down by figure type to test H4.
+
+**H4:** Tables should be easiest (explicit, localized information), while schematics should be hardest (require understanding spatial relationships).
+
+### Accuracy by Figure Type × Scenario
+
+| Figure Type | text_only | caption_only | vision_only | multimodal | Avg | Δ |
+|-------------|-----------|--------------|-------------|------------|-----|---|
+| table (n=22) | 72.7% | 72.7% | 68.2% | 68.2% | 70.5% | -4.5pp |
+| plot (n=19) | 68.4% | 68.4% | 57.9% | 57.9% | 63.2% | -10.5pp |
+| schematic (n=9) | 33.3% | 33.3% | 33.3% | 33.3% | 33.3% | +0.0pp |
+
+### Context Benefit (Δ = multimodal - text_only)
+
+| Figure Type | Δ (pp) | Interpretation |
+|-------------|--------|----------------|
+| table | -4.5 | Visual context **hurts** |
+| plot | -10.5 | Visual context **hurts** |
+| schematic | +0.0 | Visual context **neutral** |
+
+**Key finding:** Visual context hurts verdict accuracy for tables and plots, with no effect on schematics at 8B scale.
+
+### H4 Results
+
+| Part | Hypothesis | Result |
+|------|------------|--------|
+| 1 | Tables > Schematics? | **PASS** (70.5% > 33.3%) |
+
+**H4 Overall: PASS**
+
+### Interpretation
+
+1. **Tables are easiest** (70.5% avg) — structured, explicit data is easier to verify
+2. **Schematics are hardest** (33.3% avg) — spatial relationships require more complex reasoning
+3. **Plots are intermediate** (63.2% avg) — trend reading is easier than architecture understanding but harder than table lookup
+4. **Visual context hurts more for plots** (-10.5pp) than tables (-4.5pp) — the 8B model struggles more with spatial patterns
+
+### Practical Implications
+
+| Figure Type | Recommendation |
+|-------------|----------------|
+| **Tables** | Best suited for 8B model (70.5% accuracy) |
+| **Plots** | Moderate accuracy; consider 72B+ for trend verification |
+| **Schematics** | Poor accuracy (33.3%); requires larger model or CoT prompting |
+
+---
+
+## H4 Hypothesis Test: Feedback Quality by Figure Type
+
+We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched).
+
+### Match Rate by Figure Type × Scenario
+
+| Figure Type | text_only | caption_only | vision_only | multimodal | Avg | Δ |
+|-------------|-----------|--------------|-------------|------------|-----|---|
+| table (n=22) | 54.5% (12/22) | 59.1% (13/22) | 50.0% (11/22) | 59.1% (13/22) | 55.7% | +4.5pp |
+| plot (n=19) | 31.6% (6/19) | 36.8% (7/19) | 31.6% (6/19) | 26.3% (5/19) | 31.6% | -5.3pp |
+| schematic (n=9) | 44.4% (4/9) | 55.6% (5/9) | 44.4% (4/9) | 55.6% (5/9) | 50.0% | +11.1pp |
+
+### Soft Match Rate (Match + Partial)
+
+| Figure Type | text_only | caption_only | vision_only | multimodal | Δ |
+|-------------|-----------|--------------|-------------|------------|---|
+| table | 77.3% | 77.3% | 68.2% | 72.7% | -4.5pp |
+| plot | 57.9% | 52.6% | 57.9% | 52.6% | -5.3pp |
+| schematic | 66.7% | 66.7% | 66.7% | 66.7% | +0.0pp |
+
+### Context Benefit for Feedback (Δ = multimodal - text_only)
+
+| Figure Type | Δ Match | Δ Soft Match | Helps? |
+|-------------|---------|--------------|--------|
+| table | +4.5pp | -4.5pp | Mixed |
+| plot | -5.3pp | -5.3pp | No |
+| schematic | +11.1pp | +0.0pp | Yes |
+
+### H4 Results (Feedback)
+
+| Part | Hypothesis | Result |
+|------|------------|--------|
+| 1 | Tables > Schematics? | **PASS** (55.7% > 50.0%) |
+
+**H4 Feedback: PASS**
+
+### Interpretation
+
+1. **Tables have best feedback quality** (55.7% Match) — structured data enables clearer explanations
+2. **Plots have worst feedback quality** (31.6% Match) — trend interpretation is challenging at 8B scale
+3. **Schematics benefit most from visual context** (+11.1pp) — spatial relationships need the image for explanation
+4. **Plots hurt by visual context** (-5.3pp) — model gets distracted by visual patterns
+
+### H4 Summary: Verdict vs Feedback by Figure Type
+
+| Figure Type | Verdict Avg | Verdict Δ | Feedback Avg | Feedback Δ |
+|-------------|-------------|-----------|--------------|------------|
+| table | 70.5% | -4.5pp | 55.7% | +4.5pp |
+| plot | 63.2% | -10.5pp | 31.6% | -5.3pp |
+| schematic | 33.3% | +0.0pp | 50.0% | +11.1pp |
+
+**Key Insight:** Tables are easiest for both verdict (70.5%) and feedback (55.7%). Schematics benefit most from visual context for feedback (+11.1pp) but show no verdict improvement. Plots struggle across both metrics and visual context hurts both.
+
+---
+
 ## Next Steps
 
 | Priority | Action | Rationale |
@@ -308,7 +412,7 @@ This confirms the baseline finding: **"The model classifies better without image
 | Medium | Chain-of-thought prompting | Force model to describe figure first |
 | Medium | Larger eval sample (200+) | Detect smaller differences reliably |
 | Optional | Add paper context (C5 condition) | Test if relevant paragraphs help reasoning-dependent errors more than factual errors |
-| Medium | Analyze by figure type | Test if tables are easier than plots/schematics (structured vs spatial reasoning) |
+| Done | Analyze by figure type | H4 tested: tables easiest (70.5%) > plots (63.2%) > schematics (33.3%) |
 
 ### Why Test Stronger Model (72B+)?
 
@@ -406,6 +510,11 @@ The dataset contains different figure types with different reasoning demands:
 | `data/eval/error_type_analysis/feedback_judgments.json` | Raw LLM judge outputs (432 judgments) |
 | `src/analyze_feedback_by_error_type.py` | Script for H3 feedback evaluation using Claude |
 | `src/eval_by_error_type.py` | Script for H3 verdict accuracy evaluation |
+| `data/eval/figure_type_analysis/figure_type_results.json` | H4 raw results by figure type |
+| `src/eval_by_figure_type.py` | Script for H4 verdict accuracy evaluation |
+| `src/analyze_feedback_by_figure_type.py` | Script for H4 feedback evaluation using Claude |
+| `data/eval/figure_type_analysis/feedback_by_figure_type.md` | H4 feedback quality results |
+| `data/eval/figure_type_analysis/feedback_judgments.json` | Raw LLM judge outputs for H4 (200 judgments) |
 | `baseline_findings/FINDINGS.md` | Full analysis notes |
 | `HUMAN_FINDINGS.md` | Human evaluation methodology and findings |
 | `human_vs_metrics_summary.csv` | Human match labels per scenario |
