@@ -292,10 +292,10 @@ This confirms the baseline finding: **"The model classifies better without image
 
 ### H3 Overall Verdict
 
-| H3 Part | Verdict Accuracy | Feedback Quality |
-|---------|------------------|------------------|
-| Part 1: Factual > Conceptual? | FAIL | FAIL |
-| Part 2: Context helps conceptual more? | FAIL | **PASS** |
+| Hypothesis | Verdict Accuracy | Feedback Quality |
+|------------|------------------|------------------|
+| Factual > Conceptual? | FAIL | FAIL |
+| Context helps conceptual more? | FAIL | **PASS** |
 
 ---
 
