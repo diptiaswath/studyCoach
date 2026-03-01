@@ -17,7 +17,8 @@ This question has two parts:
 | Parameter | Value |
 |-----------|-------|
 | Model | `Qwen/Qwen3-VL-32B-Instruct` (Together.ai) |
-| Eval sample | 50 examples per condition |
+| H1/H2 Eval sample | 50 examples per condition |
+| H3 Eval sample | 108 error examples (52 factual, 41 conceptual, 15 omission) |
 
 ### Conditions Tested
 
@@ -74,9 +75,9 @@ This question has two parts:
 
 | Error Type | C1 | C2 | C3 | C4 | Avg |
 |------------|-----|-----|-----|-----|-----|
-| factual | 32.7% | 28.8% | 26.9% | 25.0% | 28.4% |
-| conceptual | 58.5% | 56.1% | 53.7% | 61.0% | 57.3% |
-| omission | 66.7% | 53.3% | 33.3% | 40.0% | 48.3% |
+| factual (n=52) | 32.7% | 28.8% | 26.9% | 25.0% | 28.4% |
+| conceptual (n=41) | 58.5% | 56.1% | 53.7% | 61.0% | 57.3% |
+| omission (n=15) | 66.7% | 53.3% | 33.3% | 40.0% | 48.3% |
 
 ### Context Benefit (Δ = C4 - C1)
 
@@ -115,9 +116,9 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 
 | Error Type | C1 | C2 | C3 | C4 | Avg | Δ |
 |------------|-----|-----|-----|-----|-----|---|
-| factual | 13.5% | 26.9% | 28.8% | 34.6% | 26.0% | +21.2pp |
-| conceptual | 26.8% | 48.8% | 36.6% | 56.1% | 42.1% | +29.3pp |
-| omission | 0.0% | 0.0% | 26.7% | 26.7% | 13.4% | +26.7pp |
+| factual (n=52) | 13.5% | 26.9% | 28.8% | 34.6% | 26.0% | +21.2pp |
+| conceptual (n=41) | 26.8% | 48.8% | 36.6% | 56.1% | 42.1% | +29.3pp |
+| omission (n=15) | 0.0% | 0.0% | 26.7% | 26.7% | 13.4% | +26.7pp |
 
 ### Soft Match Rate (Match + Partial)
 
