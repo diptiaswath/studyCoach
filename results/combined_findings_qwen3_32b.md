@@ -19,6 +19,7 @@ This question has two parts:
 | Model | `Qwen/Qwen3-VL-32B-Instruct` (Together.ai) |
 | H1/H2 Eval sample | 50 examples per condition |
 | H3 Eval sample | 108 error examples (52 factual, 41 conceptual, 15 omission) |
+| H4 Eval sample | 174 figure examples (70 table, 68 plot, 32 schematic, 4 other) |
 
 ### Conditions Tested
 
@@ -174,10 +175,10 @@ We evaluated verdict accuracy broken down by figure type to test H4.
 
 | Figure Type | C1 | C2 | C3 | C4 | Avg | Δ |
 |-------------|-----|-----|-----|-----|-----|---|
-| table | 51.4% | 51.4% | 48.6% | 52.9% | 51.1% | +1.4pp |
-| plot | 52.9% | 47.1% | 48.5% | 48.5% | 49.3% | -4.4pp |
-| schematic | 46.9% | 56.2% | 59.4% | 65.6% | 57.0% | +18.8pp |
-| other | 50.0% | 75.0% | 50.0% | 50.0% | 56.2% | +0.0pp |
+| table (n=70) | 51.4% | 51.4% | 48.6% | 52.9% | 51.1% | +1.4pp |
+| plot (n=68) | 52.9% | 47.1% | 48.5% | 48.5% | 49.3% | -4.4pp |
+| schematic (n=32) | 46.9% | 56.2% | 59.4% | 65.6% | 57.0% | +18.8pp |
+| other (n=4) | 50.0% | 75.0% | 50.0% | 50.0% | 56.2% | +0.0pp |
 
 ### Context Benefit (Δ = C4 - C1)
 
@@ -224,10 +225,10 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 
 | Figure Type | C1 | C2 | C3 | C4 | Avg | Δ |
 |-------------|-----|-----|-----|-----|-----|---|
-| table | 4.3% | 7.1% | 17.1% | 20.0% | 12.1% | +15.7pp |
-| plot | 10.3% | 32.4% | 19.1% | 44.1% | 26.5% | +33.8pp |
-| schematic | 31.2% | 50.0% | 46.9% | 56.2% | 46.1% | +25.0pp |
-| other | 0.0% | 0.0% | 25.0% | 25.0% | 12.5% | +25.0pp |
+| table (n=70) | 4.3% | 7.1% | 17.1% | 20.0% | 12.1% | +15.7pp |
+| plot (n=68) | 10.3% | 32.4% | 19.1% | 44.1% | 26.5% | +33.8pp |
+| schematic (n=32) | 31.2% | 50.0% | 46.9% | 56.2% | 46.1% | +25.0pp |
+| other (n=4) | 0.0% | 0.0% | 25.0% | 25.0% | 12.5% | +25.0pp |
 
 ### Soft Match Rate (Match + Partial)
 
