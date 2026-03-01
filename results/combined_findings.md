@@ -268,10 +268,10 @@ We also evaluated feedback quality using Claude as LLM judge (Match/Partial/Unma
 
 ### H3 Results (Feedback)
 
-| Part | Hypothesis | Result |
-|------|------------|--------|
-| 1 | Factual > Conceptual? | **FAIL** (25.5% < 43.3%) |
-| 2 | Context helps conceptual more than factual? | **PASS** (+31.7pp > +21.2pp) |
+| Metric | Hypothesis | Result |
+|--------|------------|--------|
+| Feedback Quality | Factual > Conceptual? | **FAIL** (25.5% < 43.3%) |
+| Context Benefit on Feedback Quality | Context helps conceptual more than factual? | **PASS** (+31.7pp > +21.2pp) |
 
 ---
 
