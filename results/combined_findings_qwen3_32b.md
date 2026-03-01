@@ -53,9 +53,11 @@ This question has two parts:
 
 ---
 
-## H2: Feedback Quality (Auto Metrics)
+## H2: Feedback Quality
 
 *Question: Does predicted feedback match ground truth feedback?*
+
+### Auto Metrics
 
 | Condition | F1 | ROUGE-L | BLEU |
 |-----------|---:|--------:|-----:|
@@ -64,7 +66,27 @@ This question has two parts:
 | C3 (vision_only) | 0.294 | 0.193 | **8.13** |
 | C4 (multimodal) | 0.298 | 0.202 | 7.44 |
 
-**Finding:** Auto metrics show caption_only performs best on F1/ROUGE-L. Vision_only has highest BLEU.
+**Finding:** Auto metrics show caption_only performs best on F1/ROUGE-L. Vision_only has highest BLEU. However, auto metrics fail to differentiate feedback quality across conditions.
+
+### LLM-as-Judge (N=50 per condition)
+
+Using Claude (claude-sonnet-4-6) as judge to evaluate feedback quality (Match/Partial/Unmatched).
+
+| Condition | Match | Partial | Unmatched | Match % | Soft Match % |
+|-----------|-------|---------|-----------|---------|--------------|
+| C1 (text_only) | 1 | 20 | 29 | 2.0% | 42.0% |
+| C2 (caption_only) | 4 | 20 | 26 | 8.0% | 48.0% |
+| C3 (vision_only) | 3 | 21 | 26 | 6.0% | 48.0% |
+| C4 (multimodal) | 10 | 19 | 21 | **20.0%** | **58.0%** |
+
+**Finding:** Multimodal leads significantly on strict match (20%) with a clear gap over other conditions. Visual context improves feedback quality.
+
+### H2 Results
+
+| Metric | Hypothesis | Result |
+|--------|------------|--------|
+| Feedback Quality (LLM Judge) | Visual context helps? | **PASS** (20.0% > 2.0%) |
+| Context Benefit on Feedback Quality | Δ = C4 - C1 | **+18.0pp** (Match), **+16.0pp** (Soft Match) |
 
 ---
 
@@ -291,6 +313,24 @@ We evaluated feedback quality using Claude as LLM judge (Match/Partial/Unmatched
 | C4 (multimodal) | 48% | 54% | +6pp |
 
 **Finding:** 32B shows improved performance with captions and visual input.
+
+### H2: Feedback Quality (LLM-as-Judge)
+
+| Condition | 8B Match % | 32B Match % | Improved? |
+|-----------|------------|-------------|-----------|
+| C1 (text_only) | 2% | 2% | Same (0pp) |
+| C2 (caption_only) | 2% | **8%** | Yes (+6pp) |
+| C3 (vision_only) | 4% | **6%** | Yes (+2pp) |
+| C4 (multimodal) | 6% | **20%** | Yes (+14pp) |
+
+| Condition | 8B Soft Match % | 32B Soft Match % | Improved? |
+|-----------|-----------------|------------------|-----------|
+| C1 (text_only) | 40% | **42%** | Yes (+2pp) |
+| C2 (caption_only) | 46% | **48%** | Yes (+2pp) |
+| C3 (vision_only) | 48% | 48% | Same (0pp) |
+| C4 (multimodal) | 56% | **58%** | Yes (+2pp) |
+
+**Finding:** 32B shows largest improvement on multimodal (+14pp strict match). Scaling helps most when visual+textual context is combined.
 
 ### H3: Context Benefit by Error Type
 
