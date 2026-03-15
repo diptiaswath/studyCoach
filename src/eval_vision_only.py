@@ -28,7 +28,9 @@ import openai
 sys.path.insert(0, str(Path(__file__).parent))
 from eval_utils import load_examples, parse_eval_output, save_results, to_data_url, SYSTEM_PROMPT
 
-MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# MODEL = "chamibuddhika/Qwen/Qwen3-VL-8B-Instruct-48b1deaa"
+MODEL = "chamibuddhika/Qwen/Qwen3-VL-32B-Instruct-5a3c713d"
 
 
 def build_client() -> openai.OpenAI:
@@ -44,7 +46,12 @@ def build_client() -> openai.OpenAI:
     )
 
 
-def evaluate_example(client: openai.OpenAI, example: dict, include_answer: bool = True) -> dict:
+def evaluate_example(
+    client: openai.OpenAI,
+    example: dict,
+    include_answer: bool = True,
+    eval_with_paras: bool = False,
+) -> dict:
     question = example["question"]
     answer = example["answer"]
     student = example["student"]
@@ -53,6 +60,9 @@ def evaluate_example(client: openai.OpenAI, example: dict, include_answer: bool 
     data_url = to_data_url(image_path)
 
     text = "/no_think\n"
+    if eval_with_paras:
+        paragraphs = example.get("paragraphs", "N/A")
+        text += f"Relevant Paragraphs:\n{paragraphs}\n"
     if include_answer:
         text += f"Reference Answer:\n{answer}\n"
     text += f"Question:\n{question}\nStudent Answer:\n{student}"
@@ -117,12 +127,25 @@ def main() -> None:
         action="store_true",
         help="Omit the reference answer from the prompt",
     )
+    parser.add_argument(
+        "--filter-no-paras",
+        action="store_true",
+        help="Skip examples where no paragraph context was found (paragraphs == N/A)",
+    )
+    parser.add_argument(
+        "--eval-with-paras",
+        action="store_true",
+        help="Include the 'paragraphs' field in the model prompt as extra context",
+    )
     args = parser.parse_args()
 
     client = build_client()
 
     print(f"Loading examples from: {args.data}")
-    examples = load_examples(args.data, args.images, max_examples=args.max)
+    examples = load_examples(
+        args.data, args.images, max_examples=args.max,
+        filter_no_paras=args.filter_no_paras,
+    )
     print(f"Loaded {len(examples)} examples\n")
 
     results = []
@@ -130,7 +153,11 @@ def main() -> None:
         print(f"[{i}/{len(examples)}] paper={example['paper_id']} "
               f"gt={example['ground_truth']['verdict']}")
         try:
-            result = evaluate_example(client, example, include_answer=not args.no_answer)
+            result = evaluate_example(
+                client, example,
+                include_answer=not args.no_answer,
+                eval_with_paras=args.eval_with_paras,
+            )
             results.append(result)
             print(f"  -> predicted: {result['predicted']['verdict']} / "
                   f"{result['predicted']['error_category']}")

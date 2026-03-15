@@ -23,13 +23,14 @@ RANDOM_SEED = 42
 # Shared system prompt (all 3 scenarios) — loaded from prompts/ at import time
 # ---------------------------------------------------------------------------
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
-SYSTEM_PROMPT = (_PROMPTS_DIR / "incongruence_eval_v3.txt").read_text(encoding="utf-8").strip()
+SYSTEM_PROMPT = (_PROMPTS_DIR / "incongruence_eval_v1.txt").read_text(encoding="utf-8").strip()
 
 
 def load_examples(
     output_json_paths: List[str | Path],
     images_root: str | Path,
     max_examples: int = 50,
+    filter_no_paras: bool = False,
 ) -> List[Dict[str, Any]]:
     """Load and equal-stratum-sample examples from augmented SPIQA output JSONs.
 
@@ -41,6 +42,8 @@ def load_examples(
         output_json_paths: One or more paths to *_output.json files.
         images_root: Root directory containing per-paper image subdirectories.
         max_examples: Maximum number of examples to return (default 50).
+        filter_no_paras: If True, skip examples where 'paragraphs' is missing
+            or 'N/A'.
 
     Returns:
         List of example dicts with keys: paper_id, question, answer, caption,
@@ -62,6 +65,10 @@ def load_examples(
                 if not student:
                     continue
 
+                paragraphs = qa.get("paragraphs", "").strip()
+                if filter_no_paras and (not paragraphs or paragraphs == "N/A"):
+                    continue
+
                 verdict = (qa.get("verdict") or "").strip().lower()
                 error_category = (qa.get("error_category") or "").strip().lower()
                 feedback = (qa.get("feedback") or "").strip()
@@ -81,6 +88,7 @@ def load_examples(
                         "caption": caption,
                         "image_path": str(image_path),
                         "student": student,
+                        "paragraphs": paragraphs,
                         "ground_truth": {
                             "verdict": qa.get("verdict", "").strip(),
                             "error_category": qa.get("error_category", "").strip(),

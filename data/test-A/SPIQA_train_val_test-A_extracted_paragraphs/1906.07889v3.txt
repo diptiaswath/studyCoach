@@ -1,0 +1,492 @@
+\section{Introduction}
+Videos provide rich visual information to understand the dynamics of the world. However, extracting a useful representation from videos (e.g. detection and tracking of objects) remains challenging and typically requires expensive human annotations. In this work, we focus on unsupervised learning of object structure and dynamics from videos.
+
+One approach for unsupervised video understanding is to learn to predict future frames~\cite{oh2015action,mathieu_2016,finn2016unsupervised,lotter2016deep,villegas17mcnet,xue2016visual,denton_stochastic_2018,babaeizadeh_stochastic_2017,lee_stochastic_2018}. Based on this body of work, we identify two main challenges: 
+First, it is hard to make pixel-level predictions because motion in videos becomes highly stochastic for horizons beyond about a second. Since semantically insignificant deviations can lead to large error in pixel space, it is often difficult to distinguish good from bad predictions based on pixel losses.
+Second, even if good pixel-level prediction is achieved, this is rarely the desired final task. The representations of a model trained for pixel-level reconstruction are not guaranteed to be useful for downstream tasks such as tracking, motion prediction and control.
+
+Here, we address both of these challenges by using an explicit, interpretable keypoint-based representation of object structure as the core of our model. 
+Keypoints are a natural representation of dynamic objects, commonly used for face and pose tracking. Training keypoint detectors, however, generally requires supervision.
+We learn the keypoint-based representation directly from video, without any supervision beyond the pixel data, in two steps: first encode individual frames to keypoints, then model the dynamics of those points. As a result, the representation of the dynamics model is spatially structured, though the model is trained only with a pixel reconstruction loss. We show that enforcing spatial structure significantly improves video prediction quality and performance for tasks such as action recognition and reward prediction.
+
+By decoupling pixel generation from dynamics prediction, we avoid compounding errors in pixel space because we never condition on predicted pixels. This approach has been shown to be beneficial for supervised video prediction \cite{villegas_learning_2017}. Furthermore, modeling dynamics in keypoint coordinate space allows us to sample and evaluate predictions efficiently. Errors in coordinate space are more meaningful than in pixel space, since distance between keypoints is more closely related to semantically relevant differences than pixel-space distance. We exploit this by using a best-of-many-samples objective \cite{bhattacharyya_accurate_2018} during training to achieve stochastic predictions that are both highly diverse and of high quality, outperforming the predictions of models lacking spatial structure.
+
+Finally, because we build spatial structure into our model \emph{a priori}, its internal representation is biased to contain object-level information that is useful for downstream applications. This bias leads to better results on tasks such as trajectory prediction, action recognition and reward prediction.
+
+Our contributions are: (1) a novel architecture and optimization techniques for unsupervised video prediction with a structured internal representation;
+(2) a model that outperforms recent work~\cite{denton_stochastic_2018,wichers_hierarchical_2018} and our unstructured baseline in pixel-level video prediction;
+(3) improved performance vs. unstructured models on downstream tasks requiring object-level understanding.
+\section{Related work}
+\textbf{Unsupervised learning of keypoints.} Previous work explores learning to find keypoints in an image by applying an autoencoding architecture with keypoint-coordinates as a representational bottleneck \cite{jakab_conditional_2018, zhang_unsupervised_2018}. The bottleneck forces the image to be encoded in a small number of points. We build on these methods by extending them to the video setting. 
+
+\textbf{Stochastic sequence prediction.} Successful video prediction requires modeling uncertainty. We adopt the VRNN~\cite{chung_recurrent_2015} architecture, which adds latent random variables to the standard RNN architecture, to sample from possible futures. More sophisticated approaches to stochastic prediction of keypoints have been recently explored~\cite{Yan18, sun_stochastic_2019}, but we find the basic VRNN architecture sufficient for our applications.
+
+\textbf{Unsupervised video prediction.} A large body of work explores learning to predict video frames using only a pixel-reconstruction loss~\cite{Ranzato14,Srivastava15,oh2015action,finn2016unsupervised,villegas17mcnet,emily17}. Most similar to our work are approaches that perform deterministic image generation from a latent sample produced by stochastic sampling from a prior conditioned on previous timesteps~\cite{denton_stochastic_2018,babaeizadeh_stochastic_2017,lee_stochastic_2018}. Our approach replaces the unstructured image representation with a structured set of keypoints, improving performance on video prediction and downstream tasks compared with SVG~\cite{denton_stochastic_2018} (Section~\ref{sec:results}).
+
+Recent methods also apply adversarial training to improve prediction quality and diversity of samples~\cite{mocogan,lee_stochastic_2018}.
+EPVA~\cite{wichers_hierarchical_2018} predicts dynamics in a high-level feature space and applies an adversarial loss to the predicted features. We compare against EPVA and show improvement without adversarial training, but adversarial training is compatible with our method and is a promising future direction.
+
+\textbf{Video prediction with spatially structured representations.}
+Like our approach, several recent methods explore explicit, spatially structured representations for video prediction. \citet{xu2019unsupervised} proposed to discover object parts and structure by watching how they move in videos.
+Vid2Vid~\cite{vid2vid} proposed a video-to-video translation network from segmentation masks, edge masks and human pose. The method is also used for predicting a few frames into the future by predicting the structure representations first.
+\citet{villegas_learning_2017} proposed to train a human pose predictor and then use the predicted pose to generate future frames of human motion.
+In~\cite{walker17}, a method is proposed where future human pose is predicted using a stochastic network and the pose is then used to generate future frames.
+Recent methods on video generation have used spatially structured representations for video motion transfer between humans~\cite{aberman19,chan19}. In contrast, our model is able to find spatially structured representation without supervision while using video frames as the only learning signal.
+\section{Architecture}
+Our model is composed of two parts: a keypoint detector that encodes each frame into a low-dimensional, keypoint-based representation, and a dynamics model that predicts dynamics in the keypoint space (Figure~\ref{fig:architecture_schematic}).
+\subsection{Unsupervised keypoint detector}
+\label{sec:architecture/keypoint_detector}
+
+\begin{figure*}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/architecture/architecture_schematic_v5.pdf}
+\end{center}
+   \caption{Architecture of our model. Variables are black, functions blue, losses red. Some arrows are omitted for clarity, see Equations~\ref{eq:prior} to~\ref{eq:recurrence} for details.}
+\label{fig:architecture_schematic}
+\vspace{-1em}
+\end{figure*}
+
+The keypoint detection architecture is inspired by \cite{jakab_conditional_2018}, which we adapt for the video setting. Let $\vv_{1:T} \in \mathbb{R}^{H\times W\times C}$ be a video sequence of length $T$. Our goal is to learn a keypoint detector $\detector(\vv_t) = \vx_t$ that captures the spatial structure of the objects in each frame in a set of keypoints $\vx_t$.
+
+The detector $\detector$ is a convolutional neural network that produces $K$ feature maps, one for each keypoint. Each feature map is normalized and condensed into a single $(x, y)$-coordinate by computing the spatial expectation of the map. The number of heatmaps $K$ is a hyperparameter that represents the maximum expected number of keypoints necessary to model the data.
+
+For image reconstruction, we learn a generator $\reconstructor$ that reconstructs frame $\vv_t$ from its keypoint representation. The generator also receives the first frame of the sequence $\vv_1$ to capture the static appearance of the scene: $\vv_t = \reconstructor(\vv_1, \vx_t)$. Together, the keypoint detector $\detector$ and generator $\reconstructor$ form an autoencoder architecture with a representational bottleneck that forces the structure of each frame to be encoded in a keypoint representation \cite{jakab_conditional_2018}.
+
+The generator is also a convolutional neural network. To supply the keypoints to the network, each point is converted into a heatmap with a Gaussian-shaped blob at the keypoint location. The $K$ heatmaps are concatenated with feature maps from the first frame $\vv_1$. We also concatenate the keypoint-heatmaps for the first frame $\vv_1$ to the decoder input for subsequent frames $\vv_t$, to help the decoder to "inpaint" background regions that were occluded in the first frame. The resulting tensor forms the input to the generator. We add skip connections from the first frame of the sequence to the generator output such that the actual task of the generator is to predict $\vv_t - \vv_1$.
+
+We use the mean intensity $\mu_k$ of each keypoint feature map returned by the detector as a continuous-valued indicator of the presence of the modeled object. When converting keypoints back into heatmaps, each map is scaled by the corresponding $\mu_k$. The model can use $\mu_k$ to encode the presence or absence of individual objects on a frame-by-frame basis.
+\subsection{Stochastic dynamics model}
+To model the dynamics in the video, we use a variational recurrent neural network (VRNN)~\cite{chung_recurrent_2015}. The core of the dynamics model is a latent belief $\vz$ over keypoint locations $\vx$. In the VRNN architecture, the prior belief is conditioned on all previous timesteps through the hidden state $\vh_{t-1}$ of an RNN, and thus represents a prediction of the current keypoint locations before observing the image: 
+\begin{align}
+    p(\vz_t|\vx_{<t}, \vz_{<t}) &= \varphi^{\text{prior}}(\vh_{t-1}) \label{eq:prior}\\
+    \intertext{We obtain the posterior belief by combining the previous hidden state with the unsupervised keypoint coordinates $\vx_t = \detector(\vv_t)$ detected in the current frame:}
+    q(\vz_t|\vx_{\leq t}, \vz_{<t}) &= \varphi^{\text{enc}}(\vh_{t-1}, \vx_t) \label{eq:posterior}
+    \intertext{Predictions are made by decoding the latent belief:}
+    p(\vx_t|\vz_{\leq t}, \vx_{<t}) &= \varphi^{\text{dec}}(\vz_t, \vh_{t-1}) \label{eq:generation} \\  %
+    \intertext{Finally, the RNN is updated to pass information forward in time:}
+    \vh_t &= \varphi^{\text{RNN}}(\vx_t, \vz_t, \vh_{t-1}). \label{eq:recurrence}
+\end{align}
+Note that to compute the posterior (Eq.~\ref{eq:posterior}), we obtain $\vx_t$ from the keypoint detector, but for the recurrence in Eq.~\ref{eq:recurrence}, we obtain $\vx_t$ by decoding the latent belief. We can therefore predict into the future without observing images by decoding $\vx_t$ from the prior belief. Because the model has both deterministic and stochastic pathways across time, predictions can account for long-term dependencies as well as future uncertainty \cite{hafner_learning_2018,chung_recurrent_2015}.
+\section{Training}
+
+\subsection{Keypoint detector}
+\label{sec:training/keypoint_detector}
+
+The keypoint detector is trained with a simple L2 image reconstruction loss $\mathcal{L}_\text{image} = \sum_t || \vv - \hat{\vv} ||_2^2$, where $\vv$ is the true and $\hat{\vv}$ is the reconstructed image. Errors from the dynamics model are not backpropagated into the keypoint detector.\footnote{We found this to be necessary to maintain a keypoint-structured representation. If the image model is trained based on errors from the dynamics model, the image model may adopt the poorly structured code of an incompletely trained dynamics model, rather than the dynamics model adopting the keypoint-structured code.}
+
+Ideally, the representation should use as few keypoints as possible to encode each object. 
+To encourage such parsimony, we add two additional losses to the keypoint detector:
+
+{\bf Temporal separation loss.}  Image features whose motion is highly correlated are likely to belong to the same object and should ideally be represented jointly by a single keypoint. We therefore add a separation loss that encourages keypoint trajectories to be decorrelated in time. The loss penalizes "overlap" between trajectories within a Gaussian radius $\sigma_\text{sep}$:
+\begin{equation}
+\mathcal{L}_\text{sep}
+ = \sum_{k} \sum_{k'} \exp(-\frac{d_{k k'}}{2 \sigma^2_\text{sep}})
+\end{equation}
+where $d_{k k'} = \frac{1}{T} \sum_{t} || (\vx_{t,k} - \langle \vx_k \rangle) - (\vx_{t,k'} - \langle \vx_{k'} \rangle) ||_2^2$ is the distance between the trajectories of keypoints $k$ and $k'$, computed after subtracting the temporal mean $\langle \vx \rangle$ from each trajectory. $||~\cdot~||_2^2$~denotes the squared Euclidean norm.
+
+\noindent {\bf Keypoint sparsity loss.} For similar reasons, we add an L1 penalty $\mathcal{L}_\text{sparse} = \sum_k |\mu_k|$ on the keypoint scales $\mu$ to encourage keypoints to be sparsely active.
+
+In Section~\ref{sec:results/separation_and_sparsity_ablation}, we show that both $\mathcal{L}_\text{sep}$ and $\mathcal{L}_\text{sparse}$ contribute to stable keypoint detection.
+\subsection{Dynamics model}
+The standard VRNN \cite{chung_recurrent_2015} is trained to encode the detected keypoints by maximizing the evidence lower bound (ELBO), which is composed of a reconstruction loss and a KL term between the Gaussian prior $\gauss_t^{\mathrm{prior}} = \gauss(\vz_t | \prior(\vh_{t-1}))$ and posterior distribution $\gauss_t^{\mathrm{enc}} = \gauss(\vz_t | \enc(\vh_{t-1},\vx_t))$:
+\begin{equation}\label{eq:vrnn_loss}
+\mathcal{L}_{\text{VRNN}} = 
+- \sum_{t=1}^{T}
+\expect{
+\log p(\vx_t | \vz_{\leq t}, \vx_{< t})
+-\beta \text{KL}(\gauss_t^{\mathrm{enc}} \parallel
+\gauss_t^{\mathrm{prior}})
+}
+\end{equation}
+The KL term regularizes the latent representation. In the VRNN architecture, it is also responsible for training the RNN, since it encourages the prior to predict the posterior based on past information. To balance reliance on predictions with fidelity to observations, we add the hyperparameter $\beta$ (see also \cite{alemi_fixing_2017}). We found it essential to tune $\beta$ for each dataset to achieve a balance between reconstruction quality (lower $\beta$) and prediction diversity.
+
+The KL term only trains the dynamics model for single-step predictions because the model receives observations after each step \cite{hafner_learning_2018}. To encourage learning of long-term dependencies, we add a pure reconstruction loss, without the KL term, for multiple future timesteps:
+\begin{equation}\label{eq:future_loss}
+\mathcal{L}_{\text{future}} = 
+- \sum_{t=T+1}^{T+\Delta T}
+\expect{
+\log p(\vx_t | \vz_{\leq t}, \vx_{\leq T})
+}
+\end{equation}
+The standard approach to estimate $\log p(\vx_t | \vz_{\leq t}, \vx_{\le t})$ in Eq.~\ref{eq:vrnn_loss} and~\ref{eq:future_loss} is to sample a single $\vz_t$. To further encourage diverse predictions, we instead use the best of a number of samples \cite{bhattacharyya_accurate_2018} at each timestep during training:
+\begin{align}
+\max_{i} \big( \log p(\vx_t |\vz_{i, t}, \vz_{< t}, \vx_{< t}) \big), 
+\end{align}
+where $\vz_{i, t} \sim \gauss_t^{\mathrm{enc}}$ for observed steps and $\vz_{i, t} \sim \gauss_t^{\mathrm{prior}}$ for predicted steps. By giving the model several chances to make a good prediction, it is encouraged to cover a range of likely data modes, rather than just the most likely. Sampling and evaluating several predictions at each timestep would be expensive in pixel space. However, since we learn the dynamics in the low-dimensional keypoint space, we can evaluate sampled predictions without reconstructing pixels. Due to the keypoint structure, the L2 distance of samples from the observed keypoints meaningfully captures sample quality. This would not be guaranteed for an unstructured latent representation. As shown in Section~\ref{sec:results}, the best-of-many objective is crucial to the performance of our model.
+
+The combined loss of the whole model is:
+\begin{align}
+\mathcal{L}_{\text{image}} + \lambda_{\text{sep}} \mathcal{L}_{\text{sep}} + \lambda_{\text{sparse}} \mathcal{L}_{\text{sparse}} + \mathcal{L}_{\text{VRNN}} + \mathcal{L}_{\text{future}},
+\end{align}
+where $\lambda_{\text{sep}}$ and $\lambda_{\text{sparse}}$ are scale parameters for the keypoint separation and sparsity losses. See Section~\ref{sup_sec:implementation_details} for implementation details, including a list of hyperparameters and tuning ranges (Table~\ref{tab:hyperparameters}).
+\section{Results}
+\label{sec:results}
+
+We first show that the structured representation of our model improves prediction quality on two video datasets, and then show that it is more useful than unstructured representations for downstream tasks that require object-level information.
+\subsection{Structured representation improves video prediction}
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/dataset_examples/20190514_1251_basketball_5985740_17_example_sequence.pdf}
+        \caption{Basketball}
+    \end{subfigure}\hfill%
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/dataset_examples/20190514_1240_human_5985036_17_example_sequence.pdf}
+        \caption{Human3.6M}
+    \end{subfigure}
+    \caption{Main datasets used in our experiments. First row: Ground truth images. Second row: Decoded coordinates (black dots; $\hat{\vx}_t$ in Figure~\ref{fig:architecture_schematic}) and past trajectories (gray lines). Third row: Reconstructed image. Green borders indicate observed frames, red indicate predicted frames.}
+    \label{fig:example_sequences}
+    \vspace{-1em}
+\end{figure*}
+
+
+
+We evaluate frame prediction on two video datasets (Figure~\ref{fig:example_sequences}). The {\bf Basketball} dataset consists of a synthetic top-down view of a basketball court containing five offensive players and the ball, all drawn as colored dots. The videos are generated from real basketball player trajectories \cite{zhan_generating_2018}, testing the ability of our model to detect and stably represent multiple objects with complex dynamics. The dataset contains 107,146 training and 13,845 test sequences. The {\bf Human3.6} dataset \cite{ionescu_human36m_2014} contains video sequences of human actors performing various actions, which we downsample to 6.25 Hz. We use subjects S1, S5, S6, S7, and S8 for training (600 videos), and subjects S9 and S11 for evaluation (239 videos). For both datasets, ground truth object coordinates are available for evaluation, but are not used by the model. The Basketball dataset contains the coordinates of each of the 5 players and the ball. The Human dataset contains 32 motion capture points, of which we select 12 for evaluation.
+
+We compare the full model ({\bf Struct-VRNN}) to a series of baselines and ablations: the {\bf Struct-VRNN (no BoM)} model was trained without the best-of-many objective; the {\bf Struct-RNN} is deterministic; the {\bf CNN-VRNN} architecture uses the same stochastic dynamics model as the Struct-VRNN, but uses an unstructured deep feature vector as its internal representation instead of structured keypoints. All structured models use $K=12$ for Basketball, and $K=48$ for Human3.6M, and were conditioned on 8 frames and trained to predict 8 future frames. For the CNN-VRNN, which lacks keypoint structure, we use a latent representation with $3K$ elements, such that its capacity is at least as large as that of the Struct-VRNN representation.
+Finally, we compare to three published models: {\bf SVG} \cite{denton_stochastic_2018}, {\bf SAVP} \cite{lee_stochastic_2018} and {\bf EPVA} \cite{wichers_hierarchical_2018} (Figure~\ref{fig:video_metrics}). 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/video_metrics_human/20191027_video_qual_sequence_human_5985036.pdf}\\
+    \vspace{0.05in}
+    \includegraphics[width=1.0\textwidth]{figures/video_metrics_human/20191027_human_5985036_17_video_metrics_best_and_worst_condensed.pdf}
+    \vspace{-0.25in}
+    \caption{Video generation quality on Human3.6M. 
+    Our stochastic structured model (Struct-VRNN) outperforms our deterministic baseline (Struct-RNN), our unstructured baseline (CNN-VRNN), and the SVG \cite{denton_stochastic_2018} and SAVP \cite{lee_stochastic_2018} models. \textbf{Top:} Example observed (green borders) and predicted (red borders) frames (best viewed as video: \supplementalUrl). Example sequences are the closest or furthest samples from ground truth according to VGG cosine similarity, as indicated. Note that for Struct-VRNN, even the samples furthest from ground truth are of high visual quality. 
+    \textbf{Bottom left:} Mean VGG cosine similarity of the the samples closest to ground truth (left) and furthest from ground truth (right). Higher is better. Plots show mean performance across 5 model initializations, with the 95\% confidence interval shaded. 
+    \textbf{Bottom right:} Fr\'{e}chet Video Distance~\cite{unterthiner_towards_2018}, using all samples. Lower is better. Dots represents separate model initializations. EPVA~\cite{wichers_hierarchical_2018} is not stochastic, so we compare performance with a single sample from our method on their test set.}
+    \label{fig:video_metrics}
+    \vspace{-0.15in}
+\end{figure*}
+
+The Struct-VRNN model matches or outperforms the other models in perceptual image and video quality as measured by VGG~\cite{Simonyan14c} feature cosine similarity and Fr\'{e}chet Video Distance~\cite{unterthiner_towards_2018} (Figure~\ref{fig:video_metrics}). Results for the lower-level metrics SSIM and PSNR are similar (see supplemental material). 
+
+The ablations suggest that the structured representation, the stochastic belief, and the best-of-many objective all contribute to model performance. The full Struct-VRNN model generates the best reconstructions of ground truth, and also generates the most diverse samples (i.e., samples that are furthest from ground truth; Figure~\ref{fig:video_metrics} bottom left).
+In contrast, the ablated models and SVG show both lower best-case accuracy and smaller differences between closest and furthest samples, indicating less diverse samples. SAVP is closer, performing well on the single-frame metric (VGG cosine sim.), but still worse on FVD than the structured model.
+Qualitatively, Struct-VRNN exhibits sharper images and longer object permanence than the unstructured models (Figure~\ref{fig:video_metrics}, top; note limb detail and dynamics). This is true even for the samples that are far from ground truth (Figure~\ref{fig:video_metrics} top, row "Struct-VRNN (furthest)"), which suggests that our model produces diverse high-quality samples, rather than just a few good samples among many diverse but unrealistic ones. This conclusion is backed up by the FVD (Figure~\ref{fig:video_metrics} bottom right), which measures the overall quality of a distribution of videos~\cite{unterthiner_towards_2018}.
+\subsection{The learned keypoints track objects}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/trajectory_error/20190517_trajectory_error_combined_5985740_5985036.pdf}
+    \caption{Prediction error for ground-truth trajectories by linear regression from predicted keypoints. (sup.) indicates supervised baseline.}
+    \label{fig:trajectory_error}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/separation_and_sparsity_ablation/20191016_paper_figure_loss_ablation_fvd_and_traj_error.pdf}
+    \caption{Ablating either the temporal separation loss or the keypoint sparsity loss reduces model performance and stability. In the FVD plots, each dot corresponds to a different model initialization. Coordinate error plots show the prediction error when regressing the ground-truth object coordinates on the discovered keypoints. Lines show the mean of five model initializations, with the 95\% confidence intervals shaded.} 
+    \label{fig:separation_and_sparsity_ablation}
+\end{figure*}
+
+We now examine how well the learned keypoints track the location of objects. Since we do not expect the keypoints to align exactly with human-labeled objects, we fit a linear regression from the keypoints to the ground truth object positions and measure trajectory prediction error on held-out sequences (Figure~\ref{fig:trajectory_error}). 
+The trajectory error is the average distance between true and predicted coordinates at each timestep. To account for stochasticity, we sample 50 predictions and report the error of the best.\footnote{For Human3.6M, we choose the best sample based on the average error of all coordinates. For Basketball, we choose the best sample separately for each player.}
+
+As a baseline, we train Struct-VRNN and CNN-VRNN models with additional supervision that forces the learned keypoints to match the ground-truth keypoints. The keypoints learned by the unsupervised Struct-VRNN model are nearly as predictive as those trained with supervision, indicating that the learned keypoints represent useful spatial information. 
+In contrast, prediction from the internal representation of the unsupervised CNN-VRNN is poor. When trained with supervision, however, the CNN-VRNN reaches similar performance as the supervised Struct-VRNN. In other words, both the Struct-VRNN and the CNN-VRNN can learn a spatial internal representation, but the Struct-VRNN learns it without supervision.
+
+As expected, the less diverse predictions of the Struct-VRNN (no BoM) and Struct-RNN perform worse on the coordinate regression task. Finally, for comparison, we remove the dynamics model entirely and simply predict the last observed keypoint locations for all future timepoints. All models except unsupervised CNN-VRNN outperform this baseline.
+\subsection{Simple inductive biases improve object tracking}
+\label{sec:results/separation_and_sparsity_ablation}
+
+In Section~\ref{sec:training/keypoint_detector}, we described losses intended to add inductive biases such as keypoint sparsity and uncorrelated object trajectories to the keypoint detector. We find that these losses improve object tracking performance and stability. Figure~\ref{fig:separation_and_sparsity_ablation} shows that models without $\mathcal{L}_{\text{sep}}$ and $\mathcal{L}_{\text{sparse}}$ show reduced video prediction and tracking performance. The increased variability between model initializations without $\mathcal{L}_{\text{sep}}$ and $\mathcal{L}_{\text{sparse}}$ suggests that these losses improve the learnability of a stable keypoint structure (also see Figure~\ref{fig:failure_mode_analysis}). In summary, we find that training and final performance is most stable if $K$ is chosen to be larger than the expected number of objects, such that the model can use $\mu$ in combination with $\mathcal{L}_{\text{sparse}}$ and $\mathcal{L}_{\text{sep}}$ to activate the optimal number of keypoints.
+\subsection{Manipulation of keypoints allows interaction with the model}
+\begin{figure*}[t]
+    \centering
+    \vspace{0.2in}
+    \includegraphics[width=0.7\textwidth]{figures/manipulation_basketball/20190522_basketball_manipulation_5985740_f3957693_edited.pdf}
+    \caption{Unsupervised keypoints allow human-guided exploration of object dynamics. We manipulated the observed coordinates for Player 1 (black arrow) to change the original (blue) trajectory. The other players were not manipulated. The dynamics were then rolled out into the future to predict how the players will behave in the manipulated (red) scenario. Black crosses mark initial player positions. Light-colored parts of the trajectories are observed, dark-colored parts are predicted. Dots indicate final position. Lines of the same color indicate different samples conditioned on the same observed coordinates.}
+    \label{fig:basketball_manipulation}
+    \vspace{-1em}
+\end{figure*}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \vspace{-0.25in}
+    \centering
+    \includegraphics[width=0.5\textwidth]{figures/manipulation_human/20190523_5985036_17_h36m_static_manipulation.pdf}
+    \vspace{-0.25in}
+    \caption{Keypoints learned by our method may be manipulated to change peoples' poses. Note that both manipulations and effects are spatially local. Best viewed in video (\supplementalUrl).}
+    \vspace{-0.20in}
+    \label{fig:human_manipulation}
+\end{wrapfigure}
+
+Since the learned keypoints track objects, the model's predictions can be intuitively manipulated by directly adjusting the keypoints. 
+
+On the Basketball dataset, we can explore counterfactual scenarios such as predicting how the other players react if one player moves left as opposed to right (Figure~\ref{fig:basketball_manipulation}). We simply manipulate the sequence observed keypoint locations before they are passed to the RNN, thus conditioning the RNN states and predictions on the manipulated observations.
+
+For the Human3.6M dataset, we can independently manipulate body parts and generate poses that are not present in the training set (Figure~\ref{fig:human_manipulation}; please see \supplementalUrl for videos). The model learns to associate keypoints with local areas of the body, such that moving keypoints near an arm moves the arm without changing the rest of the image.
+\subsection{Structured representation retains more semantic information}
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \vspace{-0.25in}
+    \centering
+    \includegraphics[width=0.3\textwidth]{figures/downstream_tasks/20190522_human_action_recognition_5985036.pdf}
+    \vspace{-0.1in}
+    \caption{Action recognition on the Human3.6M dataset. 
+    Solid line: null model (predict the most frequent action). Dashed line: prediction from ground-truth coordinates. Sup., supervised.}
+    \label{fig:action_recognition}
+    \vspace{-0.4in}
+\end{wrapfigure}
+
+The learned keypoints are also useful for downstream tasks such as action recognition and reward prediction in reinforcement learning.
+
+To test action recognition performance, we train a simple 3-layer RNN to classify Human3.6M actions from a sequence of keypoints (see Section~\ref{sup_sec:action_recognition} for model details).
+
+The keypoints learned by the structured models perform better than the unstructured features learned by the CNN-VRNN (Figure~\ref{fig:action_recognition}). Future prediction is not needed, so the RNN and VRNN models perform similarly. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/downstream_tasks/reward_prediction_domains.png}
+    \vspace{-0.05in}
+    \includegraphics[width=1\textwidth]{figures/downstream_tasks/20190521_reward_prediction_from_rnn_6049021.pdf}
+    \vspace{-0.1in}
+    \caption{Predicting rewards on the DeepMind Control Suite continuous control domains. We chose domains with dense rewards to ensure the random policy would provide a sufficient reward signal for this analysis. To make scales comparable across domains, errors are normalized to a null model which predicts the mean training-set-reward at all timesteps. Lines show the mean across test-set examples and 5 random model initializations, with the 95\% confidence interval shaded.}
+    \label{fig:reward_prediction}
+    \vspace{-1em}
+\end{figure*}
+
+One major application we anticipate for our model is planning and reinforcement learning of spatially defined tasks. As a first step, we trained our model on a dataset collected from six tasks in the DeepMind Control Suite (DMCS), a set of simulated continuous control environments (Figure~\ref{fig:reward_prediction}). Image observations and rewards were collected from the DMCS environments using random actions, and we modified our model to condition predictions on the agent's actions by feeding the actions as an additional input to the RNN. 
+Models were trained without access to the task reward function. We used the latent state of the dynamics model as an input to a separate reward prediction model for each task (see Section~\ref{sup_sec:reward_prediction} for details). The dynamics learned by the Struct-VRNN give better reward prediction performance than the unstructured CNN-VRNN baseline, suggesting our architecture may be a useful addition to planning and reinforcement learning models. Concurrent work that applies a similar keypoint-structured model to control tasks confirms these results~\cite{kulkarni2019unsupervised}.
+\section{Discussion}
+A major question in machine learning is to what degree prior knowledge should be built into a model, as opposed to learning it from the data. This question is especially important for unsupervised vision models trained on raw pixels, which are typically far removed from the information that is of interest for downstream tasks. We propose a model with a spatial inductive bias, resulting in a structured, keypoint-based internal representation. We show that this structure leads to superior results on downstream tasks compared to a representation derived from a CNN without a keypoint-based representational bottleneck.
+
+The proposed spatial prior using keypoints represents a middle ground between unstructured representations and an explicitly object-centric approach. For example, we do not explicitly model object masks, occlusions, or depth. Our architecture either leaves these phenomena unmodeled, or learns them from the data.
+By choosing to not build this kind of structure into the architecture, we keep our model simple and achieve stable training (see variability across initializations in Figures~\ref{fig:video_metrics},~\ref{fig:trajectory_error}, and~\ref{fig:separation_and_sparsity_ablation}) on diverse datasets, including multiple objects and complex, articulated human shapes.
+
+We also note the importance of stochasticity for the prediction of videos and object trajectories. In natural videos, any sequence of conditioning frames is consistent with an astronomical number of plausible future frames. We found that methods that increase sample diversity (e.g. the best-of-many objective \cite{bhattacharyya_accurate_2018}) led to large gains in FVD, which measures the similarity of real and predicted videos on the level of distributions over entire videos. Conversely, due to the diversity of plausible futures, frame-wise measures of similarity to ground truth (e.g. VGG cosine similarity, PSNR, and SSIM) are near-meaningless for measuring long-term video prediction quality. 
+
+Beyond image-based measures, the most meaningful evaluation of a predictive model is to apply it to downstream tasks of interest, such as planning and reinforcement learning for control tasks. Because of its simplicity, our architecture is straightforward to combine with existing architectures for tasks that may benefit from spatial structure. Applying our model to such tasks is an important future direction of this work.
+
+
+\bibliographystyle{abbrvnat}
+\bibliography{references}
+
+\clearpage
+\appendix
+\pagebreak
+\begin{center}
+\textbf{\LARGE Supplemental material}
+\end{center}
+\vspace{0.5in}
+
+\renewcommand{\thesection}{S\arabic{section}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\theequation}{S\arabic{equation}}
+\setcounter{equation}{0}
+\setcounter{figure}{0}
+
+\maketitle
+\section{Model implementation details}
+\label{sup_sec:implementation_details}
+\subsection{Architecture}
+
+\subsubsection{Keypoint detector}
+Our goal is to encode the input image in terms of the locations of objects in the image \cite{jakab_conditional_2018, zhang_unsupervised_2018}. To this end, we use a \textbf{keypoint detector network} (Figure~\ref{fig:architecture_schematic}, bottom) that consists of $K$ keypoint detectors. Ideally, each detector learns to detect a distinct object or object part. The detector network is implemented as a series of convolutional layers with stride 2 that reduce the input image $\vv$ into a stack of keypoint detection score maps with $K$ channels, $\vR \in \mathbb{R}_{> 0}^{H \times W \times K}$, where $H = W = 16$. We use the softplus function $f(x) = \text{log}(1 + e^x)$ on the activations of the final layer to ensure the maps are positive.
+
+The raw maps $\vR$ are normalized to obtain detection weight maps $\vD$,
+\begin{equation} \label{eq:heatmap_normalization}
+    \vD_k(u, v) = \frac{\vR_k(u, v)}{\sum_u\sum_v\vR_k(u, v)},
+\end{equation}
+where $\vD_k(u, v)$ is the value of the $k$-th channel of $\vD$ at pixel $(u, v)$. We then reduce each $\vD_k$ to a single $(x, y)$-coordinate by computing the weighted mean over pixel coordinates:
+\begin{equation}
+    (x_k, y_k) = \sum^H_{v=1}\sum^W_{u=1}(u, v) \cdot \vD_k(u, v)
+\end{equation}
+To model keypoint presence or absence, we compute the mean value of the raw detection score maps,
+\begin{equation}
+    \mu_k = \frac{1}{H \times W}\sum^H_{v=1}\sum^W_{u=1} \vR_k(u, v).
+\end{equation}
+In summary, each keypoint is represented by a $(x, y, \mu)$-triplet encoding its location in the image and its scale.
+
+For \textbf{image reconstruction}, each keypoint is converted back into a pixel representation by creating a map $\hat{\vR}_k$ containing a Gaussian blob with standard deviation $\sigma_\text{k.p.}$ at the location of the keypoint, scaled by $\mu_k$:
+\begin{equation}
+    \hat{\vR}_k(u, v) = \mu_k \cdot \text{exp}\left( - \frac{1}{2\sigma_\text{k.p.}^2} || (u, v) - (x_k, y_k) ||^2 \right).
+\end{equation}
+The map $\hat{\vR}_k$ contains the same information as the keypoint tuple $(x_k, y_k, \mu_k)$, but in a pixel representation that is suitable as input to the convolutional reconstructor network $\reconstructor$. The image is reconstructed as follows:
+\begin{equation}
+    \hat{\vv}_t = \vv_1 + \reconstructor([ \hat{\vR}_t, \hat{\vR}_1, \varphi^\text{appearance}(\vv_1) ])
+\end{equation}
+where $\reconstructor$ applies alternating convolutional layers and twofold bilinear upsampling until the $16 \times 16$ maps are expanded to the original image resolution, $[ \cdots ]$ denotes concatenation (here, channel-wise), and $\varphi^\text{appearance}$ is a network with the same architecture as $\detector$ (except for the final softmax nonlinearity) that extracts image features from the first frame $\vv_1$ to capture appearance information of the scene. 
+
+The internal layers of the convolutional encoder and decoder are connected through leaky rectified linear units $f(x) = \text{max}(x, 0.2x)$. L2 weight decay of $10^{-4}$ is applied to all convolutional kernels. To increase model capacity, we add one (for Basketball and DMCS) or two (for Human3.6M) additional size-preserving (stride 1) convolutional layers at each resolution scale of the detector and reconstructor. The image resolution is $64 \times 64$ pixels.
+\subsubsection{Dynamics model}
+The dynamics model (Figure~\ref{fig:architecture_schematic}, top) has the following components:
+
+The \textbf{prior} network consists of a dense layer with ReLU activation functions (for number of units, see \emph{Prior net size} in Table~\ref{tab:hyperparameters}), followed by a dense layer that projects the activations to the mean and standard deviation that parameterize the prior latent distribution $\gauss_t^{\mathrm{prior}}$,
+\begin{equation}
+    \vmu_t^\text{prior}, \vsigma_t^\text{prior} = \prior(\vh_{t-1}).
+\end{equation}
+The \textbf{encoder} network consists of a dense layer with 128 units and ReLU activation functions, followed by a dense layer that projects the activations to the mean and standard deviation that parameterize the posterior latent distribution $\gauss_t^{\mathrm{enc}}$,
+\begin{equation}
+    \vmu_t^\text{enc}, \vsigma_t^\text{enc} = \enc([ \vx_t, \vh_{t-1} ]).
+\end{equation}
+The \textbf{decoder} network consists of a dense layer with 128 units and ReLU activation functions, followed by a dense layer that projects the activations to the the linearized keypoint vector $\vx_t$ of length $K \times 3$ (containing $x$, $y$ and $\mu$ components),
+\begin{equation}
+   \vx_t = \dec([ \vz_t, \vh_{t-1} ]),
+\end{equation}
+where $\vz_{t} \sim \gauss^\text{enc}(\vmu_t, \vsigma_t^{2}\mathbb{I})$ for observed steps and $\vz_{t} \sim \gauss^\text{prior}(\vmu_t, \vsigma_t^{2}\mathbb{I})$ for predicted steps.
+
+The \textbf{recurrent} network consists of a GRU layer with 512 units:
+\begin{equation}
+    \vh_{t} = \rnn([ \vx_t, \vz_t, \vh_{t-1} ]).
+\end{equation}
+ For the action-conditional model used for reward prediction (Figure~\ref{fig:reward_prediction}), the input to $\rnn$ is $[ \vx_t, \vz_t, \vh_{t-1}, \va_{t-1} ]$, where $\va_{t-1}$ is the vector of random actions used to generate frame $t$ of the DeepMind Control Suite dataset.
+
+The size of $\prior$ and the latent representation $\vz$ were optimized as hyperparameters (see Table~\ref{tab:hyperparameters}).
+\subsection{Optimization}
+We used the ADAM optimizer \cite{kingma_adam_2014} with $\beta_1 = 0.9$ and $\beta_2 = 0.999$. We trained on batches of size 32 for $10^5$ steps. The learning rate was set to $10^{-3}$ at the start of training and reduced by half every $3 \times 10^4$ steps. We used an L2 weight decay of $10^{-4}$ on the weights of the convolutional layers in the image encoder and decoder. Weights were initialized using the "He uniform" method as implemented by Keras. Models were trained on a single Nvidia P100 GPU. Training took approximately 12 hours.
+
+During training, we linearly annealed the KL loss scale from $0$ to $\beta$ over the first $2.5 \times 10^4$ steps, as in \cite{bowman_generating_2016}.
+\subsection{Scheduled sampling}
+When training an RNN for many timesteps, the initially large errors compound over time, leading to slow learning. Therefore, during training, we initially supplied the observed keypoint coordinates as $\vx_{t-1}$ to the RNN, instead of the RNN's own predictions. This is similar to teacher forcing, although we note that we used the output of the unsupervised keypoint detector, rather than the ground truth. 
+
+We find that teacher forcing causes the model to make more dynamic predictions which are qualitatively realistic, but may have poor error metrics because of the mismatch between the training and test distributions. We therefore gradually switched to using samples from the model over the course of training (scheduled sampling, \cite{bengio_scheduled_2015}). We linearly increased the probability of choosing samples from the model from $0$ to a final value over the course of training. We chose the final probability to be $1.0$ for the observed timesteps and $0.5$ for the predicted timesteps.
+\subsection{Hyperparameter optimization}
+We used a black-box optimization tool based on Gaussian process bandits \cite{vizier_2017} to tune several of the hyperparameters of our model. The target for optimization was the mean coordinate trajectory error as computed for Figure~\ref{fig:trajectory_error}. See Table~\ref{tab:hyperparameters} for parameters and their tuning ranges.
+
+\begin{table}
+  \caption{Hyperparameters}
+  \label{tab:hyperparameters}
+  \centering
+  \begin{tabular}{lcllll}
+    \toprule
+    Parameter name          & Symbol        & Tuning range      & Basketball    & Human3.6M & DMCS \\
+    \midrule
+    Batch size              &               & -                 & 32            & 32        & 32 \\
+    Init. learning rate     &               & -                 & $10^{-3}$     & $10^{-3}$ & $10^{-3}$ \\
+    Input steps             & $T$           & -                 & 8             & 8         & 8 \\
+    Predicted steps         & $\Delta T$    & $[0, 32]$        & 8             & 8         & 8 \\
+    Num. keypoints          &   $K$         & varied            & 12            & 48        & 64 \\
+    Keypoint sparsity scale & $\lambda_\text{sparse}$ & $[10^{-3}, 10^4]$ &  $0.1$ & $10^{-2}$ & 5 \\
+    Separation loss scale   & $\lambda_\text{sep}$ & $[10^{-3}, 10^4]$ &  $0.1$ & $2 \times 10^{-2}$ & $0.1$ \\
+    Separation loss width   & $\sigma_\text{sep}$          & $[0, 0.2]$        & $2 \times 10^{-2}$ & $2 \times 10^{-3}$ & $2 \times 10^{-2}$ \\
+    Keypoint blob width     &  $\sigma_\text{k.p.}$  & $[0.1, 2.0]$ (pix) & 1.5          & 1.5       & 1.5 \\
+    Latent code size        &               & $[4, 256]$        & 16            & 16        & 128 \\
+    KL loss scale           &  $\beta$      & $[10^{-3}, 10]$ & $10^{-2}$     & $10^{-2}$ & $3 \times 10^{-3}$ \\
+    Prior net size          &               & $[4, 512]$        & 16            & 4         & 16 \\
+    Posterior net size      &               & -                 & 128           & 128      & 128 \\     
+    Num. RNN units          &               & $[32, 2048]$       & 512           & 512       & 512 \\
+    Num. samp. for BoM loss &             & $[1, 200]$        & 50            & 50        & 50 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\section{Experimental details}
+
+\subsection{Comparison to SVG and SAVP}
+For both SVG and SAVP, models were trained on the same datasets as our models, using the code made available by the authors. We trained all models using 8 input steps and 8 predicted steps. For SAVP, the other hyperparameters were set to those recommended by the authors for the BAIR robot pushing dataset.
+\subsection{Human3.6M action recognition}
+\label{sup_sec:action_recognition}
+
+To understand how much semantically useful information the representations of our models contain, we predicted the actions performed in the Human3.6M dataset from the model representations (Figure~\ref{fig:action_recognition}). We first used trained models to extract keypoints (or unstructured image representations) for sequences of 8 observed steps from the Human3.6M test set. These keypoint sequences represented the dataset used for action recognition. The action recognition training set comprised 881 sequences, the test set 279 sequences. We ensured that no test sequences came from the same original videos as those used in the training set.
+
+We then trained a separate recurrent neural network to classify each sequence into one of the 15 action categories (Walking, Sitting, Eating, Discussions, ...) in the Human3.6M dataset. No categories were excluded. The network consisted of two GRU layers (128 units), followed by a dense layer (15 units) and a softmax layer. We used 25\% dropout after each GRU layer. The model was trained for 100 epochs using the ADAM optimizer with a starting learning rate of 0.01 that was successively reduced to 0.0001. We report the mean action recognition accuracy (fraction correct) on the 279 test sequences.
+\subsection{DeepMind Control Suite reward prediction}
+\label{sup_sec:reward_prediction}
+
+To explore if the structured representation learned by our model may be useful for planning, we used our model to predict rewards in DeepMind Control Suite \cite{tassa_deepmind_2018} continuous control tasks (Figure~\ref{fig:reward_prediction}). We chose tasks that have dense rewards and thus provide a strong signal for evaluation (Acrobot Swingup, Cartpole Balance, Cheetah Run, Reacher Easy, Walker Stand, Walker Walk).
+
+We generated a dataset based on DeepMind Control Suite (DMCS) continuous control tasks by performing random actions and recording 64 by 64 pixel observations, the actions, and the rewards. We then trained our model variants on this dataset. Importantly, we trained a single model on data from all domains, to test the generality of our approach. We modified our models to be action-conditional by passing the vector of actions as an additional input to the RNN at each timestep.
+
+To predict rewards, we used the RNN hidden state of our models as a representation of the dynamics learned by the model. We first collected the hidden states of the trained models for 10,000 length-20 sequences from the test split for each of the six domains in our DMCS dataset. We then trained a separate, smaller reward prediction model to predict rewards for each of the six domains. The reward prediction models took the sequence of RNN hidden states as input and returned a sequence of scalar reward values as output. The model consisted of a fully connected layer (128 units), two GRU layers (128 units) and a dense layer (1 unit), all connected through rectified linear units. The reward prediction model was trained on 80\% of the data with the ADAM optimizer with a starting learning rate of 0.001 that was successively reduced to 0.0001. We report the mean squared error of the predicted reward on the remaining 20\% of the data.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=1.0\textwidth]{supplemental_figures/video_metrics_human/20190526_human_5985036_17_video_metrics_best_and_worst.pdf}
+    \caption{Additional video metrics on Human3.6M: structural similarity (SSIM) and peak signal-to-noise ratio (PSNR). The models were conditioned on 8 frames and trained to predict 8 future frames. Higher is better (closer to ground truth). Top row shows the mean across all test-set examples of the closest-to-GT of 100 stochastic samples, bottom shows the furthest. Lines show the mean across 5 random model initializations, with the 95\% confidence interval shaded. } 
+    \label{fig:sup_video_metrics_human}
+\end{figure*}
+
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{supplemental_figures/video_metrics_basketball/20191015_video_qual_sequence_basketball_5985740.pdf}\\
+    \vspace{0.1in}
+    \includegraphics[width=1.0\textwidth]{supplemental_figures/video_metrics_basketball/20190618_basketball_5985740_17_video_metrics_best_and_worst.pdf}
+    \caption{Video generation quality on Basketball. The models were conditioned on 8 frames and trained to predict 8 future frames. Our stochastic structured model (Struct-VRNN) outperforms our deterministic baseline (Struct-VRNN), our unstructured baseline (CNN-VRNN), and the SVG model \cite{denton_stochastic_2018} in the FVD metric and qualitatively. \textbf{Top:} Example input (green borders) and predicted (red borders) frames. \textbf{Bottom left:} Fr\'{e}chet Video Distance (FVD) \cite{unterthiner_towards_2018}. Lower is better. Each dot represents a separate model initialization. For SVG, the FVD for several runs was greater than 1700. The example at the top comes from the best run. \textbf{Bottom right:} VGG feature cosine similarity, structural similarity (SSIM), and peak signal-to-noise ratio (PSNR). Higher is better. Lines show the mean across 5 random model initializations, with the 95\% confidence interval shaded. The SVG model fails to represent objects stably at later timepoints. This is captured by the FVD metric, causing a large difference to our models. However, it is not captured by the other metrics, suggesting that they are not informative on this synthetic dataset. Also see videos in supplemental material or at \supplementalUrl.} 
+    \label{fig:video_metrics_basketball}
+\end{figure*}
+
+
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[t]{0.6\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/basketball_trajectory_diversity/20190522_basketball_trajectory_diversity_examples_5985740_21_struct_vrnn.pdf}
+        \caption{Struct-VRNN}
+    \end{subfigure}\\
+    \vspace{0.2in}
+    \begin{subfigure}[t]{0.6\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/basketball_trajectory_diversity/20190522_basketball_trajectory_diversity_examples_5985740_23_no_bms.pdf}
+        \caption{Struct-VRNN without best-of-many-samples objective}
+    \end{subfigure}\\
+    \vspace{0.2in}
+    \begin{subfigure}[t]{0.6\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/basketball_trajectory_diversity/20190522_basketball_trajectory_diversity_examples_5985740_37_deterministic.pdf}
+        \caption{Struct-RNN (deterministic dynamics)}
+    \end{subfigure}
+    \caption{Effect of stochastic belief and best-of-many-samples objective on sample diversity. Each row shows one example Basketball play, with the trajectories for one player in each column. The black line indicates the true trajectory, the colored lines indicate 20 stochastic predictions, all conditioned on the same observed steps. Trajectory endpoints are marked with dots. The model trained with the best-of-many-samples objective (a) produces more diverse samples than the model without (b). As expected, the deterministic model (c) lacks diversity completely. Players were matched to detected keypoints by finding, for each player, the keypoint which was closest to that player on average.}
+    \label{fig:basketball_diversity}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{supplemental_figures/human_sample_diversity/20190522_human_sample_diversity_ex_0_5985036.pdf}\\
+    \vspace{0.1in}
+    \includegraphics[width=1.0\textwidth]{supplemental_figures/human_sample_diversity/20190522_human_sample_diversity_ex_1_5985036.pdf}\\
+    \vspace{0.1in}
+    \includegraphics[width=1.0\textwidth]{supplemental_figures/human_sample_diversity/20190522_human_sample_diversity_ex_2_5985036.pdf}\\
+    \vspace{0.1in}
+    \includegraphics[width=1.0\textwidth]{supplemental_figures/human_sample_diversity/20190522_human_sample_diversity_ex_3_5985036.pdf}
+    \caption{The Struct-VRNN model generates plausible and diverse predictions. Each block shows the true sequence in the top row, followed by three samples conditioned on the same initial frames (green outlines). Also see videos in supplemental material or at \supplementalUrl.}
+    \label{fig:human_sample_diversity}
+\end{figure*}
+
+
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[t]{0.9\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/dmcs_predictions/20190522_dmcs_prediction_ex_Acrobot_6016471.pdf}
+        \caption{Acrobot}
+    \end{subfigure}\\
+    \vspace{0.1in}
+    \begin{subfigure}[t]{0.9\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/dmcs_predictions/20190522_dmcs_prediction_ex_Cartpole_6016471.pdf}
+        \caption{Cartpole}
+    \end{subfigure}\\
+    \vspace{0.1in}
+    \begin{subfigure}[t]{0.9\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/dmcs_predictions/20190522_dmcs_prediction_ex_Cheetah_6016471.pdf}
+        \caption{Cheetah}
+    \end{subfigure}\\
+    \vspace{0.1in}
+    \begin{subfigure}[t]{0.9\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/dmcs_predictions/20190522_dmcs_prediction_ex_Reacher_6016471.pdf}
+        \caption{Reacher}
+    \end{subfigure}\\
+    \vspace{0.1in}
+    \begin{subfigure}[t]{0.9\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/dmcs_predictions/20190522_dmcs_prediction_ex_Walker_6016471.pdf}
+        \caption{Walker}
+    \end{subfigure}
+    \caption{Action-conditional predictions for the DeepMind Control Suite domains. Even though the CNN-VRNN has enough capacity to encode the observed frames (green outlines) well, it struggles to make future predictions (red outlines), in contrast to the Struct-VRNN. Also see videos in supplemental material or at \supplementalUrl.}
+    \label{fig:dmcs_predictions}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[t]{0.8\textwidth}
+        \includegraphics[width=\textwidth]{supplemental_figures/failure_mode_analysis/20191015_basketball_detection_failure_modes.pdf}
+        \caption{Coordinate error over time for individual objects. In the left plot, lines indicate the mean across 10 model initializations, with the 95\% confidence interval shaded. In the middle and right plot, lines show individual model initializations. For these runs, $\lambda_{\text{sparse}} = 0.01$ and $\lambda_{\text{sep}} = 0.01$.}
+    \end{subfigure}\\
+    \vspace{0.2in}
+    \begin{subfigure}[t]{0.8\textwidth}
+        \centering
+        \includegraphics[width=0.8\textwidth]{supplemental_figures/failure_mode_analysis/20191017_basketball_detection_failure_mode_grids.pdf}
+        \caption{Mean coordinate error of the ball (left) and Player 3 (right) across different settings of $\lambda_{\text{sparse}}$ and $\lambda_{\text{sep}}$, relative to the best settings. Each entry in the heatmaps corresponds to the mean trajectory error across time and 10 model initializations.}
+    \end{subfigure}\\
+    
+    \caption{Analysis of object tracking failure modes (Basketball dataset). (a) shows the coordinate error for individual objects. We identify two different failure modes, corresponding to failures of the dynamics model and failures of the keypoint detector: Some objects, e.g. the ball (yellow; middle plot), have relatively large tracking errors across all 10 model initializations, presumably because their dynamics are hard to learn. Other objects, e.g. Player 3 (pink; right plot) are tracked well in some and poorly in other model initializations, presumably because the keypoint detector completely fails to detect these objects in some runs. The sweep over $\lambda_{\text{sparse}}$ and $\lambda_{\text{sep}}$ in (b) shows that $\mathcal{L}_{\text{sparse}}$ and $\mathcal{L}_{\text{sep}}$ primarily reduce the keypoint detector failure mode (exemplified by the Player 3 error; right), while the tracking error of the ball (left) is insensitive to these losses. In other words, $\mathcal{L}_{\text{sparse}}$ and $\mathcal{L}_{\text{sep}}$ improve the reliability of the keypoint detector.}
+    \label{fig:failure_mode_analysis}
+\end{figure*}

@@ -1,0 +1,623 @@
+\section{Introduction}
+Deep neural network (DNN) has emerged as the fundamental element and core enabler in machine learning applications due to its high accuracy, excellent scalability, and self-adaptiveness~\cite{goodfellow2016deep}. A well trained DNN model can be deployed as inference system for multiple objectives, such as image classification~\cite{krizhevsky2012imagenet}, object detection~\cite{ren2015faster}, and natural language processing~\cite{hinton2012deep}. However, the state-of-art DNN models such as VGG-16~\cite{simonyan2014very}, ResNet-50~\cite{he2016deep} and MobileNet~\cite{howard2017mobilenets} involve intensive computation and high memory storage, making it very challenging to execute inference system on current mobile platforms in a real-time manner.
+
+Recently, high-end mobile platforms are rapidly overtaking desktop and laptop as primary computing devices for broad DNN applications such as wearable devices, video streaming, unmanned vehicles, smart health devices, etc.~\cite{philipp2011sensor}\cite{lane2015early}\cite{boticki2010quiet}.
+Developing a real-time DNN inference system is desirable but still yield to the limited computation resources of embedded processors on a mobile platform. Multiple end-to-end mobile DNN acceleration frameworks, such as TVM~\cite{chen2018tvm}, TensorFlow-Lite (TFLite)~\cite{TensorFlow-Lite} and Alibaba Mobile Neural Network (MNN)~\cite{Ali-MNN}, have been developed. However, the inference time of large-scale DNNs (e.g., 242ms inference time using TVM on Adreno 640 GPU with VGG-16) is still far from real-time requirement.
+
+In order to mitigate the challenge brings by the DNN's bulky computation and achieve the goal of real-time inference, it is necessary to consider algorithm-level innovations. Various DNN model compression techniques are studied, among which \emph{weight pruning}~\cite{han2015deep}\cite{mao2017exploring}\cite{dai2017nest}\cite{wen2016learning}\cite{he2017channel} can result in a notable reduction in the model size. Early work~\cite{han2015deep} on \emph{non-structured} weight pruning (fine-grained) prunes weights at arbitrary location, resulting in a sparse model to be stored in the compressed sparse column (CSC) format. It leads to an undermined processing throughput because the indices in the compressed weight representation cause stall or complex workload on highly parallel architectures~\cite{han2015deep}\cite{wen2016learning}. On the other hand, \emph{structured} weight pruning~\cite{wen2016learning} (coarse-grained) is more hardware friendly. By exploiting filter pruning and channel pruning, the pruned model is more regular in its shape, which eliminates the storage requirement in weight indices. However, it is observed that structured pruning hurts accuracy more significantly than non-structured sparsity.
+
+It is imperative to find a new granularity level that can satisfy high accuracy demand as well as regularity in DNN model structure. We make the observation that non-structured and structured pruning are two extremes of the full design space. The two missing keys are: (i) Find a new, intermediate sparsity dimension that can fully leverage both the high accuracy from fine-grained model and high regularity level from coarse-grained model; (ii) Find the corresponding (algorithm-compiler-hardware) optimization framework which can seamlessly bridge the gap between hardware efficiency and the new sparsity dimension. To address the above problems, this paper proposes \projectname, comprising (a) a new sparsity dimension that exploits both intra-convolution and inter-convolution kernel sparsities, exhibiting both high accuracy and regularity, and revealing a previously \emph{unknown} point in design space; and (b) a \emph{compiler-assisted DNN inference framework} that fully leverages the new sparsity dimension and achieves real-time DNN acceleration on mobile devices.
+
+In \projectname, we call our intra-convolution kernel pruning \emph{pattern pruning} and inter-convolution kernel pruning \emph{connectivity pruning}. 
+For pattern pruning, 
+a fixed number of weights are pruned in each convolution kernel. 
+Different from non-structured weight pruning, pattern pruning produces the same sparsity ratio in each filter and a limited number of pattern shapes. 
+Essentially, our designed patterns correspond to the computer vision concept of key convolution filters, 
+such as Gaussian filter for smoothing, Laplacian of Gaussian filter for smoothing and sharpening. 
+For connectivity pruning, the key insight is to {\em cut the connections} between certain input and output channels, which is equivalent to removal of corresponding kernels, making filter ``length" shorter than original model. 
+With connectivity pruning, we further enlarge compression rate and provide greater DNN acceleration potential, while maintaining balanced workload in filter-wise computation of DNNs. Pattern and connectivity pruning can be combined at algorithm level and accelerated under the unified compiler-assisted acceleration framework.  
+For our advanced \emph{compiler-assisted DNN inference framework}, we use execution code generation which converts DNN models into computational graphs and applies multiple optimizations including a high-level, fine-grained DNN layerwise information extraction, filter kernel reorder and load redundancy elimination. All design optimizations are general, and applicable to both mobile CPUs and GPUs.
+
+We demonstrate that pattern pruning consistently improve model accuracy. When combined with connectivity pruning, the results still outperform current DNN pruning methods, both non-structured and structured weight pruning. 
+In Section ``Accuracy Analysis", we show \projectname is the most desirable sparsity among current prune-for-acceleration works. 
+We also deploy \projectname model on our compiler-assisted mobile acceleration framework and compare with three state-of-art frameworks on mobile CPU and GPU, TensorFlow Lite, TVM, and MNN, using three widely used DNNs, VGG-16, ResNet-50, and MobileNet-v2 and two benchmark datasets, ImageNet and CIFAR-10. 
+Evaluation results show that \projectname achieves up to $39.2\times$ speedup without any accuracy drop. Using Adreno 640 embedded GPU, \projectname achieves an unprecedented 19.1 ms inference time of VGG-16 on ImageNet dataset. 
+To the best of our knowledge, it is the first time to achieve real-time execution of such representative large-scale DNNs on mobile devices.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.44 \textwidth]{figs/different_pruning.pdf}
+    \caption{Overview of different weight pruning dimensions.}
+    \label{fig:sparsity_type}
+\end{figure}
+\section{Background}
+
+\subsection{DNN Model Compression}
+DNN model compression is a promising method to remove redundancy in the original model. It targets on the purpose that inference time can be reduced if fewer weights are involved in the computation graph. The weight pruning method acts as a surgeon to remove the inherently redundant neurons or synapses. As Figure~\ref{fig:sparsity_type} shows, two main approaches of weight pruning are the general, non-structured pruning and structured pruning, which produce irregular and regular compressed DNN models, respectively. 
+
+\textbf{Non-structured pruning:} 
+Early work is~\cite{han2015deep}, in which an iterative, heuristic method is used with limited, non-uniform model compression rates. Flourished by~\cite{zhang2018systematic} and \cite{ren2019ADMMNN} with the powerful ADMM~\cite{boyd2011distributed} optimization framework, non-structured pruning achieves very high weight reduction rate and promising accuracy. However, for compiler and code optimization, irregular weight distribution within kernels requires heavy control-flow instructions, which degrades instruction-level parallelism. Also, kernels in different filters have divergent workloads, which burdens thread-level parallelism when filters are processed through multi-threading. Moreover, irregular memory access causes low memory performance and thereby execution overheads.
+
+\textbf{Structured pruning:} 
+This method has been proposed to address the index overhead and imbalanced workload caused by non-structured pruning. Pioneered by~\cite{wen2016learning}\cite{he2017channel}, structured weight pruning generates regular and smaller weight matrices, eliminating overhead of weight indices and achieving higher acceleration performance in CPU/GPU executions. However, it suffers from notable accuracy drop when the pruning rate increases.
+\subsection{Patterns in Computer Vision}
+Convolution operations exist in different research areas for an extended period of time, such as image processing, signal processing, probability theory, and computer vision. 
+In this work, we focus on the relationship between conventional image processing and state-of-art convolutional neural networks in the usage of convolutions. In image processing, the convolution operator is manually crafted with prior knowledge from the particular characteristics of diverse patterns, such as Gaussian filter. On the other hand, in convolutional neural networks, the convolution kernels are randomly initialized, then trained on large datasets using gradient-based learning algorithms for value updating.
+
+\cite{NIPS2014_5348} derived a network architecture named Convolutional Kernel Networks (CKN), with lower accuracy than current DNNs, thus limited usage. \cite{zhang2019shiftinvar} proposed to apply the blur filter to DNNs before pooling to maintain the shift-equivalence property. The limited prior work on the application of conventional vision filters to DNNs require network structure change and do not focus on weight pruning/acceleration, thus distinct from \projectname.
+\subsection{DNN Acceleration Frameworks on Mobile Platform}
+Recently, researchers from academia and industry have investigated DNN inference acceleration frameworks on mobile platforms, including 
+TFLite~\cite{TensorFlow-Lite}, 
+TVM~\cite{chen2018tvm}, 
+Alibaba Mobile Neural Network (MNN)~\cite{Ali-MNN}, 
+DeepCache~\cite{xu2018deepcache} 
+and DeepSense~\cite{yao2017deepsense}. 
+These works do not account for model compression techniques, and the performance is far from real-time requirement. There are other researches that exploit model sparsity to accelerate DNN inference, e.g., 
+\cite{liu2015sparse}, 
+SCNN~\cite{parashar2017scnn}, 
+but they either do not target mobile platforms (require new hardware) or trade off compression rate and accuracy, thus having different challenges than our work.
+\section{Motivations}
+Based on the current research progress on DNN model compression vs. acceleration, we analyze and rethink the whole design space, and are motivated by the following three points:
+
+\textbf{Achieving both high model accuracy and pruning regularity.}
+In non-structured pruning, any weight can be pruned. This kind of pruning has the largest flexibility, thus achieves high accuracy and high prune rate. But it is not hardware-friendly. On the other hand, structured pruning produces hardware-friendly models, but the pruning method lacks flexibility and suffers from accuracy drop. Our motivation is to use the best of the above two sparsities. To achieve that, we introduce a new dimension, pattern-based sparsity, revealing a previously unknown design point with high accuracy and structural regularity simultaneously.
+
+\textbf{Image enhancement inspired sparse convolution patterns.}
+The contemporary DNN weight pruning methods originate from the motivation that eliminating redundant information (weights) will not hurt accuracy. On the other hand, these pruning methods scarcely treat pruning as a specific kind of binary convolution operator, not to mention exploiting corresponding opportunities. Along this line, we find that sparse convolution patterns have the potential in enhancing image quality thanks to its special vision properties.
+Motivated by the fact that sparse convolution patterns can potentially enhance image quality, we propose our carefully designed patterns which are derived from mathematical vision theory.
+
+
+\textbf{Compiler-assisted DNN inference framework.}
+With the higher accuracy enabled by 
+fine-grained pruning patterns, the key question is 
+how to re-gain similar (or even surpass) hardware efficiency 
+as coarse-gained structured pruning. 
+We take a unique approach and design an optimized, compiler-assisted DNN inference framework to close the performance gap between full structured pruning and pattern-based pruning.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.429\textwidth]{figs/pattern_pruning.pdf}
+    \caption{Illustration of pattern pruning and connectivity pruning.}
+    \label{fig:pattern_pruning}
+\end{figure}
+\section{Theory of Sparse Convolution Patterns (SCP)}
+Let an image with resolution $H \times W$ be represented by $X \in \mathbb{R}^{H \times W \times 3}$. An $L-$layer DNN can be expressed as a feature extractor $ \mathcal{F}_{L}(\mathcal{F}_{L-1}(\ldots\mathcal{F}_{1}(X)\ldots)) $, with layer index $l \in\{1, \dots, L\}$. Inside the DNN, each convolutional layer is defined as $\mathcal{F}_{l}(X_l) \in \mathbb{R}^{H_{l} \times W_{l} \times F_{l} \times C_{l}}$, with filter kernel shape ${H_{l} \times W_{l}}$, number of filters $F_{l}$ and number of channels $C_{l}$.
+
+
+Besides treating pruning as a redundant information removal technique, we consider it as incorporating an additional convolution kernel $P$ to perform element-wise multiplication with the original kernel.
+$P$ is termed the \emph{Sparse Convolution Pattern} (SCP), 
+with dimension $H_{l} \times W_{l}$ and binary-valued elements (0 and 1). 
+Specific SCPs fit the mathematical vision theory well according to our following derivation. Based on the mathematical rigority, we propose the novel \emph{pattern pruning} scheme, i.e., applying SCPs to convolution kernels. As illustrated in Figure~\ref{fig:pattern_pruning}, the white blocks denote a fixed number of pruned weights in each kernel. The remaining red blocks in each kernel have arbitrary weight values, while their locations form a specific SCP $P_{i}$. Different kernels can have different SCPs, but the total number of SCP types shall be limited.
+
+In order to further increase the pruning ratio and DNN inference speed, we can selectively cut the connections between particular input and output channels, which is equivalent to the removal of corresponding kernels. This is termed \emph{connectivity pruning}. \emph{Connectivity pruning} is illustrated in Figure~\ref{fig:pattern_pruning}, with gray kernels as pruned ones. The rationale of connectivity pruning stems from the desirability of locality in layerwise computations inspired by human visual systems~\cite{yamins2016using}. It is a good supplement to pattern pruning. Both pruning schemes can be integrated in the same algorithm-level solution and compiler-assisted mobile acceleration framework.
+\subsection{The Convolution Operator}
+In conventional image processing, a convolution operator is formally defined by the following formula, where the output pixel value $g(x, y)$ is the weighted sum of input pixel values $f(x, y)$, and $h(k, l)$ is the weight kernel value
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+    g(x, y)=\sum_{k, l} f(x+k, y+l) h(k, l)
+\end{equation}
+This formula could transform to
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+    g(x, y)=\sum_{k, l} f(k, l) h(x-k, y-l)
+    \label{eq:2}
+\end{equation}
+Then we derive the notation of convolution operator as:
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+    g=f * h
+\end{equation}
+
+Convolution is a linear shift-invariant (LSI) operator, satisfying the commutative property, the superposition property and the shift-invariance property. 
+Additionally, convolution satisfies the associative property following the Fubini's theorem.
+\subsection{Sparse Convolution Pattern (SCP) Design}
+Our designed SCPs could be transformed to a series of steerable filters~\cite{Freeman1991}, i.e., the Gaussian filter and Laplacian of Gaussian filter, which function as image smoothing, edge detection or image sharpening in mathematical vision theory. 
+
+\textbf{Gaussian filter:}
+Consider a two-dimensional Gaussian filter $G$:
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+    G(x, y, \sigma)=\frac{1}{2 \pi \sigma^{2}} e^{-\frac{x^{2}+y^{2}}{2 \sigma^{2}}}
+\end{equation}
+$x$ and $y$ are input coordinates, and $\sigma$ is standard deviation of the Gaussian distribution.
+Typically, the Gaussian filter performs image smoothing, and further sophisticated filters can be created by first smoothing the image input with a unit area Gaussian filter, then applying other steerable filters.
+
+\textbf{Laplacian of Gaussian filter:}
+The Laplacian operator is the second derivative operator.
+According to the associative property, smoothing an image with Gaussian filter and then applying Laplacian operator is equivalent to convolve the image with the Laplacian of Gaussian (LoG) filter:
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+    \nabla^{2} G(x, y, \sigma)=\left(\frac{x^{2}+y^{2}}{\sigma^{4}}-\frac{2}{\sigma^{2}}\right) G(x, y, \sigma)  
+\end{equation}
+The LoG filter is a bandpass filter that eliminates both the high-frequency and low-frequency noises. LoG has elegant mathematical properties, and is valid for a variety of applications including image enhancement, edge detection, and stereo matching.
+
+\textbf{Taylor series expansion} is utilized to determine the approximate values of the LoG filter with $3 \times 3$ filter size. First, we consider the 1-D situation. The Taylor series expansions of 1-D Gaussian filter $G(x)$ are given by: 
+\begin{small}
+    \begin{equation}
+        G(x\!+\!h)\!=\!G(x)\!+\!h G^{\prime}(x)\!+\!\frac{1}{2} h^{2} G^{\prime \prime}(x)\!+\!\frac{1}{3 !} h^{3} G^{\prime \prime \prime}(x)\!+\!O\left(h^{4}\right)\label{eq:taylor_1}
+    \end{equation}
+\end{small}
+\begin{small}
+    \begin{equation}
+        G(x\!-\!h)\!=\!G(x)\!-\!h G^{\prime}(x)\!+\!\frac{1}{2} h^{2} G^{\prime \prime}(x)\!-\!\frac{1}{3 !} h^{3} G^{\prime \prime \prime}(x)\!+\!O\left(h^{4}\right)\label{eq:taylor_2}
+    \end{equation}
+\end{small}
+By summing \eqref{eq:taylor_1} and \eqref{eq:taylor_2}, we have
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+G(x+h)+G(x-h)=2 G(x)+h^{2} G^{\prime \prime}(x)+O\left(h^{4}\right)\label{eq:taylor_3}
+\end{equation}
+The second derivative of Gaussian $G^{\prime \prime}(x)$ is equivalent to LoG $\nabla^{2} G(x)$. Equation~\eqref{eq:taylor_3} is further transformed to 
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+\frac{G(x-h)-2 G(x)+G(x+h)}{h^{2}}\!=\!\nabla^{2} G(x)\!+\!O\left(h^{2}\right)\label{eq:laplacian_ref}
+\end{equation}
+Applying central difference approximation of LoG $\nabla^{2} G(x)$, we derive the 1-D approximation of LoG filter as $\left[\begin{smallmatrix}{1} & {-2} & {1} \end{smallmatrix}\right]$. Then we procure the 2-D approximation of LoG filter by convolving $\left[\begin{smallmatrix}{1} & {-2} & {1} \end{smallmatrix}\right]$ and $\left[\begin{smallmatrix}{1} \\ {-2} \\ {1}\end{smallmatrix}\right]$, and get result as $\left[\begin{smallmatrix}{-1} & {2} & {-1} \\ {2} & {-4} & {2} \\ {-1} & {2} & {-1}\end{smallmatrix}\right]$. 
+According to the property of second derivative:
+\begin{equation}
+\fontsize{9}{8.5}\selectfont
+	\nabla^{2} G(x, y)=G_{x x}(x, y)+G_{y y}(x, y)
+\end{equation}
+and Equation \eqref{eq:laplacian_ref}, we have
+\begin{equation}\label{eq:plus_filter}
+\fontsize{9}{8.5}\selectfont
+    G_{x x}(x, y)+G_{y y}(x, y)\!=\!\left(\left[\begin{smallmatrix}{1} & {-2} & {1}\end{smallmatrix}\right]\!+\!\left[\begin{smallmatrix}{1} \\ {-2} \\ {1}\end{smallmatrix}\right]\right) * G(x, y)
+\end{equation}
+Based on \eqref{eq:plus_filter}, we derive another approximation of LoG as $\left[\begin{smallmatrix}{0} & {1} & {0} \\ {1} & {-4} & {1} \\ {0} & {1} & {0}\end{smallmatrix}\right]$.
+
+According to the central limit theorem, the convolution of two Gaussian functions is still a Gaussian function, and the new variance is the sum of the variances of the two original Gaussian functions. Hence, we convolve the above two approximations of LoG and then apply normalization, and get the \emph{Enhanced Laplacian of Gaussian} (ELoG) filter as 
+$\left[\begin{smallmatrix}{0} & {1} & {0} \\ {1} & {8} & {1} \\ {0} & {1} & {0}\end{smallmatrix}\right]$.
+
+
+\cite{powerofinterpolation} have proved the convergence of the interpolation in the context of (multi-layer) DNNs, so we utilize the interpolated probability density estimation to make the further approximation.
+In ELoG filter
+where 1 appears,
+we mask it to 0 with the probability of $(1-p)$. 
+Because we uniformly convolve SCPs into $n$ convolutional layers, this random masking operation can be treated as distributed interpolation of SCPs. 
+In continuous probability space, interpolating SCPs into convolution function is a specific Probability Density Function (PDF), 
+so the effect of interpolating SCPs is accumulating probability expectations of interpolation into $n$ convolutional layers. 
+Besides, the convolution function is normalized to unity, so we separate the coefficient $p$ in the following equation.
+    
+    
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.43 \textwidth]{figs/equation.pdf}
+\end{figure}
+The four SCPs are shown in colored positions in (12). In order to get the best approximation to 
+ELoG filter, 
+we set $p=0.75$ and $n=8$, then the desired filter is equal to interpolating these four SCPs for eight times. The coefficient $p$ has no effect after normalization.
+
+\textbf{Upper bound:} According to ~\cite{blakemore1969}, the optimal times for applying the \textit{LoG} 
+filter is six and the maximum is ten. Thus the desired number of times to interpolate 
+the SCP in (12) is around 24 and the maximum number is around 55. This upper bound covers most of the existing effective DNNs, even for ResNet-152, which comprises 50 convolutional layers with filter kernel size of $3\times3$.
+
+The four SCPs in (12) form the ELoG filter through interpolation. Hence, the designed SCPs inherit the de-noising and sharpening characteristics of LoG filters. We visualize the intermediate results of DNNs to interpret and verify the advancement of our designed SCPs in the following section.
+\subsection{Visualization and Interpretation}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.47 \textwidth]{figs/visulization_result.pdf}
+    \caption{Visualization of intermediate results (\emph{saliency map} of \emph{gradient images}) in original VGG-16 model and pattern pruned VGG-16 model through \emph{guided-backpropagation}.}
+    \label{fig:visualization}
+\end{figure}
+Explanations of individual DNN decision have been explored by generating informative heatmaps such as CAM and grad-CAM~\cite{gradcam}, or through guided-backpropagation (BP)~\cite{guided-backpropagation} conditioned on the final prediction. Utilizing guided-backpropagation, we can visualize what a DNN has learned. 
+The visualization results of applying SCPs to an original DNN model (\emph{pattern pruning}) are demonstrated in Figure~\ref{fig:visualization}. We sample four input images from the ImageNet dataset, as ``hourglass", ``bee", ``dragonfly" and ``chihuahua", then apply the guided-backpropagation to propagate back from each target class label 
+and get the gradient images. 
+Eventually, we generate the \emph{saliency maps} of gradient images. Compared with the original VGG-16 model, the pattern pruned VGG-16 model captures more detailed information of the input image with less noise. 
+
+We conclude that by applying our designed SCPs, \emph{pattern pruning} enhances DNNs' image processing ability, which will potentially enhance the inference accuracy of a DNN.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.47 \textwidth]{figs/acc_result.pdf}
+    \caption{Comparison results of our pattern and connectivity pruning of VGG-16 and ResNet-50 on ImageNet dataset with: ADMM-NN~\cite{ren2019ADMMNN}, NeST~\cite{dai2017nest}, Deep Compression~\cite{han2015deep}, Fine-grained pruning~\cite{mao2017exploring}, APoZ~\cite{hu2016network} and ThiNet~\cite{luo2017thinet}.}
+    \label{fig:acc_result}
+\end{figure}
+\subsection{Accuracy Analysis}
+In our previous derivation, we have determined the (four) SCPs as our pattern set. Our algorithm-level solution starts from a pre-trained DNN model, or can train from scratch. To generate \projectname model, we need to assign SCPs to each kernel (pattern pruning) or prune specific kernels (connectivity pruning), and train the active (unpruned) weights. To achieve this goal, we extend the ADMM-NN framework in~\cite{ren2019ADMMNN} to produce pattern and connectivity-pruned models. 
+
+
+\textbf{Accuracy results} are illustrated in Figure~\ref{fig:acc_result}. 
+Starting from the baseline accuracy results that are in many cases higher than prior work, we have the first conclusion that \emph{the accuracy will improve when applying our designed SCPs on each convolution kernel}.
+For ImageNet dataset, \emph{pattern pruning} improves the top-5 accuracy of VGG-16 from $91.7\%$ to $92.5\%$, and ResNet-50 from $92.7\%$ to $93.0\%$ with SCPs applied to each convolution kernel. 
+The accuracy improvement is attributed to the enhanced image processing ability of our designed SCPs.
+
+\textbf{Pruning vs. accuracy for non-structured pruning, structured pruning and \projectname.} 
+Combined with \emph{connectivity pruning}, 
+\projectname achieves higher compression rate without accuracy compromise. Comparing with other pruning methods, i.e., non-structured pruning and structured pruning, we conclude that: (i) \projectname achieves higher accuracy and higher compression rate compared with prior non-structured pruning, and close to the results in ADMM-NN; (ii) compared with structured pruning, under the same compression rate, \projectname achieves higher accuracy, and can structurally prune more weights without hurting accuracy. The detailed comparisons on different sparsity and compression rates are shown in Figure~\ref{fig:acc_result}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.47 \textwidth]{figs/mobile_overview.pdf}
+    \caption{Overview of \projectname acceleration framework. From algorithm-level design to platform-level implementation.}
+    \label{fig:mobi_overview}
+\end{figure}
+\section{Compiler-assisted DNN Inference Framework}
+In this section, we propose our novel compiler-assisted DNN inference acceleration framework for mobile devices. Motivated by the two merits -- flexibility and regularity of the \projectname model, our compiler-assisted platform uniquely enables \emph{optimized code generation} to guarantee end-to-end execution efficiency. As DNN's computation paradigm is in a manner of layerwise execution, we can convert a DNN model into computational graph, which is embodied by static C++ (for CPU execution) or OpenCL (for GPU execution) code. The code generation process includes three steps as Figure~\ref{fig:mobi_overview} shows: (i) layerwise information extraction; (ii) filter kernel reorder; (iii) load redundancy elimination.
+
+\textbf{Layerwise information extraction} is a model analysis procedure. In particular, it analyzes detailed kernel pattern and connectivity-related information. Key information such as pattern distribution, pattern order and connection between input/output channel through kernels are utilized by the compiler to perform optimizations in steps (ii) and (iii).
+
+\textbf{Filter kernel reorder} is designed to achieve the best of instruction-level and thread-level parallelism. When a \projectname model is trained, patterns and connections of all kernels are already known, i.e., the computation pattern is already fixed before deploying the model for inference. All these information of patterns are collected from layerwise information extraction, and is leveraged by filter kernel reorder to (i) organize the filters with similar kernels together to improve {\em inter-thread} parallelism, and (ii) order the same kernels in a filter together to improve {\em intra-thread} parallelism. Figure~\ref{fig:fkr} illustrates the two key steps of filter kernel reorder: (i) organizes similar filters next to each other; (ii) groups kernels with identical patterns in each filter together. 
+As a result, the generated execution code eliminates much of execution branches, implying higher instruction-level parallelism; meanwhile, similar filter groups escalate execution similarity and result in a good load balance, achieving better thread-level parallelism.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.46 \textwidth]{figs/fkr.pdf}
+    \caption{Steps of filter kernel reorder: each square represents a convolution kernel; the number represents the specific pattern type of this kernel.}
+    \label{fig:fkr}
+\end{figure}
+
+
+
+
+
+
+
+\textbf{Load redundancy elimination} addresses the issue of irregular memory access that causes memory overhead. In DNN execution, the data access pattern of input/output is decided by the (none-zero elements) patterns of kernels. Therefore, we can generate data access code with this information for each kernel pattern and call them dynamically during DNN execution. Because the data access code consists of all information at kernel-level computation, it is possible to directly access valid input data that is associated with the non-zero elements in a pattern-based kernel. 
+After steps (i) and (ii), patterns are distributed in a structured manner, which reduces the calling frequency of data access code and as a result, reduces the memory overhead.
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.955 \textwidth]{figs/speed_result_v3.pdf}
+    \caption{Mobile CPU/GPU inference time ($ms$) on different network structures inferring Cifar-10 and ImageNet images.}
+    \label{fig:speed}
+\end{figure*}
+
+\begin{figure}[b]
+    \centering
+    \includegraphics[width=0.35 \textwidth]{figs/VGG16_GFLOPS.pdf}
+    \caption{On-device GFLOPS performance evaluation of MNN and \projectname.}
+    \label{fig:gflops}
+\end{figure}
+\section{Experimental Results}
+In this section, we evaluate the execution performance of our compiler-assisted framework with our \projectname model deployed. 
+All of our evaluation models are generated by ADMM pruning algorithm, and are trained on an eight NVIDIA RTX-2080Ti GPUs server using PyTorch.
+\subsection{Methodology}
+In order to show acceleration of \projectname on mobile devices, we compare it with three state-of-art DNN inference acceleration frameworks, TFLite~\cite{TensorFlow-Lite}, TVM~\cite{chen2018tvm}, and MNN~\cite{Ali-MNN} using same sparse DNN models. 
+Our experiments are conducted on a Samsung Galaxy S10 cell phone with the latest Qualcomm Snapdragon 855 mobile platform that consists of a Qualcomm Kryo 485 Octa-core CPU and a Qualcomm Adreno 640 GPU.
+
+In our experiment, our generated \projectname models are based on three widely used network structures, VGG-16~\cite{simonyan2014very}, ResNet-50~\cite{he2016deep} and MobileNet-v2~\cite{howard2017mobilenets}. 
+Since convolution operation is most time-consuming (more than $95\%$ of the total inference time) in DNN computation, our evaluation on the above network structures focus on convolutional layers performance. 
+In order to provide a very clear illustration on how \projectname enhances mobile performance, 
+the whole device-level evaluation is shown in three aspects: (i) execution time, (ii) on-device GFLOPS performance and (iii) how pattern counts affect performance.
+\subsection{Performance Evaluation}
+In this part, we demonstrate our evaluation results on mobile device from the three aspects we discussed above.
+In order to illustrate \projectname has the best acceleration performance on mobile devices, our comparison baselines, i.e., TFLite, TVM and MNN use the fully optimized configurations (e.g., Winograd optimization is turned on).
+
+\textbf{Execution time.} Figure~\ref{fig:speed} shows mobile CPU/GPU performance of \projectname model executing on our compiler-assisted DNN inference framework. 
+On CPU, \projectname achieves $9.4\times$ to $39.2\times$ speedup over TFLite, $2.2\times$ to $5.1\times$ speedup over TVM and $1.7\times$ to $6.3\times$ speedup over MNN. On GPU, \projectname achieves $2.2\times$ to $18.0\times$ speedup over TFLite, $2.5\times$ to $11.4\times$ speedup over TVM and $1.5\times$ to $5.8\times$ speedup over MNN. 
+For the largest DNN (VGG-16) and largest data set (ImageNet), our framework completes computations on a single input image within $19.1ms$ (i.e., 52.4 frames/sec) on GPU,
+which meets the real-time requirement (usually 30 frames/sec, i.e., 33 $ms$/frame).
+
+\textbf{On-device GFLOPS performance.} From the previous comparison results we see that MNN has the higher performance than TVM and TFLite. To show that \projectname has better throughput on mobile devices, we compare \projectname with MNN by measuring their run-time GFLOPS on both CPU and GPU. 
+Figure~\ref{fig:gflops} demonstrates layerwise GFLOPS performance comparison between \projectname and MNN. The 9 layers we pick from VGG-16's 13 convolutional layers are representing 9 unique layers with 9 unique layer sizes. 
+The other 4 layers are omitted in Figure~\ref{fig:gflops} because they have repeated layer sizes which product repeated GFLOPS results. 
+From the results we can see that for both CPU and GPU throughputs, \projectname outperforms MNN. 
+
+\textbf{Pattern counts vs. performance.} In order to determine how pattern counts affects execution performance, we design some random patterns with 4 non-zero elements in one kernel alongside with our designed SCPs. Table~\ref{table:patternCount_cifar} and Table~\ref{table:patternCount_imagenet} show accuracy and execution time under different pattern counts using VGG-16 on Cifar-10 and ImageNet datasets. The results show that the accuracy losses are not necessarily related to the increase of pattern counts, but the execution performance drops quickly, especially on ImageNet dataset. 
+The pattern counts vs. performance results prove that our designed SCPs result in 
+ideal performance with a negligible accuracy loss.
+
+
+
+\begin{table}[h]
+\scriptsize
+    \centering
+    \caption{Pattern counts vs. performance. Evaluation uses model with pattern (2.25$\times$) and connectivity (8.8$\times$) sparsity on VGG-16 Cifar-10 dataset. Top-1 accuracy displayed.}
+    \renewcommand{\arraystretch}{0.88}
+    \resizebox{\linewidth}{!}{
+        \begin{tabular}{|c|c|c|c|c|c|}
+            \hline
+            \textbf{Dataset} & \textbf{Pattern\#} & \textbf{Acc. (\%)} & \textbf{Acc. loss (\%)} & \textbf{Device} & \textbf{Speed (ms)} \\ \hline
+            \multirow{6}{*}{Cifar-10} & \multirow{2}{*}{\textbf{4}} & \multirow{2}{*}{93.8} & \multirow{2}{*}{-0.3} & CPU & 2.7\\ \cline{5-6}
+            &  &  &  & GPU & 2.9 \\ \cline{2-6}
+            & \multirow{2}{*}{\textbf{8}}& \multirow{2}{*}{93.7} & \multirow{2}{*}{-0.2} & CPU & 2.9 \\ \cline{5-6}
+            &  &  &  & GPU & 3.0 \\ \cline{2-6}
+            & \multirow{2}{*}{\textbf{12}}& \multirow{2}{*}{93.8} & \multirow{2}{*}{-0.3} & CPU & 3.1 \\ \cline{5-6}
+            &  &  &  & GPU & 3.3 \\ 
+            \hline
+					 
+        \end{tabular}
+    }
+    \label{table:patternCount_cifar}
+\end{table}
+
+
+\begin{table}[h]
+\scriptsize
+    \centering
+    \caption{Pattern counts vs. performance. Evaluation uses model with pattern (2.25$\times$) and connectivity (3.1$\times$) sparsity on VGG-16 ImageNet dataset. Top-5 accuracy displayed.}
+    \renewcommand{\arraystretch}{0.88}
+    \resizebox{\linewidth}{!}{
+        \begin{tabular}{|c|c|c|c|c|c|}
+            \hline
+            \textbf{Dataset} & \textbf{Pattern\#} & \textbf{Acc. (\%)} & \textbf{Acc. loss (\%)} & \textbf{Device} & \textbf{Speed (ms)} \\ \hline
+            \multirow{6}{*}{ImageNet} & \multirow{2}{*}{\textbf{4}} & \multirow{2}{*}{91.5} & \multirow{2}{*}{0.2} & CPU & 52.7 \\ \cline{5-6}
+            &  &  &  & GPU & 19.1 \\ \cline{2-6}
+            & \multirow{2}{*}{\textbf{8}}& \multirow{2}{*}{91.6} & \multirow{2}{*}{0.1} & CPU & 58.9 \\ \cline{5-6}
+            &  &  &  & GPU & 22.0 \\ \cline{2-6}
+            & \multirow{2}{*}{\textbf{12}}& \multirow{2}{*}{91.6} & \multirow{2}{*}{0.1} & CPU & 105.2 \\ \cline{5-6}
+            &  &  &  & GPU & 32.1 \\ 
+            \hline
+					 
+        \end{tabular}
+    }
+    \label{table:patternCount_imagenet}
+\end{table}
+\section{Conclusion}
+This paper presents \projectname, a desirable sparsity type in DNN weight pruning that elicits mobile devices acceleration, leading to real-time mobile inference. \projectname inherits the high flexibility in non-structured pruning which helps achieving high accuracy and compression rate, and maintains highly structured weight composition like structured pruning which leads to hardware friendlinesses such as optimized memory access, balanced workload and computation parallelism etc. To show \projectname's real-time performance on mobile devices, we design a compiler-assisted DNN inference framework, which can fully leverage \projectname's structural characteristics and achieve very high inference speed on representative large-scale DNNs.
+
+
+\bibliographystyle{aaai}
+\small
+\begin{thebibliography}{}
+
+\bibitem[\protect\citeauthoryear{Ali}{}]{Ali-MNN}
+\url{https://github.com/alibaba/MNN}.
+
+\bibitem[\protect\citeauthoryear{Boticki and So}{2010}]{boticki2010quiet}
+Boticki, I., and So, H.-J.
+\newblock 2010.
+\newblock Quiet captures: A tool for capturing the evidence of seamless
+  learning with mobile devices.
+\newblock In {\em International Conference of the Learning Sciences-Volume 1}.
+
+\bibitem[\protect\citeauthoryear{Boyd \bgroup et al\mbox.\egroup
+  }{2011}]{boyd2011distributed}
+Boyd, S.; Parikh, N.; Chu, E.; Peleato, B.; and Eckstein, J.
+\newblock 2011.
+\newblock Distributed optimization and statistical learning via the alternating
+  direction method of multipliers.
+\newblock{\em Foundations and Trends{\textregistered} in Machine Learning}
+  3(1):1--122.
+
+\bibitem[\protect\citeauthoryear{C.Blakemore and
+  Campbell}{1969}]{blakemore1969}
+C.Blakemore, and Campbell, F.~W.
+\newblock 1969.
+\newblock On the existence of neurones in the human visual system selectively
+  sensitive to the orientation and size of retinal images.
+\newblock In {\em{The Journal of Physiology}}.
+\newblock The Physiological Society.
+
+\bibitem[\protect\citeauthoryear{Chen \bgroup et al\mbox.\egroup
+  }{2018}]{chen2018tvm}
+Chen, T.; Moreau, T.; Jiang, Z.; Zheng, L.; Yan, E.; Shen, H.; Cowan, M.; Wang,
+  L.; Hu, Y.; Ceze, L.; et~al.
+\newblock 2018.
+\newblock{TVM}: An automated end-to-end optimizing compiler for deep learning.
+\newblock In {\em OSDI}.
+
+\bibitem[\protect\citeauthoryear{Dai, Yin, and Jha}{2017}]{dai2017nest}
+Dai, X.; Yin, H.; and Jha, N.~K.
+\newblock 2017.
+\newblock Nest: a neural network synthesis tool based on a grow-and-prune
+  paradigm.
+\newblock{\em arXiv preprint arXiv:1711.02017}.
+
+\bibitem[\protect\citeauthoryear{Freeman and Adelson}{1991}]{Freeman1991}
+Freeman, W., and Adelson, E.
+\newblock 1991.
+\newblock The design and use of steerable filters.
+\newblock In {\em IEEE Transactions on Pattern Analysis and Machine
+  Intelligence}, volume~13,  891--906.
+\newblock IEEE.
+
+\bibitem[\protect\citeauthoryear{Goodfellow \bgroup et al\mbox.\egroup
+  }{2016}]{goodfellow2016deep}
+Goodfellow, I.; Bengio, Y.; Courville, A.; and Bengio, Y.
+\newblock 2016.
+\newblock{\em Deep learning}, volume~1.
+\newblock MIT press Cambridge.
+
+\bibitem[\protect\citeauthoryear{Han, Mao, and Dally}{2015}]{han2015deep}
+Han, S.; Mao, H.; and Dally, W.~J.
+\newblock 2015.
+\newblock Deep compression: Compressing deep neural networks with pruning,
+  trained quantization and huffman coding.
+\newblock{\em arXiv preprint arXiv:1510.00149}.
+
+\bibitem[\protect\citeauthoryear{He \bgroup et al\mbox.\egroup
+  }{2016}]{he2016deep}
+He, K.; Zhang, X.; Ren, S.; and Sun, J.
+\newblock 2016.
+\newblock Deep residual learning for image recognition.
+\newblock In {\em Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition},  770--778.
+
+\bibitem[\protect\citeauthoryear{He, Zhang, and Sun}{2017}]{he2017channel}
+He, Y.; Zhang, X.; and Sun, J.
+\newblock 2017.
+\newblock Channel pruning for accelerating very deep neural networks.
+\newblock In {\em Computer Vision (ICCV), 2017 IEEE International Conference
+  on},  1398--1406.
+\newblock IEEE.
+
+\bibitem[\protect\citeauthoryear{Hinton, Deng, and Yu}{2012}]{hinton2012deep}
+Hinton, G.; Deng, L.; and Yu, D. e.~a.
+\newblock 2012.
+\newblock Deep neural networks for acoustic modeling in speech recognition: The
+  shared views of four research groups.
+\newblock{\em IEEE Signal Processing Magazine}.
+
+\bibitem[\protect\citeauthoryear{Howard \bgroup et al\mbox.\egroup
+  }{2017}]{howard2017mobilenets}
+Howard, A.~G.; Zhu, M.; Chen, B.; Kalenichenko, D.; Wang, W.; Weyand, T.;
+  Andreetto, M.; and Adam, H.
+\newblock 2017.
+\newblock Mobilenets: Efficient convolutional neural networks for mobile vision
+  applications.
+\newblock{\em arXiv preprint arXiv:1704.04861}.
+
+\bibitem[\protect\citeauthoryear{Hu \bgroup et al\mbox.\egroup
+  }{2016}]{hu2016network}
+Hu, H.; Peng, R.; Tai, Y.-W.; and Tang, C.-K.
+\newblock 2016.
+\newblock Network trimming: A data-driven neuron pruning approach towards
+  efficient deep architectures.
+\newblock{\em arXiv preprint arXiv:1607.03250}.
+
+\bibitem[\protect\citeauthoryear{Krizhevsky, Sutskever, and
+  Hinton}{2012}]{krizhevsky2012imagenet}
+Krizhevsky, A.; Sutskever, I.; and Hinton, G.~E.
+\newblock 2012.
+\newblock Imagenet classification with deep convolutional neural networks.
+\newblock In {\em NeurIPS}.
+
+\bibitem[\protect\citeauthoryear{Lane \bgroup et al\mbox.\egroup
+  }{2015}]{lane2015early}
+Lane, N.~D.; Bhattacharya, S.; Georgiev, P.; Forlivesi, C.; and Kawsar, F.
+\newblock 2015.
+\newblock An early resource characterization of deep learning on wearables,
+  smartphones and internet-of-things devices.
+\newblock In {\em International workshop on IOT towards applications}.
+
+\bibitem[\protect\citeauthoryear{Liu \bgroup et al\mbox.\egroup
+  }{2015}]{liu2015sparse}
+Liu, B.; Wang, M.; Foroosh, H.; Tappen, M.; and Pensky, M.
+\newblock 2015.
+\newblock Sparse convolutional neural networks.
+\newblock In {\em CVPR},  806--814.
+
+\bibitem[\protect\citeauthoryear{Luo, Wu, and Lin}{2017}]{luo2017thinet}
+Luo, J.-H.; Wu, J.; and Lin, W.
+\newblock 2017.
+\newblock Thinet: A filter level pruning method for deep neural network
+  compression.
+\newblock In {\em Proceedings of the IEEE international conference on computer
+  vision},  5058--5066.
+
+\bibitem[\protect\citeauthoryear{Mairal \bgroup et al\mbox.\egroup
+  }{2014}]{NIPS2014_5348}
+Mairal, J.; Koniusz, P.; Harchaoui, Z.; and Schmid, C.
+\newblock 2014.
+\newblock Convolutional kernel networks.
+\newblock In {\em NeurIPS}.
+
+\bibitem[\protect\citeauthoryear{Mao \bgroup et al\mbox.\egroup
+  }{2017}]{mao2017exploring}
+Mao, H.; Han, S.; Pool, J.; Li, W.; Liu, X.; Wang, Y.; and Dally, W.~J.
+\newblock 2017.
+\newblock Exploring the regularity of sparse structure in convolutional neural
+  networks.
+\newblock{\em arXiv preprint arXiv:1705.08922}.
+
+\bibitem[\protect\citeauthoryear{Parashar \bgroup et al\mbox.\egroup
+  }{2017}]{parashar2017scnn}
+Parashar, A.; Rhu, M.; Mukkara, A.; Puglielli, A.; Venkatesan, R.; Khailany,
+  B.; Emer, J.; Keckler, S.~W.; and Dally, W.~J.
+\newblock 2017.
+\newblock Scnn: An accelerator for compressed-sparse convolutional neural
+  networks.
+\newblock In {\em ISCA}.
+
+\bibitem[\protect\citeauthoryear{Philipp, Durr, and
+  Rothermel}{2011}]{philipp2011sensor}
+Philipp, D.; Durr, F.; and Rothermel, K.
+\newblock 2011.
+\newblock A sensor network abstraction for flexible public sensing systems.
+\newblock In {\em 2011 IEEE Eighth International Conference on Mobile Ad-Hoc
+  and Sensor Systems},  460--469.
+\newblock IEEE.
+
+\bibitem[\protect\citeauthoryear{Ren \bgroup et al\mbox.\egroup
+  }{2015}]{ren2015faster}
+Ren, S.; He, K.; Girshick, R.; and Sun, J.
+\newblock 2015.
+\newblock Faster r-cnn: Towards real-time object detection with region proposal
+  networks.
+\newblock In {\em Advances in neural information processing systems},  91--99.
+
+\bibitem[\protect\citeauthoryear{Ren \bgroup et al\mbox.\egroup
+  }{2019}]{ren2019ADMMNN}
+Ren, A.; Zhang, T.; Ye, S.; Xu, W.; Qian, X.; Lin, X.; and Wang, Y.
+\newblock 2019.
+\newblock Admm-nn: an algorithm-hardware co-design framework of dnns using
+  alternating direction methods of multipliers.
+\newblock In {\em ASPLOS}.
+
+\bibitem[\protect\citeauthoryear{Selvaraju \bgroup et al\mbox.\egroup
+  }{2017}]{gradcam}
+Selvaraju, R.~R.; Cogswell, M.; Das, A.; Vedantam, R.; Parikh, D.; and Batra,
+  D.
+\newblock 2017.
+\newblock Grad-cam: Visual explanations from deep networks via gradient-based
+  localization.
+\newblock In {\em Computer Vision (ICCV), 2019 IEEE International Conference
+  on}.
+\newblock IEEE.
+
+\bibitem[\protect\citeauthoryear{Simonyan and
+  Zisserman}{2014}]{simonyan2014very}
+Simonyan, K., and Zisserman, A.
+\newblock 2014.
+\newblock Very deep convolutional networks for large-scale image recognition.
+\newblock{\em arXiv preprint arXiv:1409.1556}.
+
+\bibitem[\protect\citeauthoryear{Siyuan, Raef, and
+  Mikhail}{2018}]{powerofinterpolation}
+Siyuan, M.; Raef, B.; and Mikhail, B.
+\newblock 2018.
+\newblock The power of interpolation: Understanding the effectiveness of sgd in
+  modern over-parametrized learning.
+\newblock In {\em 2018 International Conference on Machine Learning (ICML)}.
+\newblock ACM/IEEE.
+
+\bibitem[\protect\citeauthoryear{Springenberg and
+  Alexey~Dosovitskiy}{2015}]{guided-backpropagation}
+Springenberg, J.~T., and Alexey~Dosovitskiy, T. B. a.~R.
+\newblock 2015.
+\newblock Striving for simplicity: The all convolutional net.
+\newblock In {\em ICLR-2015 workshop track}.
+
+\bibitem[\protect\citeauthoryear{Ten}{}]{TensorFlow-Lite}
+\url{https://www.tensorflow.org/mobile/tflite/}.
+
+\bibitem[\protect\citeauthoryear{Wen \bgroup et al\mbox.\egroup
+  }{2016}]{wen2016learning}
+Wen, W.; Wu, C.; Wang, Y.; Chen, Y.; and Li, H.
+\newblock 2016.
+\newblock Learning structured sparsity in deep neural networks.
+\newblock In {\em Advances in neural information processing systems},
+  2074--2082.
+
+\bibitem[\protect\citeauthoryear{Xu \bgroup et al\mbox.\egroup
+  }{2018}]{xu2018deepcache}
+Xu, M.; Zhu, M.; Liu, Y.; Lin, F.~X.; and Liu, X.
+\newblock 2018.
+\newblock Deepcache: Principled cache for mobile deep vision.
+\newblock In {\em Proceedings of the 24th Annual International Conference on
+  Mobile Computing and Networking},  129--144.
+\newblock ACM.
+
+\bibitem[\protect\citeauthoryear{Yamins and DiCarlo}{2016}]{yamins2016using}
+Yamins, D.~L., and DiCarlo, J.~J.
+\newblock 2016.
+\newblock Using goal-driven deep learning models to understand sensory cortex.
+\newblock{\em Nature neuroscience} 19(3):356.
+
+\bibitem[\protect\citeauthoryear{Yao \bgroup et al\mbox.\egroup
+  }{2017}]{yao2017deepsense}
+Yao, S.; Hu, S.; Zhao, Y.; Zhang, A.; and Abdelzaher, T.
+\newblock 2017.
+\newblock Deepsense: A unified deep learning framework for time-series mobile
+  sensing data processing.
+\newblock In {\em Proceedings of the 26th International Conference on World
+  Wide Web}.
+
+\bibitem[\protect\citeauthoryear{Zhang \bgroup et al\mbox.\egroup
+  }{2018}]{zhang2018systematic}
+Zhang, T.; Ye, S.; Zhang, K.; Tang, J.; Wen, W.; Fardad, M.; and Wang, Y.
+\newblock 2018.
+\newblock A systematic dnn weight pruning framework using alternating direction
+  method of multipliers.
+\newblock In {\em Proceedings of the European Conference on Computer Vision
+  (ECCV)},  184--199.
+
+\bibitem[\protect\citeauthoryear{Zhang}{2019}]{zhang2019shiftinvar}
+Zhang, R.
+\newblock 2019.
+\newblock Making convolutional networks shift-invariant again.
+\newblock In {\em ICML}.
+
+\end{thebibliography}

@@ -45,7 +45,8 @@ import openai
 sys.path.insert(0, str(Path(__file__).parent))
 from eval_utils import parse_eval_output, to_data_url, SYSTEM_PROMPT
 
-MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+MODEL = "chamibuddhika/Qwen/Qwen3-VL-32B-Instruct-5a3c713d"
 
 
 def build_client() -> openai.OpenAI:

@@ -1,0 +1,796 @@
+\section{Introduction}
+Learning curve extrapolation~\citep{mohr-arxiv22} aims to predict how much a machine learning model will improve with more training, e.g., to determine how much more training data to collect~\citep{cortes1993learning,frey1999modeling,leite2004improving,kolachina2012prediction}, or to define an early stopping criterion in online learning~\citep{yao2007early}. Learning curve extrapolation has recently been widely studied to speed up automated machine learning (AutoML) and hyperparameter optimization (HPO) of deep neural networks, by discarding non-promising configurations early~\citep{swersky-arxiv14a,domhan-ijcai15a,klein-iclr17a,baker-arxiv17a,chandrashekaran2017speeding,Gargiani-automl19,wistuba-neurips22}.
+
+Despite these efforts, learning curve extrapolation is not yet widely adopted in practice, e.g., state-of-the-art multi-fidelity hyperparameter optimization techniques, such as BOHB~\citep{falkner-icml18a}, still rely on successive halving~\citep{li-iclr17a}, i.e., the crude heuristic that learning curves mostly do not cross each other.
+
+One reason for this is that, while many learning curves are well-behaved, some exhibit chaotic behavior and are intrinsically difficult to predict accurately~\citep{choi2018difficulty}. In this setting, Bayesian approaches~\citep{swersky-arxiv14a,domhan-ijcai15a,klein-iclr17a,wistuba-neurips22}, which also quantify the reliability of their extrapolation, show great potential.
+However, existing methods for Bayesian inference either
+\begin{enumerate*}[label=(\roman*)]
+\item put strong restrictions on the prior, and are incapable of modeling the variable nature of learning curves, or
+\item are too computationally expensive, limiting their practical applicability.
+\end{enumerate*}
+Furthermore, most of this related work focuses on demonstrating the potential that learning curve extrapolation has to accelerate downstream AutoML/HPO tasks, yet fails to fully investigate the quality of the extrapolations themselves, and to quantify the approach's ability to handle the heterogeneity of real-world learning curves, e.g., varying performance metrics, curve shapes, divergence, heteroscedastic noise, etc.
+
+In this work, we investigate the potential of learning curve extrapolation using prior-data fitted networks (PFNs), a meta-learned approximate Bayesian inference method recently proposed by \citet{muller-iclr22a}.
+PFNs combine great flexibility with efficient and accurate approximation of the posterior predictive distribution (PPD) in a single forward pass of a transformer~\citep{vaswani-neurips17a}  trained on artificial data from the prior only.
+As PFNs are a promising alternative to Markov Chain Monte Carlo (MCMC) for approximating Bayesian inference, we compare our approach ($\pfn{}$) to the MCMC approach for learning curve extrapolation of~\citet{domhan-ijcai15a}, taking into account both the quality and the cost of PPD approximation.
+
+In summary, our contributions are as follow:
+\begin{itemize}
+    \item We are the first to apply PFNs to an extrapolation task, introducing \texttt{LC-PFN}, the first PFN for learning curve extrapolation.
+    \item We demonstrate that \texttt{LC-PFN} can be more than 10\,000$\times$ faster than MCMC while still yielding better probabilistic extrapolations.
+    \item We show that \texttt{LC-PFN} does not only yield better probabilistic extrapolations on prior samples, but also on real learning curves of a wide range of architectures (MLPs, CNNs, RNNs, Transformers) on varying input modalities (tabular, image, text and protein data).
+    \item We demonstrate the practical usefulness of \texttt{LC-PFN} to construct an early stopping criterion that achieves 2\,-\,6$\times$ speedups over baselines.
+    \item To facilitate reproducibility and allow others to build on our work, we open-source all code, data, and models used in our experiments at \url{https://github.com/automl/lcpfn}.
+\end{itemize}
+\section{Related work}
+Learning curves and how to use them for decision-making has been an active research area, as recently surveyed by \citet{mohr-arxiv22}. Most related work considers point estimates of the curve or a specific property thereof~\citep{cortes1993learning,frey1999modeling,kolachina2012prediction,baker-arxiv17a,kaplan2020scaling}, or follows a non-Bayesian approach to quantify uncertainty~\citep{chandrashekaran2017speeding,Gargiani-automl19}. 
+
+Only a few works have explored Bayesian learning curve extrapolation. 
+For example, the Freeze-Thaw Bayesian optimization method \citet{swersky-arxiv14a} used a Gaussian process (GP) as a joint model of learning curves and hyperparameters to decide what learning run to continue for a few epochs (or whether to start a new one). The model is then dynamically updated to fit the partial learning curve data. Training data grows quickly since each performance observation of the curve is treated as a datapoint, making exact GPs intractable, and thus the work relies on approximate GPs. Furthermore, their approach makes strong (prior) assumptions. On top of the standard GP assumptions, they used a specialized kernel assuming exponential growth to improve extrapolation.
+\citet{domhan-ijcai15a} proposed a less restrictive parametric prior (see Section~\ref{sec:prior} for more details) and used the gradient-free MCMC method from~\citet{foreman-pasp13a} as approximate inference method. While MCMC is a very general approach, it can be sensitive to its hyperparameters (e.g., burn-in period, chain length, etc.) and, as we will show in Section~\ref{sec:exp}, generating sufficient samples to reliably approximate the PPD may impose significant overhead.
+\citet{klein-iclr17a} extended this parametric prior to also capture the effect of hyperparameter settings. In particular, they used a Bayesian neural network with a specialized learning curve layer, and trained this network using gradient-based MCMC on learning curve data from previously tested hyperparameter settings. While this approach is able to predict learning curves of previously unseen configurations, conditioning on the current partial learning curve requires retraining the Bayesian neural network online, which is costly.
+Recently, DyHPO~\citep{wistuba-neurips22} followed a similar dynamic HPO setup as~\citet{swersky-arxiv14a}, but used \emph{deep} GPs~\citep{damianou2013deep}. While deep GPs relax some of the standard GP assumptions, extrapolation abilities were not thoroughly analyzed, and DyHPO only predicts one epoch into the future.
+Finally, it is worth noting that, except for~\citet{domhan-ijcai15a}, all the aforementioned probabilistic approaches~\citep{swersky-arxiv14a,klein-iclr17a,chandrashekaran2017speeding,Gargiani-automl19,wistuba-neurips22} utilize meta-learning across the learner's hyperparameter settings. While this is an interesting line of work, it limits applicability, and introduces confounding factors. We will therefore consider a simpler and more general setting in this work (see Section~\ref{sec:problem}). Indeed, akin to the approach of ~\citet{domhan-ijcai15a}, we operate without the assumption of access to data from previous runs employing different hyperparameter settings, nor do we assume the ability to generalize across these settings. Our results highlight that prior-data fitted networks (PFNs) offer a significantly more efficient and practical alternative to Markov Chain Monte Carlo (MCMC) methods. As categorized by \citet{mohr-arxiv22}, \citet{domhan-ijcai15a} is the only comparable prior work within this category. This underlines the novelty and importance of our approach in the context of advancing current methodologies. 
+
+While we are the first to apply PFNs~\citep{muller-iclr22a} to learning curve extrapolation, PFNs have previously been applied in different settings: \citet{hollmann-iclr23} used them to meta-learn a classifier for tabular data; \citet{mueller-icml23} as a surrogate model for Bayesian optimization; and most recently concurrent work by \citet{dooley-neurips23} as a zero-shot time series forecaster.
+\section{Methods}
+
+\subsection{Bayesian learning curve extrapolation}
+\label{sec:problem}
+Let $y_t \in [0,1]$ represent the model performance (e.g., validation accuracy) at training step ${t \in \{1, \dots, m\}}$. The problem we consider in this paper can be formulated as follows: Given a partial learning curve $y_1, \ldots, y_T$ up to some cutoff $T$, and a prior distribution $p(\vect{y})$ over learning curves, approximate the posterior predictive distribution (PPD) $q(y_{t'} \, | \, y_1, \ldots, y_T)$ for $T < t' \leq m$. We will further assume that we can calculate the relative probability density of $p(\vect{y})$, a requirement for MCMC, and that we can generate samples from $p(\vect{y})$, a requirement for PFNs. Figure~\ref{fig:quality} provides an illustration of Bayesian learning curve extrapolation, showcasing the posterior predictive distributions (PPDs) of the extrapolated curves generated by $\pfn{}$ and MCMC, along with a few representative curves sampled from the prior distribution $p(\vect{y})$.
+
+\begin{figure}[bh]
+\centering
+\begin{subfigure}{.47\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figs/qplot_example.png}
+\label{fig:example_extrapolation}
+\end{subfigure}%
+\begin{subfigure}{.47\textwidth}
+\includegraphics[width=0.87\textwidth]{figs/prior_9510.png}
+\label{fig:prior_curves}
+\end{subfigure}
+\caption{\textbf{(Left)} Visualization of Bayesian learning curve extrapolation. The plot shows the median and the 90\% confidence interval of the PPDs inferred using MCMC and $\pfn{}$, given two partial empirical learning curves of 10 and 20 epochs, respectively, and the prior described in Section~\ref{sec:prior}. \textbf{(Right)} Example of learning curves sampled from the prior $p(\vect{y})$.\label{fig:quality}}
+\end{figure}
+
+While the fixed ranges for $y_t$ and $t$ are well-suited for modeling particular learning curves (e.g., accuracy over epochs), they also are restrictive. In Appendix~\ref{a:norm}, we discuss the invertible normalization procedure we apply to support extrapolating, possibly diverging, iteration-based learning curves across a broad range of performance metrics (e.g., log loss).
+\subsection{Learning curve prior}
+\label{sec:prior}
+Following \citet{domhan-ijcai15a}, we model $\vect{y}$ as a linear combination of $K$ basis growth curves $f_k$, each parameterized by $\vect{\theta}_k$, and i.i.d. additive Gaussian noise with variance $\sigma^2$, i.e.,
+
+\begin{align*}
+y_t \sim \mathcal{N}(f_{\mathrm{comb}}(t|\vect{\xi}), \sigma^2) \textrm{ \quad with \quad} f_{\mathrm{comb}}(t|\vect{\xi}) = \sum_{k=1}^K w_k \cdot f_k(t|\vect{\theta}_k),
+\end{align*}
+where we assume our model parameters 
+\begin{equation*}
+\vect{\xi} = (w_1, \dots, w_K, \vect{\theta}_1, \dots, \vect{\theta}_K, \sigma^2)
+\end{equation*}
+to be random variables with prior $p(\vect{\xi})$. Here, \citet{domhan-ijcai15a} assumed an uninformative prior (i.e., \mbox{$p(\vect{\xi}) \propto 1$}), with the exception of some hard constraints.
+
+We adopt a strictly more informative prior, because
+\begin{enumerate*}[label=(\roman*)]
+\item the original prior puts almost all probability mass on parameterizations yielding invalid learning curves, e.g., $y_t \notin [0,1]$; and
+\item we cannot practically sample from this prior having unbounded support, a requirement for PFNs.\footnote{Note that the probability density of $p(y_t)$ is well-defined, a requirement for MCMC, but not for PFNs.}
+Specifically, to mimic realistic learning curves we use bounded uniform weight priors $w_k \sim \mathcal{U}\left(0, 1\right)$, a low-noise prior $\log(\sigma^2) \sim \mathcal{N}(-8, 2)$, only allow curves with values in $[0,1]$ and, like \citet{domhan-ijcai15a}, only accept curves whose last value is higher than its first.
+\end{enumerate*}
+Putting all of these together, our prior distribution thus takes the form:
+{\small
+\begin{align*}
+p(\vect{\xi}) \propto & \left( \prod_{k=1}^K p(w_k) \cdot p(\vect{\theta}_k) \right) \times p(\sigma^2) \times \mathbbm{1}(f_{\mathrm{comb}}(1|\vect{\xi}) <  f_{\mathrm{comb}}(m|\vect{\xi})) \times \left( \prod_{t=1}^m \mathbbm{1}(f_{\mathrm{comb}}(t|\vect{\xi}) \in [0,1]) \right).
+\end{align*}
+}
+
+Finally, we limit ourselves to three parametric families of learning curves ($K = 3$, see Table~\ref{tab:func}).\footnote{We found that adding additional curves did not improve predictive performance significantly, and made the MCMC baseline even more expensive and less stable. \citet{klein-iclr17a} also limited themselves to five basis curves for similar reasons.} These basis curves were chosen to capture a variety of growth trends and convergence behavior. We show examples of curves sampled from this prior in Figure~\ref{fig:quality} (right).
+
+
+\begin{table}[h]
+    \centering
+    \caption{Formulas of the three parametric basis curves and priors over their parameters. \label{tab:func}}
+    \resizebox{1.0\textwidth}{!}{
+    \begin{tabular}{llll}
+        \toprule
+        Reference name & Formula $f_k(t)$ & Prior $p(\vect{\theta}_k)$ \\
+        \midrule
+        pow\textsubscript{3}  & $c - a t ^ {-\alpha}$ & $c \sim \mathcal{U}(0,1.25) \quad a \sim \mathcal{U}(\shortminus0.6,0.6) \quad \log(\alpha) \sim \mathcal{N}(0,4) $ \\        
+        Janoschek  & $\alpha - (\alpha - \beta) e^{-\kappa t^\delta}$ & $\alpha  \sim \mathcal{U}(0,1) \quad \beta  \sim \mathcal{U}(0,2) \quad \log(\kappa) \sim \mathcal{N}(-2,1) \quad \log(\delta) \sim \mathcal{N}(0,0.25)$ \\
+        ilog\textsubscript{2}  & $c - \frac{a}{\log(t+1)}$ & $c \sim \mathcal{U}(0,1) \quad a \sim \mathcal{U}(\shortminus0.5,0.5)$ \\
+
+        \bottomrule
+    \end{tabular}}
+    
+\end{table}
+\subsection{Prior-data fitted networks (PFNs)}
+In this paper, we propose to use prior-data fitted networks (PFNs, \citealp{muller-iclr22a}) instead of MCMC for learning curve extrapolation.
+PFNs are neural networks trained to perform approximate Bayesian prediction for supervised learning settings.
+That is, PFNs are trained to predict some output $y \in \mathbb{R}$, conditioned on an input $t$ and a training set $D_{train}$ of given input-output examples.
+The PFN is trained for this task with samples obtained from a prior over datasets $p(\mathcal{D})$.
+The loss function for training a PFN $q_{\theta}$ with parameters $\theta$ is the cross entropy $\ell_{\theta} = \mathbb{E}_{(t, y) \cup D_{train} \sim p(\mathcal{D})}[ \shortminus \text{log} \  q_{ \theta}(y |t, D_{train}) ]$ for predicting the hold-out example\textquotesingle{s} label $y$, given $t$ and $D_{train}$.
+\citet{muller-iclr22a} proved that minimizing this loss over many sampled tasks $(t, y) \cup D_{train}$ directly coincides with minimizing the KL divergence between the PFN\textquotesingle{s} predictions and the true PPD. In essence, the PFN meta-learns to perform approximate posterior inference on (meta-train) synthetic tasks sampled from the prior, and at inference time also does so for a (meta-test) real task.
+\subsection{PFNs for Learning Curve Extrapolation (LC-PFNs) \label{sec:lcpfn}}
+To apply PFNs to learning curve extrapolation, we train them on learning curves sampled from a given prior over learning curves (in our case, the prior defined in Section \ref{sec:prior}). Specifically, the training set we condition on is the available partial learning curve up to some varying cutoff point $T'$, i.e., $D_{train}=\{(t', y_{t'})\}^{T'}_{t'=1}$,
+the input we condition on is the epoch $t \in \{T'+1,\dots,m\}$ to predict for, and the desired output $y$ is the value of the learning curve at epoch $t$.
+During training, we randomly sample the cutoff points $T'\sim \mathcal{U}(0,m\shortminus1)$ for every batch in order to learn to predict for initial learning curves of varying sizes. 
+Figure~\ref{fig:pfn-model-vizualization} illustrates the information flow in a $\pfn{}$ during learning curve extrapolation.
+
+\paragraph{LC-PFN architecture and hyperparameters}
+\label{a:pfn}
+We use the PFN architecture proposed by \citet{muller-iclr22a} and visualized in Figure~\ref{fig:pfn-model-vizualization} (a).
+That is, we use a sequence Transformer~\citep{vaswani-neurips17a} and treat each pair $(t,y)$ (for train) and $t$ (for test) as a separate position/token. We encode these using a simple linear layer. 
+We do not use positional encoding such that we are permutation invariant.
+Furthermore, the attention matrix is masked such that every position only attends to the training positions. 
+This way training examples can attend to each other, but the test examples do not influence each other\textquotesingle{s} predictions. Note that the output of the PFN with parameters $\theta$ is a distribution $q_{ \theta}(y |t, D_{train})$. Following \citet{muller-iclr22a}, we discretize $q_{ \theta}$ in a finite number of bins whose probability mass is predicted by the PFN, as is shown in Figure~\ref{fig:pfn-model-vizualization} (b). The size of each bin is set such that, under the prior, $y_t$ is equally likely to fall in each bin.
+The number of bins is a hyperparameter that we set to 1\,000. The $\pfn{}$ model further inherits hyperparameters from the Transformer, including the number of layers (\texttt{nlayers}), number of heads (\texttt{nheads}), embedding size (\texttt{emsize}), and hidden size (\texttt{nhidden}).
+We use four heads, a hidden size of 1\,024, and conduct a thorough ablation study to investigate the effects of the number of layers and embedding size on the final performance, exploring a grid of values (see Table~\ref{tab:hps}). We use a standard training procedure for all experiments, employing the Adam optimizer~\citep{kingma-iclr15a} (learning rate $0.0001$, batch size $100$) with cosine annealing \citep{loshchilov-iclr17a} with a linear warmup over the first 25\% epochs of the training. Finally, we set $m=100$, implying $\pfn{}$ is trained for extrapolating sequences of up to $100$ training steps (e.g., epochs). We found that most curves are shorter in practice, and when longer sequences are encountered, we subsample them as described in Appendix~\ref{appendix:benchmarks}.
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{.59\textwidth}
+    \caption{}
+    \vspace{-0.8cm}
+    \centering
+    \newcommand{\lastidx}{n+1}
+\newcommand{\evalidx}{n+1}
+\newcommand{\setofpairs}[2]{\{(x_1^{#1}, y_1^{#1}),\dots,(x_{#2}^{#1}, y_{#2}^{#1})\}}
+\newcommand{\seq}[1]{$\setofpairs{#1}{\lastidx{}}$}
+\newcommand{\xypair}[2]{epoch: #1 \\ acc: #2}
+\newcommand{\qattbend}{40}
+\def\innerdistance{3.6em}
+\def\outdistane{1.2em}
+\def\indistane{1.em}
+\definecolor{MidnightBlue}{rgb}{0.1, 0.1, 0.44}
+\begin{tikzpicture}[remember picture,
+  inner/.style={circle,draw=blue!50,fill=blue!20,thick,inner sep=3pt},
+]
+\tikzstyle{bigbox} = [thick, fill=white, rounded corners, rectangle,draw=black!30]
+\tikzstyle{sample} = [thick, minimum size=0.6cm, rounded corners,rectangle, fill=Salmon!10,draw=black!30]
+\tikzstyle{loss} = [thick, minimum size=0.6cm, rounded corners,rectangle, fill=PineGreen!10,draw=black!30]
+\tikzstyle{timestep} = [thick,minimum width=0.3cm,minimum height=.6cm, rounded corners,rectangle, fill=MidnightBlue!10,draw=black!30]
+\tikzstyle{querytimestep} = [thick,minimum width=0.3cm,minimum height=.6cm, rounded corners,rectangle, fill=MidnightBlue!10,draw=black!30]
+\tikzstyle{innerattention} = [draw=blue!30,-{Triangle[length=2mm, width=1mm]},]
+\tikzstyle{queryattention} = [draw=red!30,-{Triangle[length=2mm, width=1mm]},]
+\tikzstyle{output} = [draw=black!70,-{Triangle[length=2mm, width=1mm]},]
+\tikzstyle{input} = [draw=black!70,-{Triangle[length=2mm, width=1mm]},]
+\tikzstyle{every node} = [font=\scriptsize,]
+
+
+
+
+\node[timestep] (t1) {};
+\node[timestep, right=\innerdistance of t1] (t2) {};
+\node[timestep, right=\innerdistance of t2] (t3) {};
+
+
+\draw[ innerattention] (t1) to [bend left=15] (t2);
+\draw[ innerattention] (t1) to [bend left=30] (t3);
+\draw[ innerattention] (t2) to [bend right=15] (t1);
+\draw[ innerattention] (t2) to [bend left=15] (t3);
+\draw[ innerattention] (t3) to [bend right=30] (t1);
+\draw[ innerattention] (t3) to [bend right=15] (t2);
+
+
+\node[below=\indistane of t1, align=center] (i1) {\xypair{1}{10\%}};
+\draw[ input] (i1) -- (t1);
+\node[below=\indistane of t2, align=center] (i2) {\xypair{2}{26.6\%}};
+\draw[ input] (i2) -- (t2);
+\node[below=\indistane of t3, align=center] (i3) {\xypair{3}{51.4\%}};
+\draw[ input] (i3) -- (t3);
+
+\draw[pen colour={black!70},
+    decorate, 
+    decoration = {calligraphic brace, mirror,
+        raise=1.7em,
+        amplitude=5pt}] (i1.west) --  (i3.east)
+    node[pos=0.5,below=2.2em,black]{$D$};
+
+
+\node[querytimestep, right=3.2em of t3] (q1) {};
+\node[querytimestep, right=3.2em of q1] (q2) {};
+
+
+\draw[ queryattention] (q1) to [bend right=40] (t1);
+\draw[ queryattention] (q1) to [bend right=40] (t2);
+\draw[ queryattention] (q1) to [bend right=40] (t3);
+
+
+\draw[ queryattention] (q2) to [bend right=40] (t1);
+\draw[ queryattention] (q2) to [bend right=40] (t2);
+\draw[ queryattention] (q2) to [bend right=40] (t3);
+\node[above=\outdistane of q2] (d2) {$q(\cdot|5,D)$};
+
+\node[above=\outdistane of q1] (d1) {$q(\cdot|4,D)$};
+\draw[ output] (q1) -- (d1);
+\node[] at (q1|-i1) (i4) {epoch: 4};
+\draw[ input] (i4) -- (q1);
+\draw[ output] (q2) -- (d2);
+\node[] at (q2|-i1) (i5) {epoch: 5};
+\draw[ input] (i5) -- (q2);
+
+
+\node[right=5.3em of q2.south] (nextfig) {};
+\draw[output] (d2.east) to[out=0,in=180] ++(1em,0) |- (nextfig);
+\end{tikzpicture}
+    \end{subfigure}
+    \begin{subfigure}[t]{.26\textwidth}
+    \caption{}
+    \begin{center}
+    \pgfmathdeclarefunction{gauss}{3}{%
+  \pgfmathparse{1/(#2*sqrt(2*pi))*#3*exp(-((x-#1)^2)/(2*#2^2))}%
+}
+\usepgfplotslibrary{fillbetween} 
+
+
+
+
+ 
+ \begin{tikzpicture}
+ \begin{axis}[width=\textwidth,
+     height=.98\textwidth,
+     axis lines=center,
+     axis y line*=left,
+     xmin=-.1,xmax=1.1,
+     ymin=0,ymax=.5,
+     grid=major,
+     yminorgrids,
+     ylabel near ticks,
+     xlabel near ticks,
+     major grid style={thick},
+     tick style={thick},
+     axis line style={thick},
+     xlabel=Accuracy,
+     ylabel={$q(\cdot|5,D)$},%
+     xtick={0,.5,1.},
+     xticklabels={0\%,50\%,100\%},
+     ytick={},
+     yticklabels={},
+     ticklabel style={font=\tiny},
+     label style={font=\tiny},
+     enlarge x limits={upper,value=0.02},
+     enlarge y limits={upper,value=0.1},
+     ]
+      \addplot[name path=A,domain=-2:.1]{gauss(.1, .1, .03)}; 
+ \addplot[name path=line, domain=-2:.1, gray, no markers, line width=1pt]{0};
+ \addplot[BarStyle] fill between [of=A and line];
+    \addplot[BarStyle]coordinates{(.1,.15)(.5,.15)};
+    \addplot[BarStyle]coordinates{(.5,.25)(.6,.25)};
+    \addplot[BarStyle]coordinates{(.6,.35)(.8,.25)};
+    \addplot[BarStyle]coordinates{(.8,.20)(.9,.15)};
+     \addplot[name path=B,domain=.9:2]{gauss(.9, .1,.03)}; 
+ \addplot[name path=line, domain=.9:2, gray, no markers, line width=1pt]{0};
+ \addplot[BarStyle] fill between [of=B and line];
+  \end{axis}
+ \end{tikzpicture}
+    \end{center}
+    \end{subfigure}
+    \caption{A visualization of our $\pfn{}$ model on the task of predicting an accuracy over epochs curve. $D$ represents the epoch accuracies up to epoch 3 ($=T'$). Attention between test and training positions is shown using red and blue arrows, respectively. Plots based on \citet{muller-iclr22a}.}
+    \label{fig:pfn-model-vizualization}
+\end{figure}
+\section{Experiments}
+\label{sec:exp}
+
+Our experiments aim to test the hypothesis that PFNs present a practical Bayesian approach to learning curve extrapolation.
+To this end, we first compare our $\pfn{}$ approach against the MCMC approach of~\citet{domhan-ijcai15a}, using the same prior on samples generated from it (Section~\ref{sec:exp_prior}). Then, we extend the comparison to four real-world learning curve benchmarks (Section~\ref{sec:exp_real}). Finally, we look beyond the quality of individual extrapolations and evaluate the potential of $\pfn{}$ in the context of predictive early stopping to accelerate model selection (Section~\ref{sec:early_stop}).
+\subsection{Extrapolating samples of the prior}
+\label{sec:exp_prior}
+
+The goal of this first experiment is to assess the ability of \pfn{}s and \mcmc{} to approximate the true posterior predictive distribution (PPD). To avoid artifacts due to out-of-distribution data, in this experiment, we use curves sampled from the prior (defined in Section~\ref{sec:prior}). Furthermore, we modified the original implementation of MCMC~\citep{domhan-ijcai15a}, to use the curve prior we proposed in Section~\ref{sec:prior}. In the following, we refer to this MCMC variant as \peakedMCMC{} and denote the one using the original prior~\citep{domhan-ijcai15a} as \originalMCMC{} (used in Section~\ref{sec:exp_real}). Since the \pfn{} and \peakedMCMC{} methods are both (approximate) Bayesian inference methods, using the same prior, they aim to approximate the same true target PPD, given a partial learning curve.
+
+As a performance metric, we evaluate the log-likelihood (LL) of the unseen data (right-censored curve) under the inferred PPD. We use this metric, also known as \emph{logarithmic score}, to assess a model's ability to infer the remaining part of the curve based on the initial observed values. A benefit of this metric is that it measures the quality of the PPD as a whole (rather than merely focusing on the error associated to a specific PPD statistic) and, assuming data is generated by the prior, the exact PPD maximizes this metric.
+
+\begin{wraptable}{R}{6cm}
+
+\captionof{table}{Grid of hyperparameter values evaluated for \peakedMCMC{} and \pfn{}.}\label{tab:hps}
+\resizebox{0.4\textwidth}{!}{\begin{tabular}{|c|c|}
+\toprule
+ & Hyperparameters\\
+\cmidrule(lr){1-2}
+\multirow{4}{*}{\rotatebox{90}{\peakedMCMC}} & nsamples $\in  [100, 250, 500, 1000, 2000, 4000]$\\
+ & nwalkers $\in [26, 50, 100]$\\
+ & burn-in $\in [0, 50, 100, 500]$\\
+ & thin $\in [1, 10, 100]$\\
+\cmidrule(lr){1-2}
+\multirow{3}{*}{\rotatebox{90}{\pfn}} & nb\_data $\in$  [$100$k, $1$M, $10$M]\\
+ & emsize $\in [128, 256, 512]$\\
+ & nlayers $\in [3, 6, 12]$\\
+\bottomrule
+\end{tabular}}
+
+\end{wraptable}
+
+Importantly, we vary the cutoff, i.e., the percentage of the observed curve used as input, to better assess the model's performance across different amounts of available information. Furthermore, to allow a more comprehensive comparison, we vary the hyperparameters of both \pfn{} and \peakedMCMC{}. For \pfn{}, we vary the embedding size (\texttt{emsize}), the number of layers (\texttt{nlayers}), and the total number of learning curves used during training (\texttt{nb\_data}). For \peakedMCMC{}, we vary the number of chains generated by the \texttt{emcee}~\citep{foreman-pasp13a} ensemble sampler (\texttt{nwalkers}), the length of each chain (\texttt{burn-in} + \texttt{nsamples}), the part of the chain omitted to account for mixing (\texttt{burn-in}), and the sub-sample frequency (\texttt{thin}). The considered values for each hyperparameter are summarized in Table~\ref{tab:hps}.
+
+
+
+We conducted the comparison on 10\,000 sampled curves. Figure~\ref{fig:quality} shows a few curve examples, as well as inferences using \pfn{} and \peakedMCMC{} given the data of the first 10\,-\,20 epochs (cutoff). We observe that both predicted median and uncertainties are indeed similar. More inference examples, with different cutoffs can be found in Appendix~\ref{appendix:examples}. 
+
+\paragraph{Results} Figure~\ref{fig:ll} displays the average log-likelihood across \peakedMCMC{} / \pfn{} inferences for varying hyperparameters and a 10\% cutoff. The log-likelihood is shown w.r.t.\ runtime, which is measured as the average wall-clock time for a single inference on a single Intel(R) Xeon(R) Gold 6242 CPU. Note that this inference time includes both the fit and prediction times for MCMC variants. Table~\ref{tab:prior_results} provides results on higher cutoffs ($20 \%, 40\%, 80\%$) and corresponding runtimes for three variants of each method (\texttt{M1-3}, \texttt{P1-3}), labeled in Figure~\ref{fig:ll}.
+Generally, the \pfn{} variants (left side of figure~\ref{fig:ll}) are significantly faster than \peakedMCMC{} variants (right side). \pfn{} always ran in less than $0.1$ seconds while the best \peakedMCMC{} (\texttt{M3}) took over 100 seconds. Figure~\ref{fig:ll} also offers insights into the importance of \pfn{} and \peakedMCMC{} hyperparameters. For \peakedMCMC{}, both the cost and quality of inference increase with longer chain lengths and higher cutoffs. For \pfn{}, the inference cost increases with the model complexity which is closely related to the number of trainable parameters. Inference quality positively correlates with model size (``larger is better''), and the number of data \pfn{} was trained on. Among the hyperparameter grid we examined (Table~\ref{tab:hps}), except for the smallest model (\texttt{P1}), all \pfn{} variants that were trained on 10M samples produce higher log-likelihood than the best \peakedMCMC{} variant (\texttt{M3}). In particular, an \pfn{} (\texttt{P2}) with 3 layers, embedding size 256, trained on 10M samples achieved better performance (log-likelihood of PPD) than the best \peakedMCMC{}, but more than 15\,000 times faster. We also find that while the runtime of the best \peakedMCMC{} can be reduced (with minor loss of quality) by using thinning (\texttt{M2}), the better \pfn{} is still approximately 7\,000 times faster.
+Finally, it is important to note that training the largest \pfn{} (\texttt{P3}, 10M samples with 26M parameters) on the prior took approximately eight hours (single CPU, single RTX2080 GPU), but this cost is incurred only \emph{once} for all of our experiments.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.93\textwidth]{figs/xp_on_prior/pfn_vs_mcmc_cutoff10_rebuttal.jpg}
+  \captionof{figure}{Runtime (lower is better) \textit{vs} log-likelihood of the true curve under the PPD (higher is better), with 10\% of the curve observed. See Figure~\ref{fig:xp_on_prior:higher_cutoffs} in Appendix~\ref{appendix:comp_mse} for higher cutoffs. Blue and red markers correspond respectively to \pfn{} and \peakedMCMC{} with varying hyperparameters values. The \texttt{M1-3}\,/\,\texttt{P1-3} labels refer to the PFN\,/\,MCMC variants listed in Table~\ref{tab:prior_results}. The horizontal dashed line indicates the performance of the best MCMC variant.\label{fig:ll}}
+\end{figure}
+
+\begin{table}[h]
+    \centering
+
+\captionof{table}{Comparison of three \pfn{} and \peakedMCMC{} variants on prior curves in terms of log-likelihood (higher is better) at 10\%, 20\%, 40\%, and 80\% cutoffs. Here, \texttt{M1} corresponds to the configuration used in~\citet{domhan-ijcai15a}. Please refer to Table~\ref{tab:prior_results_extended} for more comprehensive results.}\label{tab:prior_results}
+\resizebox{0.95\textwidth}{!}{\begin{tabular}{cllllcccccc}
+\toprule
+\textbf{Label} & \textbf{Method} & \textbf{Parameters} & \textbf{10\%} & \textbf{20\%} & \textbf{40\%} & \textbf{80\%} & \textbf{Avg. Runtime (s)} \\
+\midrule
+\texttt{M1} & MCMC & nsamples=2000, nwalkers=100, burn-in=500, thin=1   &  1.628 &  1.939 &  2.265 &  2.469 &  54.401 \\
+\texttt{M2} & MCMC & nsamples=4000, nwalkers=100, burn-in=100, thin=100 &  1.641 &  1.958 &  2.277 &  2.477 &  45.160 \\
+\texttt{M3} & MCMC & nsamples=4000, nwalkers=100, burn-in=500, thin=1   &  1.642 &  1.956 &  2.285 &  2.486 &  103.151 \\
+\midrule
+\texttt{P1} & PFN & nb\_data=10M, nlayers=3, emsize=128 &  1.58 &  1.99 &  2.28 &  2.43 & 0.004 \\
+\texttt{P2} & PFN & nb\_data=10M, nlayers=3, emsize=256 &  1.65 &  2.04 &  2.35 &  2.49 &  0.006 \\
+\texttt{P3} & PFN & nb\_data=10M, nlayers=12, emsize=512 &  \textbf{1.76} &  \textbf{2.13} &  \textbf{2.40} &  \textbf{2.52} & 0.050 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+\subsection{Extrapolating real-world learning curves}
+\label{sec:exp_real}
+
+While evaluation on data from the prior gives us a controlled setting to analyse quality and cost of the PPD approximation, performance on real-world learning curves is essential for practical usefulness. This second experiment aims to extend the previous comparison of MCMC and \pfn{} to real-world learning curve benchmarks. 
+
+We consider the best-performing variants of \pfn{} and \peakedMCMC{} according to the average log-likelihood they obtained in the first experiment. For \pfn{}, the optimal variant (\texttt{P3}) features an embedding size of 512 and 12 layers, resulting in a total of 26M trainable parameters, and is trained on 10 million prior curves. For \peakedMCMC{}, the optimal configuration (\texttt{M3}) involves a chain length of 4\,500, 100 walkers, 500 burn-in samples, without thinning.
+As an additional baseline, we include \originalMCMC{}, the original \mcmc{} variant proposed by~\citet{domhan-ijcai15a}, which uses the original hyperparameters and curve prior (11 basis curves and uninformative prior over the curve parameters).
+
+\paragraph{Benchmarks} 
+To evaluate the generalization capabilities of our model, we consider a diverse set of real-world curves. Our dataset comprises  20\,000 learning curves, sourced from four distinct benchmarks: \lcbench~\citep{zimmer-ieee21a}, \nasbench~\citep{dong-iclr20a}, \taskset~\citep{metz2020using} and \pdone~\citep{wang2022pretraining}, each contributing 5\,000 curves, randomly selected from specific subtasks. These benchmarks and subtasks were chosen to span a broad spectrum of supervised deep learning problems, training MLP (\lcbench), CNN (\nasbench), RNN (\taskset), and Transformer (\pdone) architectures on input modalities ranging from tabular data (\lcbench), text (\taskset\ and \pdone{}), protein sequence (\pdone), to vision problems (\nasbench). From \lcbench\ and \nasbench\ we use validation accuracy curves whereas from \taskset\ and \pdone\ the log loss validation curves. In terms of curve length, \lcbench\ and \taskset\ cover 50 epochs, \nasbench\ contains up to 200 epochs, and \pdone\ curves have varying lengths (22 - 1414). Further details, including sample curves, on these benchmarks are provided in Appendix~\ref{appendix:benchmarks}.
+
+\paragraph{Metrics} Our focus lies on the relative performance of MCMC and \pfn{}, as absolute performance is significantly influenced by the choice of prior. We consider the log-likelihood and the mean squared error (MSE) of the predictions as metrics. Here, the MSE is calculated w.r.t.\ the median of the PPD. 
+
+For each benchmark, we report the average rank of these metrics to aggregate results from different curves, as supposed to the average values. While the latter better captures performance differences, it is very sensitive to outliers and scale-dependent. When computed in normalized space, it would strongly depend on our choice of normalization parameters (see Appendix~\ref{a:norm}).
+
+\paragraph{Results} 
+For each benchmark, Figures~\ref{fig:res_real_data:loglikelihood:rank} and \ref{fig:res_real_data:mse:rank} display the average rank obtained by each method in terms of log-likelihood and MSE, respectively, where ranks are averaged across all 5\,000 curves. We do not include error bars as the standard errors are neglectable (less than $0.02$).  In summary, we observe similar trends for both metrics on all benchmarks. \pfn{} is never truly outperformed by \peakedMCMC{}. On \lcbench{} both methods rank similarly, with \pfn{} being slightly worse at high cutoffs. \pfn{} ranks better on \pdone{}, \nasbench{}, and \taskset{}. \originalMCMC{} performs clearly worse on \lcbench{}, \taskset{}, and \pdone{}. On \nasbench{}, \originalMCMC{} performs best for lower cutoffs, outperforming \peakedMCMC{}, suggesting that \nasbench{} curves are better captured by the original prior. Figure~\ref{fig:ll_pairwise} and Figure~\ref{fig:mse_pairwise} in Appendix~\ref{appendix:comp_pairwise} show the log-likelihoods and MSEs, respectively, for all three methods, for each curve and cutoff, per benchmark, providing a more detailed perspective.
+
+
+
+\begin{figure}
+    \centering
+
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_real_data/averages_log_likelihood_rebuttal.jpg}
+    \captionsetup{justification=centering}
+    \subcaption{Average rank of log-likelihood values (lower is better) \textit{vs} cutoffs}
+    \label{fig:res_real_data:loglikelihood:rank}
+\end{subfigure}\hfill%
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_real_data/averages_mse_rebuttal.jpg}
+    \captionsetup{justification=centering}
+    \caption{Average rank of mean squared error (MSE) values (lower is better) \textit{vs} cutoffs}
+    \label{fig:res_real_data:mse:rank}
+\end{subfigure}
+
+
+\caption{Comparison of \pfn{} with two MCMC variants on three real-data benchmarks.}
+\label{fig:res_real_data:loglikelihood}
+
+\end{figure}
+\subsection{Application: Extrapolation-based early stopping in model selection}
+\label{sec:early_stop}
+Thus far, we have shown that $\pfn{}$ produces extrapolations of similar or better quality to \mcmc{}, at a small fraction of the cost. However, these extrapolations are not perfect. In many cases, the practical relevance of any errors can only be assessed in the context of a specific application. 
+
+In this final experiment, we thus consider a model selection setting where after every epoch of training we have the choice between \begin{enumerate*}[label=(\roman*)]
+\item continuing the current training, or 
+\item stopping early ($T < m$) and starting a new training run using a different training pipeline (e.g., model architecture, hyperparameters, etc.).
+\end{enumerate*}
+Here, we assume that runs cannot be resumed once stopped and that the order in which training pipelines are to be considered is given. Our objective is to obtain high-quality models as quickly as possible, by stopping suboptimal training runs as early as possible. 
+This setting is also known as vertical model selection~\citep{mohr-arxiv22} and was also considered by~\citet{domhan-ijcai15a}. 
+
+We consider the extrapolation-based termination criterion proposed by~\citet{domhan-ijcai15a}, but use $\pfn{}$ instead of \mcmc{} to predict the likelihood $\Pr(y_{t'} > y_{\mathrm{best}} \, | \, y_1, \ldots, y_T)$ that the current run will at epoch $t'$ obtain a model better than the best obtained by any run thus far ($y_{\mathrm{best}}$), for $T < t' \leq m$ and decide to stop the current run if that probability does not exceed some fixed threshold $\delta$ (at any point).
+In our experiments, we use confidence level $1-\delta = 0.95$ as~\citet{domhan-ijcai15a}. Note that this criterion can be applied at every step or only at specific cutoffs. To simulate the effect of varying granularity, we consider a coarse-grained variant with 4 cutoffs $T \in \{\lceil 0.1m \rceil, \lceil 0.2m\rceil, \lceil 0.4m\rceil, \lceil 0.8m\rceil\}$, and a fine-grained variant with $T \in \{T \, | \, 1 < T < m\}$. We investigate alternative choices for cutoffs and confidence levels in Appendix~\ref{appendix:earlystop_ablation}.
+
+Following~\citet{domhan-ijcai15a}, we compare against a black box approach $\BB$ that does not implement early stopping. We further compare against a criterion $\patience{k}$ that implements the popular heuristic to terminate a training run when model performance did not improve for $k$ epochs. 
+
+For evaluation, we consider the same benchmarks as in Section~\ref{sec:exp_real} (for details, see Appendix~\ref{appendix:benchmarks}). We chose the total budget for model selection to correspond to 20 full runs (20$m$).
+For each task, we consider the training runs in 40 different random orderings. This totals 2\,120 model selection experiments per method, spread across the 53 different tasks.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figs/xp_early_stop/early_stop_all.png}
+\caption{Comparison of our \pfn{} based early stopping mechanism to naive baselines \BB\,(no stopping, train for the full budget $m$) and \patience{k} (stop training after \texttt{k} epochs without improvement) for vertical model selection where runs are considered in a fixed order and cannot be resumed. Shown is the anytime regret (lower is better) different approaches achieve after a total number of training epochs, averaged per benchmark and across 40 orderings per task.}
+\label{fig:early_stop_traj}
+
+\end{figure}
+
+\paragraph{Results} Figure~\ref{fig:early_stop_traj} shows the anytime performance of all methods in our comparison, on each of the benchmarks, in terms of regret. Here, regret is the absolute difference in performance between the best model obtained thus far and the best model attained by any run on the task. Results are averaged over the different run orderings. 
+For \lcbench, \nasbench, and \taskset\ results are further averaged across all tasks (results for individual tasks can be found in Appendix~\ref{appendix:earlystop_datasets}). The shaded area corresponds to $\pm$ 1 standard error.
+On all benchmarks, except for \nasbench, we observe that \pfn{} based termination criteria clearly perform best. 
+
+Also, the fine-grained variant performs better on average, suggesting that errors in inference are compensated for by the time saved by stopping runs earlier. In terms of expected speed-up, this \pfn{} variant obtains an expected regret lower than that obtained by \BB, approximately 3.3$\times$ faster on \lcbench\ and \taskset. Looking at individual tasks, we note 2\,-\,6$\times$ speed-ups on all 3 \pdone\ tasks, all 12 Taskset tasks, and 30 of the 35 \lcbench\ tasks (we obtain 1\,-\,2 $\times$ speed-ups on the remaining 5). 
+On \nasbench, we find that all termination criteria considered, including standard Patience heuristics, fail on all 3 tasks; this is likely related to the particular shape of learning curves on this benchmark, having an inflection point (see Figure~\ref{fig:nasbench_curves} and Figure~\ref{fig:examples_nasbench}), not resembling any in the prior. 
+
+Finally, in terms of overhead, the computational costs of the $\pfn{}$ inferences per model selection experiment range from 3 seconds (coarse-grained) up to 1 minute (fine-grained), and are negligible compared to the cost of the 20 full training runs of deep neural networks.
+\section{Summary, limitations, and future research}
+\label{sec:conclusion}
+We presented the first work using prior-data fitted networks (PFNs) for Bayesian learning curve extrapolation. We show that our $\pfn{}$ obtains qualitatively similar extrapolations, for a wide variety of learning curves, more than $10\,000\,\times$ faster than the MCMC method proposed by~\citet{domhan-ijcai15a}. 
+These inferences are now \emph{fast enough} (under 100 milliseconds on CPU, and even less on GPU), to be used in the context of online learning, at virtually no overhead. This opens up a wide variety of possible applications, e.g., to speed up automated model selection in AutoML and HPO by discarding poor configurations early. It would be interesting to integrate \pfn{} as a new termination criterion in existing deep learning libraries.
+
+Often, we also have more data available than a single partial learning curve, e.g., other curves on the same task, their hyperparameters, and/or curves of the same method on a different task, and meta-features. Previous work~\citep{swersky-arxiv14a,klein-iclr17a,wistuba-neurips22,ruhkopf-tmlr22} has already exploited this, and we could explore the potential of using PFNs for few-shot \emph{in-context} meta-learning, by feeding the model multiple curves and hyperparameters as input. 
+
+While for a fair comparison to \citet{domhan-ijcai15a}, reusing the original code, our prior (Section~\ref{sec:prior}) closely resembled the one of \citet{domhan-ijcai15a}, future work could improve upon this prior and overcome its limitations (e.g., on the \nasbench\ tasks) by modelling divergence, slow start, double-descent, correlated heteroscedastic noise, etc. 
+
+Finally, PFNs, unlike other Bayesian methods, must learn the prior from data, which implies that the prior must be generative. Also, it suggests that high entropy priors may present challenges. Future research should investigate these limitations and how to overcome them.
+\section{Acknowledgments and disclosure of funding}
+We acknowledge funding by the European Union (via ERC Consolidator Grant Deep Learning 2.0, grant no.~101045765), TAILOR, a project funded by EU Horizon 2020
+research and innovation programme under GA No 952215, the state of Baden-W\"{u}rttemberg through bwHPC and the German Research Foundation (DFG) through grant numbers INST 39/963-1 FUGG
+and 417962828. Views and opinions expressed are however those of the author(s) only and do not necessarily reflect those of the European Union or the European Research Council. Neither the European Union nor the granting authority can be held responsible for them.
+
+\begin{center}\includegraphics[width=0.3\textwidth]{figs/ERC_grant.jpg}\end{center}
+
+
+
+\newpage{\small
+\bibliographystyle{plainnat}
+\bibliography{bib/local}
+}
+
+
+\newpage
+\appendix
+\section{Learning curve normalization}
+\label{a:norm}
+Not all learning curves of interest may resemble those of the prior we described in Section~\ref{sec:prior}. For example, when minimizing the negative log-likelihood loss (log loss), learning curves will mostly decrease (vs. increase), be convex (vs. concave), and could take values that exceed 1.0 (there is no hard upper bound for log loss). 
+
+One approach would be to define a prior and train a specialized PFN for every performance measure. In this work, we use a more general approach: We apply a normalization procedure that allows us to accurately extrapolate a wide variety of learning curves using a single PFN, without retraining or fine-tuning. We consistently apply this procedure to all inferences involving real learning curves (i.e., the experiments described in Section~\ref{sec:exp_real} and Section~\ref{sec:early_stop}), even if observations are naturally constrained to $[0,1]$, e.g., accuracy curves.
+
+\paragraph{Step 1: Normalize the partial learning curve:} Let $y^o_i$ be the $i^{\text{th}}$ performance observation. We start by normalizing it using a generalized logistic sigmoid transform $y_i = g_{\vect{\lambda}}(y^o_i)$, that is re-parametrized by the following five parameters ($\vect{\lambda}$):
+\begin{description}
+\item[$\textrm{min?}$] A Boolean specifying that we expect learning to minimize the performance measure. E.g., this would be true for error rate and log loss, and false for accuracy. 
+\item[$\textrm{l}_{\textrm{hard}}$, $\textrm{u}_{\textrm{hard}}$] These are possibly infinite hard lower / upper bounds for model performance. This would, e.g., be 0 / 1 for accuracy and error rate; and 0 / $+\infty$ for log loss.
+\item[$\textrm{l}_{\textrm{soft}}$, $\textrm{u}_{\textrm{soft}}$] These are finite soft lower/upper bounds for model performance. They specify the range in which we expect performance values (that we care to distinguish between) to lie in practice. For accuracy and error rate, one could set these equal to the hard bounds, whereas for log loss one could, e.g., use an estimate of the loss for the untrained network (i.e., at epoch 0) as $\textrm{u}_{\textrm{soft}}$ and $\textrm{l}_{\textrm{soft}} = \textrm{l}_{\textrm{hard}}$, or if available, choose $\textrm{l}_{\textrm{soft}}$ to be an optimistic estimate of performance at convergence (e.g., state-of-the-art). Narrower ranges will result in more accurate inferences.
+\end{description}
+Specifically, we perform a linear transformation, followed by a logistic sigmoid, another linear transform, and a minimization conditional reflection around $\frac{1}{2}$, i.e.,
+\begin{align*}
+g_{\vect{\lambda}}(y^o_i) = \mathrm{cr}_{0.5}\left(\frac{c}{1+e^{-a (x-b) }} + d\right)
+\end{align*}
+where
+\begin{align*}
+\mathrm{cr}_{0.5}(y) &= \begin{cases}
+1-y & \text{if min?} \\
+y & \text{if $\lnot$min?}
+\end{cases} \quad\quad a = \frac{2}{\textrm{u}_{\textrm{soft}} - \textrm{l}_{\textrm{soft}}} \quad\quad b = -\frac{\textrm{u}_{\textrm{soft}} + \textrm{l}_{\textrm{soft}}}{\textrm{u}_{\textrm{soft}} - \textrm{l}_{\textrm{soft}}}\\
+c &= \frac{1 + e^{-a (\textrm{u}_{\textrm{hard}}-b)} + e^{-a (\textrm{l}_{\textrm{hard}}-b)} + e^{-a (\textrm{u}_{\textrm{hard}}+\textrm{l}_{\textrm{hard}}-2b)}}{e^{-a (\textrm{l}_{\textrm{hard}}-b)} - e^{-a (\textrm{u}_{\textrm{hard}}-b)}} \quad\quad d = \frac{-c}{1 + e^{-a (\textrm{l}_{\textrm{hard}}-b)}}
+\end{align*}
+Note that for $\vect{\lambda} = (\textrm{False}, \shortminus\infty, -1, 1, \infty)$ this reduces to the canonical logistic sigmoid $y_i = \frac{1}{1 + e^{-y^o_i}}$. This transform will be approximately linear (shape preserving) for $y^o_i \in [\textrm{l}_{\textrm{soft}}, \textrm{u}_{\textrm{soft}}]$, and the tails of the sigmoid will gradually squish values outside this range to $[0,1]$, supporting unbounded performance measures. Figure~\ref{fig:norm} visualizes this projection in general, and provides examples for accuracy with $\vect{\lambda} = (\textrm{False}, 0, 0, 1, 1)$ and log loss with $\vect{\lambda} = (\textrm{True}, 0, 0, \log(10), \infty)$.
+
+\begin{figure}
+\centering
+\begin{tabular}{ccc}
+  \includegraphics[width=0.315\textwidth]{figs/normalization.png}
+  \includegraphics[width=0.3\textwidth]{figs/norm_acc.png} &   \includegraphics[width=0.3\textwidth]{figs/norm_logloss.png} \\
+\end{tabular}
+\caption{\textbf{left:} The generic logistic sigmoid transformation described in Appendix~\ref{a:norm}.\label{fig:norm} and used to normalize learning curves to support a wide range of possibly unbounded performance metrics. \textbf{middle/right:} An example of the normalization for curves maximizing accuracy / minimizing log loss, using the transformation.}
+\end{figure}
+
+\paragraph{Step 2: Infer using normalized data:} Next, we perform Bayesian learning curve extrapolation on the normalized partial curve $\vect{y}$, with our usual prior $p(\vect{y})$, resulting in an approximation of the PPD in the transformed space.
+
+\paragraph{Step 3: Inverse transform the PPD:} Finally, we can obtain the property of interest of the PPD in the original space by applying the inverse transform, given by 
+\begin{align*}
+g^{\shortminus}_{\vect{\lambda}}(y^p_i) = \frac{\log(\frac{\mathrm{cr}_{0.5}(y^p_i)-d}{c - (\mathrm{cr}_{0.5}(y^p_i) - d)})-b}{a} 
+\end{align*}
+We use order-based statistics (e.g., median or other percentiles) in our experiments, to which we can simply apply $g^\shortminus_{\vect{\lambda}}$ directly since it is a monotonic transform. For other statistics (e.g., mean, variance) we may need to resort to Monte Carlo estimation, applying $g^{\shortminus}_{\vect{\lambda}}$ to samples of the PPD.
+
+By applying a given normalization, we effectively transform our prior, i.e., $p(\vect{y}^o) = g^\shortminus_{\vect{\lambda}}(p(\vect{y}))$. To get some intuition of what that prior looks like, we can sample from $p(\vect{y}^o)$ by applying $g^\shortminus_{\vect{\lambda}}$ to samples of our prior $p(\vect{y})$, which is useful for fine-tuning the parameters of this transformation. Figure~\ref{fig:prior} (right) shows samples of the log loss prior for $\vect{\lambda} = (\textrm{True}, 0, 0, \log(10), \infty)$.  
+
+\begin{figure}
+\centering
+\begin{tabular}{ccc}
+  \includegraphics[width=0.4\textwidth]{figs/prior_9510.png} &   \includegraphics[width=0.4\textwidth]{figs/prior_ll_9510.png}  \\
+\end{tabular}
+\caption{
+Sample of 10 curves taken i.i.d. from the prior (Section~\ref{sec:prior}). \textbf{(Right)} The same sample after applying the inverse transformation $g^\shortminus_{\vect{\lambda}}$ to obtain samples from the log loss prior as described in Appendix~\ref{a:norm}, using the transform shown in Figure~\ref{fig:norm} (right).\label{fig:prior}}
+\end{figure}
+\section{Detailed benchmark description}
+\label{appendix:benchmarks}
+To evaluate the generalization capabilities of $\pfn{}$, we consider a diverse set of real-world curves. The reduce computational cost and improve reproducibility, we source these from four existing benchmarks that provide a collection of learning curves for a wide variety of supervised learning tasks. 
+In what follows, we describe each of these benchmarks in more detail, the subset of tasks and curves we considered, and any preprocessing we did. Table~\ref{tab:bench} provides an overview of the characteristics of each benchmark and Figure~\ref{fig:nasbench_curves} (a) visualizes the curves selected from each benchmark.
+
+\begin{table}
+\caption{Overview of the characteristics of the real-world learning curve benchmarks we used in Section~\ref{sec:exp_real} and Section~\ref{sec:early_stop}. For each benchmark, the last columns list the normalization parameters used (see Appendix~\ref{a:norm}), where $y_0$ corresponds to the performance of the untrained model.\label{tab:bench}}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcllclccccc}
+\hline
+\textbf{benchmark} & \textbf{\begin{tabular}[c]{@{}c@{}}\# \\ subtasks\end{tabular}} & \textbf{\begin{tabular}[c]{@{}l@{}}model \\ architecture\end{tabular}} & \textbf{\begin{tabular}[c]{@{}l@{}}input modality\\ (datasets)\end{tabular}}          & \textbf{\begin{tabular}[c]{@{}c@{}}length \\ (\# epochs)\end{tabular}} & \textbf{\begin{tabular}[c]{@{}l@{}}metric\\ (split)\end{tabular}} & \textbf{min?} & \textbf{$\textrm{l}_{\textrm{hard}}$} & \textbf{$\textrm{l}_{\textrm{soft}}$} & \textbf{$\textrm{u}_{\textrm{soft}}$} & \textbf{$\textrm{u}_{\textrm{hard}}$} \\ \hline
+\lcbench{}            & 35                                                              & MLP                                                                    & \begin{tabular}[c]{@{}l@{}}Tabular Classification (OpenML) \\ \end{tabular}                    & 50                                                                     & \begin{tabular}[c]{@{}l@{}}accuracy \\ (val)\end{tabular}         & False         & 0           & 0                 & 1                 & 1           \\ \hline
+\nasbench{}     & 3                                                               & CNN                                                                    & \begin{tabular}[c]{@{}l@{}}Image Classification (Cifar-10, \\ Cifar-100, ImageNet16-120)\end{tabular} & 200                                                                    & \begin{tabular}[c]{@{}l@{}}error rate \\ (val)\end{tabular}       & True          & 0           & 0                 & 1                 & 1           \\ \hline
+\taskset{}            & 12                                                              & RNN                                                                    & \begin{tabular}[c]{@{}l@{}}Text  Classification \\ (Sentiment Analysis - IMDB)\end{tabular}   & 50                                                                     & \begin{tabular}[c]{@{}l@{}}log loss \\ (val)\end{tabular}         & True          & 0           & 0                 & $y_0$             & $+\infty$   \\ \hline
+\pdone{}               & 3                                                               & Transformer                                                            & \begin{tabular}[c]{@{}l@{}}Text (Language Modeling - lm1b)\\ \end{tabular}            & 38                                                                     & \begin{tabular}[c]{@{}l@{}}log loss \\ 
+                   (val)\end{tabular}         & True          & 0           & 3.46              & $y_0$             & $+\infty$ \\
+                   &                                                                 & Transformer                                                            & \begin{tabular}[c]{@{}l@{}}Text (Translation - WMT) \\ \end{tabular}                   & 1414                                                                   & \begin{tabular}[c]{@{}l@{}}log loss \\ (val)\end{tabular}         & True          & 0           & 1.68              & $y_0$             & $+\infty$   \\
+                   &                                                                 & Transformer                                                            & \begin{tabular}[c]{@{}l@{}}Protein sequences (UniRef50)\\ \end{tabular}                    & 22                                                                     & \begin{tabular}[c]{@{}l@{}}log loss \\ (val)\end{tabular}         & True          & 0           & 2.60              & $y_0$             & $+\infty$   \\
+\hline
+\end{tabular}
+}
+\end{table}
+
+
+\paragraph{\lcbench{}} provides learning curve data for 2\,000 configurations of AutoPytorch~\citep{zimmer-ieee21a} trained for 50 epochs on 35 tabular classification datasets from the AutoML benchmark~\citep{gijsbers-automl19a}. All of these configurations use momentum SGD to train an MLP, but with varying number of layers and units per layer, and varying optimization hyperparameters (batch size, learning rate, momentum, L2 regularization, dropout rate). 
+In Section~\ref{sec:exp_real}, we consider a subset of 5\,000 curves selected uniformly at random from all 70\,000 validation accuracy curves in the benchmark. In Section~\ref{sec:early_stop}, we consider all 2\,000 validation accuracy curves, for every task, in 40 different orderings.
+
+\paragraph{\nasbench{}} is a benchmark for Neural Architecture Search methods~\citep{dong-iclr20a}. It provides learning curve data for training 15\,625 different architectures for 200 epochs on three different image classification datasets (CIFAR-10, CIFAR-100, and ImageNet16-120) for three different random seeds. Other aspects of the training pipeline (e.g., optimizer, hyperparameters) are fixed. We use the validation error rate curves provided through the Syne Tune~\citep{salinas-automl2022} interface to this benchmark. As discussed in Section~\ref{sec:lcpfn}, the $\pfn{}$ we consider is trained to extrapolate curves up to length 100 ($m$).\footnote{This was our first choice of $m$ and we retained it throughout the project. We do not anticipate serious issues when scaling $m$ up to 1\,000, except for increased training times.} To handle the 200 epoch curves from $\nasbench{}$, we chose to subsample them, feeding only every second observation into the $\pfn{}$. In Section~\ref{sec:exp_real}, we consider a subset of 5\,000 curves selected uniformly at random from all 140\,625 error rate curves in the benchmark. In Section~\ref{sec:early_stop}, we consider all 46\,875 error rate curves, for each of the three datasets, in 40 different orderings.
+
+
+\paragraph{\taskset{}}~\citep{metz2020using} provides a total of roughly 29 million learning curves for over 1\,162 different deep learning tasks. Here, a task is defined as optimizing a given neural network architecture for a given supervised learning problem, and the curves correspond to using 5 different optimizers, using 1\,000 different hyperparameter settings, and 5 different random seeds. Following~\citet{wistuba-neurips22}, we only use the validation log loss curves of a small subset of 12 tasks, that consider training different RNN architectures, with varying architectural parameters, for 50 epochs on the IMDB sentiment analysis dataset~\citep{maas2011learning}, a binary text classification task. As our objective was to evaluate the robustness of our approach, we avoided excluding ill-behaved (e.g., diverging) curves. However, upon inspecting the data, we found that on some of these tasks up to 90\% of the curves fail to significantly improve upon the initial model performance, some of which diverge almost instantly. In combination with the normalization procedure described in Appendix~\ref{a:norm}, the majority of curves are effectively mapped onto the same narrow range, producing a constant trend (at 0 in case of divergence). While this is reasonable in practice, and both $\pfn{}$ and $\mcmc{}$ variants predict this constant trend with very high confidence, it does create a bias in our evaluation towards methods excelling at extrapolating poor curves. To eliminate and investigate this bias, we selected the 5\,000 curves used in Section~\ref{sec:exp_real}, such that 2\,500 are taken from the top 10\% best\footnote{Curves are ranked based on the lowest validation loss obtained at any point during training.} curves per task, and 2\,500 from the 90\% others. In Figure~\ref{fig:res_real_data:loglikelihood}, we compared methods on the ``good'' curves only, an evaluation on the 2\,500 ``bad'' curves is presented in Figure~\ref{fig:nasbench_curves} (b). In Section~\ref{sec:early_stop}, we do not make this distinction and consider all 25\,000 curves per task, in 40 different random orderings.
+
+\paragraph{\pdone{} } is a recent benchmark that \citet{wang2022pretraining} describe as collecting ``a large multi-task hyperparameter tuning
+dataset by training tens of thousands of configurations of near-state-of-the-art models on popular
+image and text datasets, as well as a protein sequence dataset''. We access this benchmark through the synetune~\citep{salinas-automl2022} library interface, which provides learning curve data for 23 tasks, where the number of curves provided, as well as the curve length, varies per task. Here, we limit our selection to log loss curves for the three tasks that consider training Transformer architectures for 22 epochs on language modeling (lm1b), 1414 epochs on translation (WMT), and 38 epochs on protein sequences (UniRef50). To handle the very long learning curves on the translation task, we subsample these aggressively, feeding only every 14th observation into the $\pfn{}$. In Section~\ref{sec:exp_real}, we select 5\,000 curves from these three tasks uniformly at random. In Section~\ref{sec:early_stop}, we consider all curves per task, in 40 different random orderings. Finally, we use the optimal loss achieved by any of the runs as $\textrm{l}_{\textrm{soft}} > 0$ in our normalization. While unknown in practice, we do not expect qualitative differences in evaluation if a rough estimate were to be used instead.
+
+
+\begin{figure}
+\begin{subfigure}{\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figs/curves_all_benchmarks.png}
+    \captionsetup{justification=centering}
+    \subcaption{Learning curves sourced from each benchmark}
+\end{subfigure}\hfill%
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_real_data/taskset__all_rebuttal.jpg}
+    \captionsetup{justification=centering}
+    \caption{Quality of curves vs. quality of extrapolations on \taskset{} (average rank, lower is better)}
+\end{subfigure}
+\caption{(a) Illustration showing the 5\,000 curves used for each of the four benchmarks in our experiments in Section~\ref{sec:exp_real}. All curves are shown after normalization and subsampling, and a random subset of individual curves is highlighted. For \taskset{}, ``good'' / ``bad'' curves (top 10\% / bottom 90\% in their task) are shown in green / red, respectively. (b) Average rank of Log-likelihood and MSE values on Taskset curves for the three methods (\pfn, \peakedMCMC, and \originalMCMC). The two leftmost plots show results on the 5\,000 sampled \taskset{} curves. The two rightmost plots provide the same comparison, but specifically for the 2500 ``bad'' curves. Here, we observe that \peakedMCMC{} performs better on the ``bad'' curves, which we believe can be attributed to the discretization of the PPD in 1000 bins, limiting the maximal confidence / accuracy of $\pfn{}$, since the majority of these curves are quasi-constant (fall in the same bin) after normalization.}
+\label{fig:nasbench_curves}
+\end{figure}
+\section{Additional analyses}
+\label{a:examples}
+\subsection{Extrapolating samples of the prior}
+\label{appendix:comp_mse}
+\subsubsection{Detailed results of section~\ref{sec:exp_prior}}
+Figure~\ref{fig:xp_on_prior:higher_cutoffs} provides a visual representation of the log-likelihood values on prior curves for higher cutoffs, similar to Figure~\ref{fig:ll}. As expected, the difference in log-likelihood values between \pfn\ and \peakedMCMC\ decreases as more points of the curve are observed. The detailed results can be found in Table~\ref{tab:prior_results_extended}.
+Both Figure~\ref{fig:xp_on_prior:higher_cutoffs} and Table~\ref{tab:prior_results_extended}  clearly demonstrate that certain variants of \pfn, particularly those trained with 10M examples, consistently outperform the best variant of \peakedMCMC\ across all considered cutoffs.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth,trim={7.8cm 13cm 0 0},clip]{figs/xp_on_prior/pfn_vs_mcmc_subplots.jpg}\\
+    \includegraphics[width=\textwidth,trim={0 0 0 3cm},clip]{figs/xp_on_prior/pfn_vs_mcmc_subplots_rebuttal.jpg}
+    \caption{Comparison of \pfn{} and \peakedMCMC\ with varying hyperparameters values on prior curves in terms of average runtime (lower is better) and average log-likelihood (higher is better) for different cutoff values ($20\%, 40\%, 80\%$)}
+    \label{fig:xp_on_prior:higher_cutoffs}
+\end{figure}
+
+
+\begin{table}
+    \centering
+    \centering
+
+\captionof{table}{
+Comparison of the 25 best \pfn{} and \peakedMCMC{} variants on prior curves in terms of log-likelihood (higher is better) at 10\%, 20\%, 40\%, and 80\% cutoffs. Values in brackets correspond to one standard error.}\label{tab:prior_results_extended}
+\resizebox{\textwidth}{!}{\begin{tabular}{llllcccccc}
+\toprule
+\textbf{Method} & \textbf{Parameters} & \textbf{10\%} & \textbf{20\%} & \textbf{40\%} & \textbf{80\%} & \textbf{Avg. Runtime (s)} \\
+\midrule
+\peakedMCMC & nsamples=2000, nwalkers=100, burn-in=500, thin=10  &  1.628 (0.01) &  1.939 (0.011) &  2.265 (0.01) &  2.469 (0.009) &  29.944 (7.6E-01) \\
+\peakedMCMC & nsamples=2000, nwalkers=100, burn-in=500, thin=1   &  1.628 (0.01) &  1.939 (0.011) &  2.265 (0.01) &  2.469 (0.009) &  54.401 (3.1E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=0, thin=10     &  1.629 (0.01) &  1.942 (0.011) &  2.266 (0.009) &  2.467 (0.009) &  28.783 (6.2E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=0, thin=1      &  1.629 (0.01) &  1.943 (0.011) &  2.266 (0.009) &  2.467 (0.009) &  53.292 (4.3E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=50, thin=100   &  1.629 (0.01) &  1.943 (0.011) &  2.266 (0.009) &  2.467 (0.009) &  26.672 (7.3E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=100, thin=100  &  1.631 (0.01) &  1.943 (0.011) &  2.267 (0.009) &  2.469 (0.009) &  26.997 (7.4E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=50, thin=10    &  1.631 (0.01) &  1.944 (0.011) &  2.267 (0.009) &  2.468 (0.009) &  29.109 (6.3E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=50, thin=1     &  1.631 (0.01) &  1.944 (0.011) &  2.267 (0.009) &  2.469 (0.009) &  53.601 (4.2E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=100, thin=10   &  1.632 (0.01) &  1.943 (0.011) &  2.268 (0.01) &  2.47 (0.009) &  29.433 (6.4E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=100, thin=1    &  1.632 (0.01) &  1.943 (0.011) &  2.268 (0.01) &  2.47 (0.009) &  53.941 (4.2E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=500, thin=100  &  1.632 (0.01) &  1.94 (0.012) &  2.274 (0.01) &  2.477 (0.009) &  29.601 (8.2E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=500, thin=10   &  1.632 (0.01) &  1.942 (0.011) &  2.275 (0.01) &  2.477 (0.009) &  32.036 (7.1E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=50, burn-in=500, thin=1    &  1.632 (0.01) &  1.942 (0.011) &  2.275 (0.01) &  2.477 (0.009) &  56.526 (3.4E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=0, thin=100   &  1.637 (0.01) &  1.954 (0.011) &  2.274 (0.01) &  2.474 (0.009) &  44.076 (1.4E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=0, thin=10    &  1.639 (0.01) &  1.956 (0.011) &  2.276 (0.01) &  2.476 (0.009) &  48.947 (1.2E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=0, thin=1     &  1.639 (0.01) &  1.956 (0.011) &  2.276 (0.01) &  2.476 (0.009) &  98.033 (9.9E-01) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=50, thin=100  &  1.639 (0.01) &  1.956 (0.011) &  2.276 (0.01) &  2.476 (0.009) &  44.618 (1.4E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=50, thin=10   &  1.64 (0.01) &  1.958 (0.011) &  2.277 (0.01) &  2.477 (0.009) &  49.475 (1.2E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=50, thin=1    &  1.64 (0.01) &  1.958 (0.011) &  2.277 (0.01) &  2.477 (0.009) &  98.548 (1.0E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=100, thin=100 &  1.641 (0.01) &  1.958 (0.011) &  2.277 (0.01) &  2.477 (0.009) &  45.16 (1.4E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=100, thin=10  &  1.641 (0.01) &  1.957 (0.011) &  2.278 (0.01) &  2.478 (0.009) &  50.011 (1.2E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=100, thin=1   &  1.641 (0.01) &  1.957 (0.011) &  2.278 (0.01) &  2.478 (0.009) &  98.98 (1.1E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=500, thin=100 &  1.642 (0.01) &  1.955 (0.011) &  2.284 (0.01) &  2.485 (0.009) &  49.5 (1.6E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=500, thin=10  &  1.642 (0.01) &  1.956 (0.011) &  2.285 (0.01) &  2.486 (0.009) &  54.328 (1.3E+00) \\
+\peakedMCMC & nsamples=4000, nwalkers=100, burn-in=500, thin=1   &  1.642 (0.01) &  1.956 (0.011) &  2.285 (0.01) &  2.486 (0.009) &  103.151 (1.1E+00) \\
+\pfn & Nb data=100k, nlayers=6, emsize=128                &  1.242 (0.001) &  1.508 (0.001) &  1.652 (0.001) &  1.709 (0.002) &  0.007 (4.6E-04) \\
+\pfn & Nb data=100k, nlayers=12, emsize=128               &  1.254 (0.001) &  1.522 (0.001) &  1.669 (0.001) &  1.73 (0.002) &  0.012 (8.3E-04) \\
+\pfn & Nb data=100k, nlayers=6, emsize=256                &  1.267 (0.002) &  1.597 (0.001) &  1.764 (0.001) &  1.843 (0.002) &  0.011 (8.2E-04) \\
+\pfn & Nb data=100k, nlayers=12, emsize=256               &  1.384 (0.001) &  1.664 (0.001) &  1.833 (0.001) &  1.9 (0.002) &  0.021 (1.6E-03) \\
+\pfn & Nb data=100k, nlayers=3, emsize=512                &  1.392 (0.001) &  1.679 (0.001) &  1.871 (0.001) &  1.959 (0.002) &  0.016 (1.4E-03) \\
+\pfn & Nb data=100k, nlayers=6, emsize=512                &  1.439 (0.001) &  1.745 (0.001) &  1.947 (0.001) &  2.034 (0.002) &  0.028 (2.5E-03) \\
+\pfn & Nb data=100k, nlayers=12, emsize=512               &  1.504 (0.001) &  1.817 (0.001) &  2.013 (0.001) &  2.091 (0.002) &  0.048 (4.2E-03) \\
+\pfn & Nb data=1M, nlayers=3, emsize=128                  &  1.528 (0.001) &  1.894 (0.001) &  2.159 (0.001) &  2.279 (0.002) &  0.004 (2.8E-04) \\
+\pfn & Nb data=1M, nlayers=6, emsize=128                  &  1.581 (0.001) &  1.949 (0.001) &  2.202 (0.001) &  2.308 (0.002) &  0.007 (4.6E-04) \\
+\pfn & Nb data=1M, nlayers=3, emsize=256                  &  1.583 (0.001) &  1.967 (0.001) &  2.239 (0.001) &  2.357 (0.002) &  0.007 (5.0E-04) \\
+\pfn & Nb data=10M, nlayers=3, emsize=128                 &  1.585 (0.001) &  1.989 (0.001) &  2.282 (0.002) &  2.431 (0.003) &  0.004 (2.8E-04) \\
+\pfn & Nb data=1M, nlayers=12, emsize=128                 &  1.621 (0.001) &  1.982 (0.001) &  2.223 (0.001) &  2.326 (0.002) &  0.012 (8.2E-04) \\
+\pfn & Nb data=1M, nlayers=3, emsize=512                  &  1.624 (0.001) &  2.011 (0.001) &  2.291 (0.001) &  2.417 (0.002) &  0.016 (1.4E-03) \\
+\pfn & Nb data=1M, nlayers=6, emsize=256                  &  1.627 (0.001) &  2.007 (0.001) &  2.269 (0.001) &  2.381 (0.002) &  0.012 (8.7E-04) \\
+\pfn & Nb data=10M, nlayers=3, emsize=256                 &  1.654 (0.001) &  2.044 (0.001) &  2.347 (0.002) &  2.493 (0.003) &  0.006 (4.7E-04) \\
+\pfn & Nb data=1M, nlayers=12, emsize=256                 &  1.667 (0.001) &  2.035 (0.001) &  2.294 (0.001) &  2.406 (0.002) &  0.02 (1.5E-03) \\
+\pfn & Nb data=1M, nlayers=6, emsize=512                  &  1.672 (0.001) &  2.051 (0.001) &  2.323 (0.001) &  2.441 (0.002) &  0.028 (2.4E-03) \\
+\pfn & Nb data=10M, nlayers=6, emsize=128                 &  1.673 (0.001) &  2.058 (0.001) &  2.352 (0.001) &  2.478 (0.003) &  0.007 (4.6E-04) \\
+\pfn & Nb data=1M, nlayers=12, emsize=512                 &  1.699 (0.001) &  2.072 (0.001) &  2.344 (0.001) &  2.46 (0.002) &  0.051 (4.6E-03) \\
+\pfn & Nb data=10M, nlayers=3, emsize=512                 &  1.707 (0.001) &  2.083 (0.001) &  2.378 (0.002) &  2.517 (0.003) &  0.017 (1.4E-03) \\
+\pfn & Nb data=10M, nlayers=12, emsize=128                &  1.717 (0.001) &  2.094 (0.001) &  2.377 (0.001) &  2.498 (0.003) &  0.012 (8.1E-04) \\
+\pfn & Nb data=10M, nlayers=6, emsize=256                 &  1.721 (0.001) &  2.098 (0.001) &  2.387 (0.002) &  2.514 (0.003) &  0.011 (8.2E-04) \\
+\pfn & Nb data=10M, nlayers=6, emsize=512                 &  1.744 (0.001) &  2.125 (0.001) &  2.404 (0.002) &  2.527 (0.003) &  0.026 (2.3E-03) \\
+\pfn & Nb data=10M, nlayers=12, emsize=256                &  1.746 (0.001) &  2.124 (0.001) &  2.403 (0.001) &  2.522 (0.003) &  0.02 (1.5E-03) \\
+\pfn & Nb data=10M, nlayers=12, emsize=512                &  1.758 (0.001) &  2.133 (0.001) &  2.403 (0.002) &  2.519 (0.003) &  0.05 (4.5E-03) \\
+
+\bottomrule
+\end{tabular}}
+
+
+
+
+\end{table}
+
+
+\newpage
+\subsubsection{Effect of MCMC chain length and initialization}
+In our experiments in Section~\ref{sec:exp_prior} we observed that the quality of MCMC inference increases with chain length. In particular, our best \peakedMCMC{} variant (\texttt{M3} in Figure~\ref{fig:ll}), uses the same hyperparameter settings as \citet{domhan-ijcai15a} (\texttt{M1}), but with a double as long chain (discounting the burn-in). In this section, we investigate whether the chains considered are too short and whether increasing chain lengths further will eventually cause \peakedMCMC{} to outperform $\pfn{}$. To study this, we will run \peakedMCMC{} to collect up to 100\,000 samples per walker (50$\times$ more than~\citet{domhan-ijcai15a}). To reduce the computational cost of this experiment, we only extrapolate 1\,000 (instead of 10\,000) prior curves, on cutoff 10\%, and use \peakedMCMC{} with a 100-thinning strategy (\texttt{M2}). This variant is more compute-efficient and the minor negative effect of thinning is expected to further decrease with increasing chain length. Concurrently, we study the effect of initialization. There are different ways of initializing MCMC chains and the chosen strategy can strongly affect performance if chains are too short. \citet{domhan-ijcai15a} initializes the chain by setting the parameters for each of the $K$ basis curves to their Least-Squared Estimates (\texttt{LSE}). Weights are initialized to be $\frac{1}{K}$. If this initial point violates the constraints imposed by the prior, a default starting point is used instead. As an ablation, we compare it to an initialization always starting at the default (\texttt{default}). As another ablation, we compare to a strategy using the maximum a posteriori estimate (\texttt{MAP}) as a starting point instead, which unlike LSE takes the likelihood under the prior into account. 
+
+Figure~\ref{fig:longmcmc} shows the quality and cost of inferences for each of the initialization strategies when collecting up to 100\,000 samples (per walker). While these results clearly show that increasing chain length continues to improve performance. The trends we observe, suggest that \peakedMCMC{} could eventually attain or even overtake the best \pfn{}. That being said, the best MCMC we considered has 20\,000$\times$ longer runtimes than that \pfn{} requires, yet it does not quite reach the same performance, so outperforming it would require impractically long chains. When optimistically extending the trends, we estimate to need at least 10$\times$ longer chains, and inference times of multiple hours. In terms of initialization, we observe that MCMC performance for shorter chains indeed more strongly depends on the initialization strategy, where the \texttt{LSE} strategy by \citet{domhan-ijcai15a} does best for short chains, followed by \texttt{MAP} and \texttt{default}. When increasing chain length, we find that differences get smaller and order reverses such that the fixed \texttt{default} initialization is best, suggesting that greedy initialization (\texttt{LSE}, \texttt{MAP}) may hurt performance on some curves.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_prior/ablation.png}
+    \caption{runtime \textit{vs} log-likelihood values of \peakedMCMC{}, using thinning 100, with different initialization strategies and sample sizes (per walker), averaged across 1\,000 curves generated i.i.d. from the prior. The blue point represents \pfn{}, with the dotted line as a reference for its LL value. The shaded areas correspond to $\pm$ 1 standard error. \label{fig:longmcmc}}
+\end{figure}
+\subsection{Extrapolating real-world learning curves}
+\label{appendix:comp_pairwise}
+In addition to the average rank plots presented in Section~\ref{sec:exp_real}, we also perform pairwise comparisons of the log-likelihood and mean squared error values among the different methods (\pfn\ and \mcmc\ variants). This approach allows for a more detailed analysis, as it compares the absolute values of the metrics. Unlike the rank plots, these pair and curvewise plots provide insights into outliers which thus further enhance our understanding of the results.
+
+Figure~\ref{fig:ll_pairwise} presents a pairwise comparison of the log-likelihood values between our PFN method and the two variants of MCMC, per curve, considering different cutoff values on the four benchmark datasets. Figure~\ref{fig:mse_pairwise} presents the same comparison based on mean squared error (MSE).
+
+We observe that \pfn\ compares favorably to \peakedMCMC\ on \pdone\ and \nasbench\ tasks. Both methods demonstrate comparable performance on the \taskset{} dataset. However, it is worth noting that for some curves of the \lcbench\ dataset, \peakedMCMC\ obtains very high log-likelihood and low MSE scores, while \pfn\ falls short in this aspect.  We believe this discrepancy can be attributed to the fact that the \lcbench\ dataset contains a significant number of constant curves (see Figure~\ref{fig:nasbench_curves}a) that fall within the same bin of the discretized PPD, effectively limiting the the maximal confidence / accuracy of \pfn{}. Looking at MSE specifically, we find that for some \lcbench\ curves, at high cutoffs, \pfn{} obtains very high errors, while \peakedMCMC\ does not. Upon closer inspection, we found that these curves quickly converge to a value close to the optimal accuracy, and while \pfn{} captures this trend for lower cutoffs, it suddenly fails for larger cutoffs (see 5th example in Figure~\ref{fig:examples_lcbench}). This can likely be explained by the fact that these curves are not adequately captured by the prior proposed in Section~\ref{sec:prior} and this seems to be one of the few cases where \pfn{} generalizes poorly out of distribution. 
+
+When comparing with \originalMCMC, we observe that \originalMCMC\ has relatively few outliers in terms of log-likelihood, both in the positive and negative sense. This can likely be explained by the prior of \originalMCMC, which is more flexible (i.e. has higher entropy) than ours and making \originalMCMC\ thus less confident about its predictions. However, \originalMCMC\ performs clearly worse in terms of MSE, suggesting that the median of the high entropy PPDs produced by this method do not provide a good point estimate.
+ 
+\begin{figure}
+    \centering
+
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_real_data/scatter_log_likelihood_our_prior_rebuttal.jpg}
+    \captionsetup{justification=centering}
+    \subcaption{PFN \textit{vs} MCMC with our prior (\peakedMCMC{})}
+\end{subfigure}\hfill%
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_real_data/scatter_log_likelihood_original_prior_rebuttal.jpg}
+    \captionsetup{justification=centering}
+    \caption{PFN \textit{vs} MCMC as in~\citet{domhan-ijcai15a} (\originalMCMC{})}
+\end{subfigure}
+
+\caption{Pairwise comparison of log-likelihood (higher is better) between PFN and MCMC.}
+\label{fig:ll_pairwise}
+\end{figure}
+
+\begin{figure}
+    \centering
+
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_real_data/scatter_mse_our_prior_rebuttal.jpg}
+    \captionsetup{justification=centering}
+    \subcaption{PFN \textit{vs} MCMC with our prior (\peakedMCMC{})}
+\end{subfigure}\hfill%
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_on_real_data/scatter_mse_original_prior_rebuttal.jpg}
+    \captionsetup{justification=centering}
+    \caption{PFN \textit{vs} MCMC as in~\citet{domhan-ijcai15a} (\originalMCMC{})}
+\end{subfigure}
+
+\caption{Pairwise comparison of MSE values (lower is better) between PFN and MCMC.}
+\label{fig:mse_pairwise}
+\end{figure}
+
+
+\newpage
+\subsection{Application: Extrapolation-based early stopping in model selection}
+\label{appendix:earlystop}
+In what follows, we further analyze and discuss our experiments described in Section~\ref{sec:early_stop}.
+\subsubsection{Results on individual tasks}
+\label{appendix:earlystop_datasets}
+While Figure~\ref{fig:early_stop_traj} shows the results of our early stopping experiments for each \pdone{} task, results for the three remaining benchmarks are summarized by averaging them across all tasks. Since this may hide task-dependent variation and outliers, we have a closer look at the performance on individual tasks. Figure~\ref{fig:early_stop_lcbench} shows the results for each of 35 \lcbench{} tasks. Here, we observe that relative performances vary per task. The aggressive $\patience{k}$ (i.e., low $k$) baselines perform best on some tasks, but fail on others. The $\pfn{}$ based termination criteria consistently perform well on each task, obtaining a 2-6$\times$ speed-up (w.r.t. the final performance of \BB{}) on 30 of the 35 tasks, and no significant slow-down on the remaining five. Figure~\ref{fig:early_stop_nasbench} shows the results for each of the 3 \nasbench{} tasks. Here, we observe failure on all 3 tasks, where the degree of failure seems correlated with the complexity of the image classification task. Figure~\ref{fig:early_stop_taskset} shows the results for each of the 12 \taskset{} tasks. Here, the $\pfn{}$ based termination criteria consistently perform well, obtaining 2-6$\times$ speed-ups on all 12 tasks. We conclude that Figure~\ref{fig:early_stop_traj} accurately reflects relative performances on all four benchmarks.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{figs/xp_early_stop/early_stop_lcbench4_all_datasets.png}
+\caption{Average anytime regret (lower is better) obtained by all early stopping criteria for 40 run orderings for each of the 35 \lcbench{} tasks.}
+\label{fig:early_stop_lcbench}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+\includegraphics[width=\textwidth]{figs/xp_early_stop/early_stop_nasbench4_all_datasets.png}
+\caption{Average anytime regret (lower is better)  obtained by all early stopping criteria for 40 run orderings for each of the 3 \nasbench{} tasks.}
+    \label{fig:early_stop_nasbench}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_early_stop/early_stop_taskset4_all_datasets.png}
+\caption{Average anytime regret (lower is better) obtained by all early stopping criteria for 40 run orderings for each of the 12 \taskset{} tasks.}
+\label{fig:early_stop_taskset}
+\end{figure}
+
+
+
+\FloatBarrier
+\subsubsection{Parameter sensitivity analysis}
+\label{appendix:earlystop_ablation}
+In our comparison in Figure~\ref{fig:early_stop_traj}, we considered two variants of the $\pfn{}$ based termination criterion, varying the frequency at which it is applied, and found the fine-grained strategy, applying it every epoch, to perform best. However, many variants of this scheme exist, and in what follows we investigate the impact of some of our other choices on performance.
+
+\paragraph{Confidence level:} In our experiments, we terminate a training run if we are confident it will not improve upon the best model seen so far. Following prior art~\citep{domhan-ijcai15a}, we adopted a confidence threshold of 0.95. Figure~\ref{fig:early_stop_ablate} (a) shows the anytime performance of variants using lower (0.90) and higher (0.99, 0.999) confidence levels. We observe that all of these perform relatively well, suggesting some degree of robustness. The speed-ups obtained using higher confidence levels are mostly lower (up to 2$\times$), but more consistent. In particular, we only observe minimal slow-down on \nasbench{} at confidence level 0.999, and higher confidences are also beneficial for the \pdone{} protein sequence (UniRef50) task.
+
+\paragraph{Minimal cutoff:} While we apply our predictive termination criterion every epoch, we do not apply it ``as of the first epoch'', but only after two observations are available ($T\geq2$). Since \pfn{}'s predictions are conditioned on the partial curve only, it will predict the prior for $T=0$. Beyond not allowing us to discriminate between runs, it introduces a potential failure mode for easy tasks (many training runs obtain models close to the theoretical optimum) and \pfn{} (unaware of task hardness) will terminate runs before they even began because it is very unlikely to obtain a better model \emph{under the prior}. Figure~\ref{fig:early_stop_ablate} (b) shows the anytime performance of variants that apply the criterion as soon as one, three, four, or five observations are made. We find that a choice of one (instead of two) only negatively impacts performance on \lcbench{} (containing some very easy tasks). A minimal cutoff of two works well on all benchmarks, with minor slow-downs for the higher minimal cutoffs.
+
+\begin{figure}
+\begin{subfigure}{\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figs/xp_early_stop/early_stop_ablate_p.png}
+    \captionsetup{justification=centering}
+    \subcaption{Varying confidence levels ($1-\delta$)}
+    \vspace{1cm}
+\end{subfigure}\hfill
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/xp_early_stop/early_stop_ablate_s.png}
+    \captionsetup{justification=centering}
+    \caption{Varying minimal cutoff ($\leq T$)}
+    \vspace{1cm}
+\end{subfigure}
+\caption{Parameter sensitivity analysis of our fine-grained \pfn{} based termination criterion in terms of the average regret (lower is better).}
+\label{fig:early_stop_ablate}
+\end{figure}
+\subsection{Qualitative plots of learning curve extrapolation}
+\label{appendix:examples}
+To complement the quantitative evaluation in the main paper, we provide examples of extrapolations, at the four different cutoffs, for seven curves from the prior (Figure~\ref{fig:examples_prior_curves}), $\lcbench{}$ (Figure~\ref{fig:examples_lcbench}), $\nasbench{}$ (Figure~\ref{fig:examples_nasbench}), $\taskset{}$ (Figure~\ref{fig:examples_taskset}), and \pdone{} (Figure~\ref{fig:examples_pd1}). The plots show the median and two-sided 90\% confidence interval of the PPDs inferred using the \pfn{} and \peakedMCMC{} variant considered in Section~\ref{sec:exp_real}. We observe that while the quality of the extrapolations produced by $\pfn{}$ varies strongly, they are mostly logical, given the data observed and the prior used, and we find that the inferences of $\peakedMCMC{}$ are rarely preferable.
+
+\begin{figure}[b]
+\centering
+\includegraphics[width=\textwidth]{figs/qplots/qplot_prior_curves_rebuttal.png}
+\caption{Extrapolations of 7 different curves from the prior at 10, 20, 40, and 80 cutoff}
+\label{fig:examples_prior_curves}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figs/qplots/qplot_lcbench_rebuttal.png}
+\caption{Extrapolations of 7 different curves from $\lcbench{}$ at 10\%, 20\%, 40\%, and 80\% cutoff}
+\label{fig:examples_lcbench}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figs/qplots/qplot_nasbench201_rebuttal.png}
+\caption{Extrapolations of 7 different curves from $\nasbench{}$ at 10\%, 20\%, 40\%, and 80\% cutoff}
+\label{fig:examples_nasbench}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figs/qplots/qplot_taskset_rebuttal.png}
+\caption{Extrapolations of 7 different curves from $\taskset{}$ at 10\%, 20\%, 40\%, and 80\% cutoff}
+\label{fig:examples_taskset}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figs/qplots/qplot_pd1_rebuttal.png}
+\caption{Extrapolations of 7 different curves from $\pdone{}$ at 10\%, 20\%, 40\%, and 80\% cutoff}
+\label{fig:examples_pd1}
+\end{figure}
+\section{Breakdown computational cost}
+Overall, reproducing all our experiments in the main paper requires approximately 163 CPU days and 60 GPU hours on our systems (GPU: NVIDIA (R) GeForce (R) RTX 2080, CPU: Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz). These costs break down as follows:
+
+\begin{itemize}
+\item \textbf{Section~\ref{sec:exp_prior}} entails 80 CPU days to run all \peakedMCMC\ variants on the 10\,000 sampled curves. The overall prediction time of \pfn\ is negligible (<1 hr for each variant). However, for \pfn, there is an initial training cost, which amounts to approximately 60 GPU hours to train all 27 \pfn\ variants.
+\item \textbf{Section~\ref{sec:exp_real}} requires 80 CPU days to run the MCMC algorithm on the considered real curve benchmarks.
+\item \textbf{Section~\ref{sec:early_stop}} involves a maximum of 3 CPU days to replicate the early stopping results on all the benchmarks for both \pfn\ and the baselines.
+\end{itemize}

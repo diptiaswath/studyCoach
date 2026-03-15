@@ -1,0 +1,1340 @@
+\section{Introduction}
+Machine learning (ML) models are known to leak information about their training data.
+Such leakage can result in attacks that determine whether a specific data point was used to train a given ML model (membership inference)~\citep{shokri2017membership,yeom2018privacy,carlini2022membership}, infer sensitive attributes from the model's training data~\citep{fredrikson2015model,zhang2020secret}, or even (partially) reconstruct that training data from the model~\citep{haim2022reconstructing,salem2020updates}. 
+Therefore, the need to provide privacy guarantees to the individuals who contribute their sensitive data to train ML models is pressing.
+
+
+
+
+Approaches that train models with guarantees of differential privacy~\cite{dwork2008differential} have established themselves as the canonical answer to this need. 
+In the context of ML, differential privacy bounds how much can be learned about any of the individual data point if they were to be included in the training set from which a model is learned.
+Take the canonical example of differentially private stochastic gradient descent (DP-SGD), it updates the model using noisy averages of clipped per-example gradients.
+Unlike vanilla SGD, this ensures that any single training point has a limited influence on model updates (due to the clipping) and that DP-SGD is likely to output a similar model should a single point be added or removed to the training set (due to the noisy average).
+As is the case for any differentially private algorithm, DP-SGD is associated with a privacy budget $\varepsilon$. This budget represents the maximal privacy violation that any user contributing data to the training set is willing to tolerate.
+The lower the budget, the stronger the privacy protection is because outputs of the training algorithm have to be closer for similar training sets.
+
+In this paper, we argue that there is a key limitation when training ML models with DP guarantees: the privacy budget is set uniformly across all training points. 
+This implicitly assumes that all users who contribute their data to the training set have the same expectations of privacy. 
+However, that is not true; individuals have diverse values and privacy preferences~\cite{jensen2005privacy,berendt2005privacy}.
+Because DP-SGD assumes a uniform privacy budget, the budget must match the individual whose privacy expectations are the strongest. 
+That is, $\varepsilon$ has to correspond to the lowest privacy violation tolerance expressed amongst individuals who contributed their data to the training set.
+This of course limits the ability of DP-SGD to learn from this data.
+
+The work that comes closest to providing individualized guarantees for DP-SGD focuses on privacy accounting; the idea is to learn more from points that consume less of the privacy budget over training~\cite{renyi_filter, indi_dpsgd_accounting}. 
+Yet, it has been shown that these points are the ones that already incur a small training loss ~\cite{indi_dpsgd_accounting}.
+Training more on them will not significantly boost the model accuracy.
+Instead, we are the first to propose two modifications of DP-SGD algorithm that allow us to enforce different privacy budgets for each training point.\footnote{In the rest of this paper, we 
+assume without loss of generality that each training point is contributed by a different individual.}
+
+First, our modified sampling mechanism (\nameA) samples data points proportionally to their privacy budgets: points with higher privacy budgets are sampled more frequently during training. 
+It is intuitive that the more a training point is analyzed during training, the more private information can leak about this point.
+Second, with our individualized scaling (\nameB), we rescale the relative noise added to gradients based on the budget specified for each training point.
+In DP-SGD, noise is calibrated to the sensitivity of the algorithm: the larger the clipping norm is, the more noise needs to be added. 
+This is intuitive because gradients with larger norm can encode more information about the training data they were computed over.
+Conversely, we can adapt the amount of noise added to gradients to meet the privacy preference expressed for corresponding training points: less noise is added to gradients computed with higher privacy budgets.
+Given that noise addition in DP-SGD is a mini-batch operation, the absolute scale of noise added cannot be directly adapted for individual data points.
+However, we show in \Cref{sub:individual_clipping} that we can indirectly modify the scale of noise applied to individual gradients by varying the norm to which these individual gradients are clipped. Because clipping is done on a per-example basis, our proposed \nameB approach can then be implemented. 
+
+
+
+
+
+To summarize our contributions:
+\begin{itemize}
+\vspace{-0.1in}
+    \item We introduce two novel individualized variants of the DP-SGD algorithm, where each data point can be assigned its desired privacy budget. 
+    This allows individuals who contribute data to the training set to specify different privacy expectations.
+    We refer to our individualized DP-SGD algorithm as \ours.
+\vspace{-0.05in}
+    \item We theoretically analyze our two mechanisms to derive how privacy parameters (\eg, noise multipliers, sample rates) %
+    should be set to meet individual data points' respective privacy guarantees. 
+\vspace{-0.05in}
+    \item We carry out an extensive empirical evaluation on MNIST, SVHN, and CIFAR10. 
+    Our results are summarized in~\Cref{tab:compare-dpsgd} for the reader's convenience. 
+    They highlight the utility gain of our methods for different distributions of privacy expectations among users.
+ \end{itemize}
+
+\paragraph*{Ethical considerations.} 
+We need to ensure that our individualized privacy assignment does not harm individuals by disclosing too much of their sensitive information.
+We, therefore, suggest implementing our methods in a controlled environment where privacy risks are openly communicated~\citep{xiong2020towards, cummings2021need, franzen2022private}, and where a regulatory entity is in charge of ensuring that even the individuals with lowest expectations regarding their privacy obtain a sufficient degree of protection. 
+We further discuss the ethical deployment of our Individualized DP-SGD (\ours) in \Cref{app:ethics}.
+\section{Background and Related Work}
+\label{sec:background}
+Our work builds upon the DP-SGD algorithm~\citep{abadi2016deep}, thus we first introduce rudiments of differential privacy (DP) and the DP-SGD algorithm required to understand our methods.
+Then, we introduce the concept of individualized privacy, present related work, and outline the differences between individual privacy \textit{assignment} (this work) vs. individual privacy \textit{accounting}.
+\subsection{Differential Privacy and DP-SGD}
+\label{sub:DP}
+
+Algorithm $M$ satisfies $\pmb{(\varepsilon, \delta)}$\textbf{-DP}, if for any two datasets $D, D'\subseteq \mathcal{D}$ that differ in any one record and any set of outputs~$R$
+\begin{align}
+\label{align:dp}
+    \mathbb{P}\left[M(D) \in R\right] \leq e^\varepsilon \cdot \mathbb{P}\left[M(D') \in R\right] + \delta .
+\end{align}
+Since the possible difference in outputs is bounded for any pair of datasets, DP bounds privacy leakage for any individual.
+The value $\varepsilon \in \mathbb{R}_+$ specifies the privacy level with lower values corresponding to stronger privacy guarantees.
+The $\delta \in [0, 1]$ offers a relaxation, \ie, a small probability of violating the guarantees.
+See \Cref{app:dp} %
+for a more thorough introduction of $(\varepsilon, \delta)$-DP.
+
+There exists another relaxation of DP based on the Rényi divergence~\cite{mironov2017renyi}, $\pmb{(\alpha, \varepsilon)}$-RDP, which for the parameters as described above and an order $\alpha \in (1,\infty)$ is defined as follows:
+\begin{align}
+D_\alpha\left(M(D)\|M(D')\right)\leq \varepsilon.
+\end{align}
+
+Due to its smoother composition properties, it is employed for privacy accounting in ML with DP-SGD.
+We can convert from $(\alpha, \varepsilon)$-RDP to $(\varepsilon,\delta)$-DP for any given probability $\delta >0$ as follows~\cite{mironov2017renyi}:
+If $M$ is an $(\alpha, \varepsilon)$-RDP mechanism, it also satisfies $(\varepsilon+\frac{\log 1/\delta}{\alpha-1},\delta)$-DP for any $0<\delta<1$.
+
+
+
+\begin{algorithm}[t]
+	\caption{Differentially Private SGD~\cite{abadi2016deep}}\label{alg:dpsgd}
+	\begin{algorithmic}[1]
+	\REQUIRE Training dataset $\mathcal{D}$ with data points $\{x_1,\ldots,x_N\}$, loss function $l$, learning rate $\eta$, \nm $\sigma$, sampling rate $q$, clip norm $c$, number of training iterations $I$.
+		\STATE{\bf Initialize} $\theta_0$ randomly
+		\FOR{$t \in [I]$}
+		\STATE{\textit{Poisson Sampling}: Sample mini-batch $L_t$ with per-point probability $q$ from $\mathcal{D}$.}\label{lst:line:dpsgd_sample}
+		\STATE{For each $i\in L_t$, compute $g_t(x_i) \gets \nabla_{\theta_t} l(\theta_t, x_i)$}		
+		\STATE{\bf 1. Gradient Clipping}
+		\STATE{$\bar{g}_t(x_i) \gets g_t(x_i) / \max\big(1, \frac{\|g_t(x_i)\|_2}{c}\big)$}\label{alg:dpsgd_clipping}
+		\STATE{\bf 2. Noise Addition}
+		\STATE{$\tilde{g}_t \gets \frac{1}{|L_t|}\left( \sum_i \bar{g}_t(x_i) + \mathcal{N}(0, (\sigma c)^2 \mathbf{I})\right)$}\label{alg:dpsgd_noise}
+		\STATE{ $\theta_{t+1} \gets \theta_{t} - \eta \tilde{g}_t$}
+		\ENDFOR
+		\STATE{\bf Output} $\theta_T$, privacy cost $(\varepsilon, \delta)$ computed using a privacy accounting method.
+	\end{algorithmic}
+\end{algorithm}
+
+\textbf{DP-SGD} extends standard SGD with two additional steps, namely clipping and noise addition.
+Clipping each data point's gradients to a pre-defined \textit{clip norm} $c$ bounds their \textit{sensitivity} to ensure that no data point causes too large model updates.
+Adding noise from a Gaussian distribution, $\mathcal{N}(0, (\sigma c)^2\mathbf{I})$, %
+with zero mean and standard deviation %
+according to the sensitivity~$c$ and a pre-defined \textit{\nm}~$\sigma$ introduces privacy.
+For a formal overview of the DP-SGD algorithm see \Cref{alg:dpsgd}.
+To yield tighter privacy bounds, line 3 in \Cref{alg:dpsgd} implements privacy amplification through subsampling~\cite{beimel2010bounds} where training data points are sampled into mini-batches with a Poisson sampling on the fly,\footnote{As a result, in DP-SGD, the concept of an epoch as a full run over the entire training dataset does not exist in the narrow sense and training duration is measured in \textit{iterations}. 
+Also note that due to the Poisson sampling, training mini-batches can contain varying numbers of data points over different iterations.} rather than assigning each data point from the training dataset to a mini-batch before an epoch starts.
+DP-SGD hence implements a Sampled Gaussian Mechanism (SGM)~\citep{mironov2019r} where each training data point is sampled independently at random without replacement with probability $q \in (0, 1]$.
+The SGM for a sensitivity  of $c=1$, satisfies $(\alpha, \varepsilon)$-RDP where 
+\begin{align}
+\label{align:sgm_privacy}
+   \varepsilon\leq I\cdot 2q^2\frac{\alpha}{\sigma^2}  
+\end{align}
+for $I$ total iterations over the training in standard DP-SGD~\citep{mironov2019r}.
+\Cref{align:sgm_privacy} shows that the privacy guarantee $\varepsilon$ depends on the \nm $\sigma$, the sample rate $q$, the number of training iterations $I$, and RDP order $\alpha$.
+For more background on DP-SGD, see \Cref{app:extended_background}.
+\subsection{Individualized Privacy}
+\label{sub:individual_privacy}
+The topic of individualized privacy is of high importance given that society consists at least of three different groups of individuals, demanding either strong, average, or weak privacy protection for their data, respectively~\cite{jensen2005privacy, berendt2005privacy}.\footnote{Note that our individualized \nameA and \nameB allow for a more fine-grained separation where each data point could, in principle, have their own privacy budget. 
+We demonstrate the flexibility of our methods in \Cref{sub:ablation}.}
+Furthermore, some individuals inherently require higher privacy protection, given their personal circumstances and the degree of uniqueness of their data.
+However, without individualization, when applying DP to datasets that hold data from individuals with different privacy requirements, the privacy level $\varepsilon$ has to be chosen according to the lowest $\varepsilon$ encountered among all individuals, which favors poor privacy-utility trade-offs.
+This is because to obtain DP guarantees according to Definition~\ref{align:dp}, the smaller $\varepsilon$, the more noise needs to be added to decrease the distance between possible outputs---degrading utility.
+
+
+\vspace{-0.1in}
+\paragraph{Prior Mechanisms.}
+Prior work on the implementation of individualized privacy guarantees have mainly focused on standard data analyses without considering ML~\cite{hdp, pdp, partitioning, niu2021adapdp}.
+However, some of the underlying ideas inspired the design of our \ours variants. 
+
+Our \nameA method relies on a similar idea as the \emph{sample mechanism} proposed by~\citet{pdp} which includes different data points in a given data analysis with varying probabilities to implement individual privacy levels.
+Data points with stronger privacy requirements are sampled with a lower probability than data points that agree to contribute more of their information.
+The most significant difference between~\citet{pdp}'s approach (which we note is a form of the widely adopted \textit{Privacy amplification by Subsamling}~\cite{beimel2010bounds} and our approach is that they perform sampling as a pre-processing step independent of the subsequent algorithm.
+In contrast, we perform iterative subsampling within every iteration of our IDP-SGD training. 
+Based on this difference, we could not at all build on the sampling probabilities proposed by~\citet{pdp}. 
+The way how we derive the individual sampling probabilities for our IDP-SGD is, thus, an original contribution of this work. 
+There is no other work that has leveraged the sampling probability of DP-SGD to obtain individual privacy guarantees. 
+
+
+In a similar vein to our \nameB method, \citet{hdp} scale up data points individually before the noise addition to increase their sensitivity in their \emph{stretching mechanism}.
+As a consequence, the signal-to-noise ratios of data points that are scaled with large factors will be higher than the ones of data points that are scaled with small factors.
+In contrast to~\citet{hdp}, we do not scale the data points themselves, but the magnitude of noise added to them relative to their individual sensitivity.
+Thereby, we are the first to observe that data points’ individual clip norms can be used to indirectly scale the noise added to a mini-batch of data in DP-SGD per data point. 
+This approach is novel and one main original contribution of this work.
+
+In the work closest to ours, \citet{iPATE} propose two mechanisms for an individualized privacy assignment within the framework of Private Aggregation of Teacher Ensembles (PATE)~\cite{papernot2016semi}.
+Their \textit{upsampling mechanism} duplicates training data points and assigns the duplicates to different teacher models according to the data points' privacy requirements, while their \textit{weighting mechanism} changes the aggregation of the teachers' predicted labels to reduce or increase the contribution of teachers according to their respective training data points' privacy requirements.
+PATE's approach for implementing ML with DP differs significantly from DP-SGD: PATE relies on training multiple non-DP models on the sensitive data and introducing DP guarantees during a knowledge transfer to a separate release model.
+The approaches for individualized privacy in PATE, therefore, are non-applicable to DP-SGD.
+See \Cref{app:PATE} for details on the PATE algorithm and its individualized extensions.
+
+
+
+
+
+
+\vspace{-0.1in}
+
+\paragraph{Relationship to Individualized Privacy Accounting.}
+In a line of research orthogonal to our work on individualized \textit{privacy assignment}, there exists a separate concept of individualized \textit{privacy accounting}.
+\citet{renyi_filter} introduce \textit{RDP filters} to account for privacy consumption per data point. 
+However, the method is not practical since it assumes batch processing, where the gradient is computed on the whole dataset at once, instead of applying the standard mini-batch processing, where only a small data subset is used to compute the gradient. 
+\citet{pdp_accountant} propose a personalized moments' accountant to compute the privacy loss on a per-sample basis. 
+Finally, 
+\citet{indi_dpsgd_accounting} perform individualized privacy accounting within DP-SGD based on the gradient norms of the individual data points. 
+They find that the privacy guarantee and utility negatively impact each other, which we also observe in our analysis.
+
+While privacy assignment and accounting are concerned with improving privacy-utility trade-offs within DP, they operate under different setups.
+Privacy \textit{accounting} assumes a fixed privacy budget assigned over the whole dataset.
+It tracks individual privacy loss over training, such that data points can be excluded from training once they exceed the global privacy level while other data points can still be used to continue training.
+In contrast, our privacy \textit{assignment} is concerned with enabling different individuals to specify their respective privacy preferences a priori and then puts forward mechanisms to enforce these preferences.
+Since individual accounting and assignment are orthogonal, we show their synergy by applying individual assignment to individual accounting \citep{renyi_filter}, which yields higher model utility than individual accounting alone.%
+\section{Methods}
+\label{sec:method}
+
+We detail our \nameA and \nameB methods, describe how adequate privacy parameters for the individualization can be derived from the privacy budget distribution within the model's training dataset, and provide a theoretical analysis of our methods' respective privacy accounting.
+\subsection{Formalizing Individualizing Privacy}
+Given a training dataset $\mathcal{D}$ with points $\{x_1,\ldots,x_N\}$ which each have their own privacy budget, we consider data points with the same privacy budget $\varepsilon_p$ together as a \textit{privacy group} $\Gp$.
+This notation is aligned with~\citep{jensen2005privacy, berendt2005privacy} that identified different \textit{groups} of individual privacy preferences within society.
+We denote with $\varepsilon_1$ the smallest privacy budget encountered in the dataset.
+Standard DP-SGD needs to set $\varepsilon = \varepsilon_1$ to comply with the strongest privacy requirement encountered within the data.
+For all $\varepsilon_p, p \in [2,P]$, it follows that $\varepsilon_p > \varepsilon$ and we arrange the groups such that $\varepsilon_p > \varepsilon_{p-1}$.
+
+Following~\cite{pdp}, our methods aim at providing data points $x_i \in \Gp$ with individual DP guarantees according to their privacy budget $\varepsilon_p$ as follows: The learning algorithm $M$ satisfies $(\varepsilon_p, \delta_p)$-DP if for all datasets $D \overset{x_i}{\sim} D'$ which differ only in $x_i$ and for all outputs $R \subseteq \mathcal{R}$
+\begin{align}
+\label{eq:DP_guarantee}
+    \mathbb{P}\left[M(D) \in R\right] \leq e^{\varepsilon_p} \cdot \mathbb{P}\left[M(D') \in R\right] + \delta_p \, .
+\end{align}
+
+The key difference between \Cref{eq:DP_guarantee} and the standard definition of DP (\Cref{align:dp}) does not lie in the replacement of $\varepsilon$ with $\varepsilon_p$. Instead, the key difference is about the definition of neighboring datasets. 
+For standard DP, neighboring datasets are defined as $D \sim D'$ where $D$ and $D’$ differ in any random data point (given that it is standard DP, every data point has privacy $\varepsilon$). In contrast, in our work, following~\cite{pdp} the neighboring datasets are defined as $D \overset{x_i}{\sim} D'$ where $D$ and $D’$ differ in any specific but random data point $x_i$ which has a privacy budget of $(\varepsilon_p, \delta_p)$. This yields to the individualized notion of DP.
+
+We formalize the relationship between the individualized notion of DP (which we denote by $(\{\varepsilon_1, \varepsilon_2, \dots, \varepsilon_P\}, \delta)$-DP) and standard $(\varepsilon, \delta)$-DP. 
+For brevity, we omit the $\delta$ in the following.
+
+\begin{theorem}
+A learning algorithm $M$ that satisfies $\varepsilon_1$-DP also satisfies  $\{\varepsilon_1, \varepsilon_2, \dots, \varepsilon_P\}$-DP.
+\end{theorem}
+
+\begin{proof}
+First note that $\varepsilon_1$-DP can be considered as a special case of $\{\varepsilon_1, \varepsilon_2, \dots, \varepsilon_P\}$-DP, where $\forall p \in [1,P]$ $\varepsilon_p=\varepsilon_1$.
+We can, hence apply \Cref{eq:DP_guarantee} and see that an $M$ that satisfies $\varepsilon_1$-DP has a privacy guarantee of $\mathbb{P}\left[M(D) \in R\right] \leq e^{\varepsilon_1} \cdot \mathbb{P}\left[M(D') \in R\right]$.
+Given that by our definition $\forall p \in [2, P]$ it holds that $\varepsilon_p > \varepsilon_1$, for all $p$, it holds that $\mathbb{P}\left[M(D) \in R\right] \leq e^{\varepsilon_1} \cdot \mathbb{P}\left[M(D') \in R\right] \leq e^{\varepsilon_p} \cdot \mathbb{P}\left[M(D') \in R\right]$.
+From this inequality, it follows that M also satisfies $\{\varepsilon_1, \varepsilon_2, \dots, \varepsilon_P\}$-DP.
+\end{proof}
+
+\begin{theorem}
+A learning algorithm $M$ that satisfies $\{\varepsilon_1, \varepsilon_2, \dots, \varepsilon_P\}$-DP also satisfies $\varepsilon_P$-DP.
+\end{theorem}
+
+\begin{proof}
+Analogous to the previous proof, by our definition, it holds that $\forall p \in [1, P-1]$ the $\varepsilon_p < \varepsilon_P$.
+From an $M$ that satisfies $\{\varepsilon_1, \varepsilon_2, \dots, \varepsilon_P\}$-DP, it, therefore, holds that for all $p$ the $\mathbb{P}\left[M(D) \in R\right] \leq e^{\varepsilon_p} \cdot \mathbb{P}\left[M(D') \in R\right] \leq e^{\varepsilon_P} \cdot \mathbb{P}\left[M(D') \in R\right]$.
+This inequality shows that $M$ satisfies $\varepsilon_P$-DP.
+\end{proof}
+\subsection{Individualized Privacy Preferences and Parameters}
+Following~\cite{hdp}, we argue that the individuals' privacy preferences should be kept private to prevent leakage of sensitive information. 
+If there is a necessity to release them, it should be done under the addition of noise to obtain DP guarantees for the privacy budgets themselves. This can for instance be done through a smooth sensitivity analysis, as done in prior work, \eg~\cite{papernot2018scalable}.\footnote{In general, we find that it is not necessary to release the privacy budgets: To implement \ours, only the party who trains the ML model on the individuals’ sensitive data needs to know their privacy budgets to set the respective privacy parameters accordingly during training. Given that this party holds access to the data itself, this does not incur any additional privacy disclosure for the individuals. Other parties then only interact with the final private model (but not with the individuals’ sensitive data or their associated privacy budgets).} 
+
+
+
+
+From the individual privacy preferences and the total given privacy distribution over the data, \ie, the number of different privacy budgets $P$, their values $\varepsilon_p$, and the sizes of the respective privacy groups $|\Gp|$, we derive individual privacy parameters such that all data points within one privacy group (same privacy budget) obtain the same privacy parameters, and such that all privacy groups are expected to exhaust their privacy budget at the same time, after $I$ training iterations. %
+
+The individualized parameters for our \nameA are the individual sample rates $\qqs$, and a respective \nm $\sigs$---common to all privacy groups---which we derive from the privacy budget distribution as described in \Cref{sub:individual_sampling}.
+In \nameB the individualized parameters are individual noise multipliers $\sigss$ with their respective clip norms $\ccs$, as we explain in \Cref{sub:individual_clipping}.
+Individual bounds per privacy group are depicted in \Cref{tab:guarantees}. 
+We omit $\alpha$ from  consideration since its optimal value is selected as an optimization parameter when converting from RDP to $(\varepsilon,\delta)$-DP.
+
+\addtolength{\tabcolsep}{-2.0pt} 
+\begin{table}
+  \caption{
+  \textbf{(Individualized) Privacy Bounds.} We depict the dependence of our methods' privacy bounds on the individualized parameters.
+  While in \nameA, privacy of group $\Gp$ depends on their individual sample rate \blue{$q_p$} and the overall \nm \blue{$\sigs$}, in \nameB, individual privacy of each group depends on their individual \nm \blue{$\sigma_p$}.
+  }
+  \label{tab:guarantees}
+  \begin{sc}
+  \begin{center}
+  \small
+  \new{
+  \begin{tabular}{ccccc}
+    \toprule
+    \textbf{DP-SGD} &&  \nameA && \nameB\\ 
+    \midrule
+    $\varepsilon\leq I\cdot 2q^2\frac{\alpha }{\sigma^2}$&& $\varepsilon_p\leq I\cdot 2{\blue{q_p}}^2\frac{\alpha }{\blue{\sigs}^2}$ && $\varepsilon_p\leq I\cdot 2q^2\frac{\alpha }{\blue{\sigma_p}^2}$\\
+    \bottomrule
+  \end{tabular}
+  }
+  \end{center}
+  \end{sc}
+\vspace{-4pt}
+\end{table}
+\addtolength{\tabcolsep}{2pt}
+\subsection{\nameA}
+\label{sub:individual_sampling}
+
+\begin{algorithm}[t]
+	\caption{\textbf{Finding \nameA Parameters.} The subroutine \textit{getSampleRate} is equivalent to Opacus' function get\_noise\_multiplier~\cite{opacusNoise}. 
+    We sketch its implementation in \Cref{alg:getSampleRate} in \Cref{app:algos}.
+ }\label{alg:sampling}
+	\begin{algorithmic}[1]
+	\REQUIRE Per-group target privacy budgets $\{\varepsilon_1,\dots,\varepsilon_P\}$, target $\delta$, iterations $I$, number of total data points $N$ and per-privacy group data points $\{|\mathcal{G}_1|,\dots,|\mathcal{G}_P|\}$.%
+    \STATE{{\bf init} $\sigs$:} $\sigs \gets \sigma$ 
+    \STATE{{\bf init} $\qqs$ where for $p\in [P]$:\\ $q_p \gets$ getSampleRate($\varepsilon_p, \delta, \sigs, I$)}
+    \WHILE{$q \not\approx \sum_{p=1}^{P} \frac{|G_p|}{N} q_p$}
+    \STATE{$\sigs \gets s_i \sigs$} \COMMENT{scaling factor: $s_i < 1$}
+    \STATE{{\bf for} $p \in [P]$: \\ $q_p \gets$ getSampleRate($\varepsilon_p, \delta, \sigs, I$)}
+    \ENDWHILE
+    \STATE{\bf Output} $\sigs, \qqs$
+	\end{algorithmic}
+\end{algorithm}
+
+Our \nameA method relies on sampling data points with different sample rates $\qqs$ depending on their individual privacy budgets. In this case, the \nm $\sigs$ is fixed.
+Data points with higher privacy budgets (weaker privacy requirements) are assigned higher sampling rates than those with lower privacy budgets.
+This modifies the Poisson sampling in line~3 of \Cref{alg:dpsgd} for DP-SGD to sample data points with higher privacy budgets within more training iterations.
+
+
+
+
+\vspace{-0.1in}
+\paragraph{Deriving Parameters.}
+
+To preserve the optimal training mini-batch size $B$---found through initial hyperparameter tuning on DP-SGD---we have to find $\qqs$, such that their weighted average equals $q$: $\sum_{p=1}^P \frac{|\Gp|}{N} q_p\overset{!}{=}q = \frac{B}{N}$.
+This asserts that the Poisson sampling (line~3 in \Cref{alg:dpsgd}) will yield mini-batches of size $B$ in expectation.\footnote{
+We discuss in \Cref{app:extended_sampling} other alternatives to implement \nameA if we allow changing the \textit{training} hyperparameters.}
+We also need to ensure that the privacy budgets of all groups will exhaust after $I$ training iterations, which we do by deriving the adequate $\sigs$, shared across all privacy groups.
+\Cref{align:sgm_privacy} highlights that the final privacy budget $\varepsilon$ depends on both sample rate $q$ and \nm $\sigma$.
+Our \nameA method enables higher individualized privacy budgets for the different groups than the standard DP-SGD $\varepsilon$.
+Yet, we still require the expected sampling rate to remain $q$.
+Hence, the value of $\sigs$ has to be decreased in comparison to the initial default $\sigma$.
+As an effect of this noise reduction, \nameA improves utility of the final model. 
+
+Our concrete derivation of values for $\sigs$ and $\qqs$ is presented in~\Cref{alg:sampling}.
+We start from initializing $\sigs$ with $\sigma$ from standard DP-SGD, the \nm required for the privacy group $\mathcal{G}_1$ (strongest privacy requirement of all groups) with the smallest privacy budget $\varepsilon_1$.
+This corresponds to instantiating $\sigs$ with the upper bound noise over all privacy groups. 
+Then, we use a \textit{getSampleRate} function that derives the sampling rate for the given privacy parameters based on approximating \Cref{align:sgm_privacy}. 
+Then, we iteratively decrease $\sigs$ by a scaling factor $s_i$ slightly smaller than 1 and recompute $\qqs$ until their weighted average is (approximately) equal to $q$.
+In \Cref{app:proofs_sample}, we present the formal proof that \nameA satisfies $(\varepsilon_p, \delta_p)$-DP.
+Our proof relies on~\citet{mironov2019r} and their numerically stable computation of privacy guarantees.
+We use their method to derive individual sampling rates and noise multiplier prior to training directly such that in the given number of iterations $I$, the individual privacy guarantees $(\varepsilon_p, \delta_p)$ will be reached.
+\subsection{\nameB}
+\label{sub:individual_clipping}
+
+\begin{algorithm}[t]
+	\caption{\textbf{Finding \nameB Parameters.} The subroutine \textit{getNoise} corresponds to Opacus' function get\_noise\_multiplier~\cite{opacusNoise}.
+ We sketch its implementation in \Cref{alg:getNoiseMultiplier} in \Cref{app:algos}.
+ }\label{alg:clipping}
+	\begin{algorithmic}[1]
+	\REQUIRE Per-group target privacy budgets $\{\varepsilon_1,\dots,\varepsilon_P\}$, target $\delta$, iterations $I$, number of total data points $N$ and per-privacy group data points $\{|\mathcal{G}_1|,\dots,|\mathcal{G}_P|\}$, default clip norm $c$, sample rate $q=B/N$
+ \STATE{{\bf init} $\sigss$ where for $p\in [P]$:\\ $\sigma_p \gets$ getNoise($\varepsilon_p, \delta, q, I$)}
+ \STATE{{\bf init} $\sigc$:} $\sigc \gets  (\sum_{p=1}^{P} \frac{|\Gp|}{N\sigma_p})^{-1}$ \COMMENT{see derivation of $\sigc$ in \Cref{app:method-scaling}}
+ \STATE{{\bf for} $p \in [P]$: \\ $c_p \gets \frac{\sigc c}{\sigma_p}$ }
+ \STATE{\bf Output} $\sigc, \ccs$
+	\end{algorithmic}
+\end{algorithm}
+
+Our \nameB method adjusts the individual noise multipliers $\sigss$ according to data points' individual privacy budgets and performs clipping with individualized clip norms $\ccs$.
+This changes lines~6 and~8 in~\Cref{alg:dpsgd}.
+Data points with lower privacy budgets (weaker privacy requirements) obtain lower noise and higher clip norms.
+Since \Cref{align:sgm_privacy} highlights that the clip norm $c$ has no direct impact on the obtained $\varepsilon$, individualized privacy in \nameB results from the individual noise multipliers $\sigss$.
+Utility gains come from the overall increase in the signal-to-noise ratio during training. 
+
+\paragraph{Deriving Parameters.}
+While the ultimate goal of our \nameB method is to adapt individual noise multipliers per privacy group, we cannot implement this directly without degrading training performance.
+The reason is that whereas in DP-SGD sampling and gradient clipping are performed on a per-data point basis, noise is added per mini-batch, see lines 3, 6 and 8 in \Cref{alg:dpsgd}, respectively.
+However, if we restrict mini-batches to contain only data points from the same privacy group (which share the same \nm), we lose the gains in privacy-utility trade-offs which result from the subsampling (see \Cref{app:per_point_noise} for more details).
+Hence, while we rely on mini-batches containing data points with different privacy requirements (\ie, different noise multipliers) we can only specify one fixed \nm~$\sigc$.%
+
+To overcome this limitation, we do not set noise multipliers $\sigss$ directly, but indirectly obtain them through individualized clip norms $\ccs$ as follows:
+In standard DP-SGD, \Cref{alg:dpsgd}, a gradient clipped to $c$ (line 6) obtains noise with standard deviation $\sigma c$ (line 8). %
+For \nameB, we clip gradients to $c_p=s_pc$ with a per-privacy group scaling factor $s_p$ %
+and they obtain noise $\sigma_p c_p$.
+But in practice, we add noise according to $\sigc c$ to all mini-batches. 
+Hence, the effective scale $\sigma_p$ of added noise is $\sigc c = \sigc \frac{c_p}{s_p} \overset{!}{=} \sigma_p c_p\Rightarrow \sigma_p=\frac{1}{s_p}\sigc$.
+For data points with higher privacy budgets $s_p > 1$, so their gradients are clipped to larger norms $c_p=s_pc$ and a smaller \nm $\sigma_p=\frac{1}{s_p}\sigc$ is assigned to them. The opposite is true for data points with lower privacy budgets.
+
+We find the $\sigma_p$-s required to obtain each privacy groups' desired $\varepsilon_p$ using the \textit{getNoise} function (see \Cref{alg:clipping} line 1), which takes as inputs the privacy parameters $\varepsilon_p, \delta, q, I$.
+To optimize utility, we want to set the individual clip norms such that their average over the dataset corresponds to the best clip norm $c$ obtained through initial hyperparameter tuning: $\sum_{p=1}^P \frac{|\Gp|}{N} c_p\overset{!}{=}c$.
+Given the interdependence of $c_p$, $\sigma_p$, and $\sigc$ ($c_p = c\frac{\sigc}{\sigma_p}$), this can be achieved by setting $\sigc$ as the inverse of the weighted average over all $1/\sigma_p$ as: $\sigc = (\sum_{p=1}^{P} \frac{|\Gp|}{N\sigma_p})^{-1}$ (please see~\Cref{app:method-scaling} for the derivation of $\sigc$). 
+Given $\sigc$, the required $\sigma_p$-s, and $c$ found through hyperparamter tuning, the individual clip norms are calculated as $c_p = \frac{\sigc c}{\sigma_p}$.
+We detail the derivation of the parameters in \Cref{alg:clipping}.
+In \Cref{app:proofs_scale}, we formally show that \nameB satisfies $(\varepsilon_p, \delta_p)$-DP.
+\section{Empirical Evaluation}
+\label{sec:experiments}
+
+
+
+For our empirical evaluation, we implement our methods in Python 3.9 and extend standard Opacus with our individualized privacy parameters and a per-privacy group accounting.
+We perform evaluation on the MNIST~\cite{MNIST}, SVHN~\cite{SVHN}, and CIFAR10~\cite{CIFAR10} dataset, using the convolutional architectures from \citet{tramer2020differentially}.
+To evaluate the utility of our methods, we use the datasets' standard train-test splits and report test accuracies.
+The training and standard DP-SGD and \ours hyperparameters are specified in \Cref{tab:hyperparameters} and \Cref{tab:hyperparameters_individual} in \Cref{app:experiments}, respectively where the \nm $\sigma$ is derived with the function  \code{get_noise_multiplier} provided in Opacus~\cite{opacusNoise}. It takes in as arguments the specified parameters $\delta, q, I$, and target $\varepsilon$.
+For experimentation on individualized privacy,  we assigned privacy budgets randomly to the training data points if not indicated otherwise.
+\subsection{Utility Improvement Through Individualization}
+\label{sub:results_utility}
+
+\addtolength{\tabcolsep}{0.0pt} 
+\begin{table}[t]
+  \caption{\textbf{Model Test Accuracy after training with Standard DP-SGD vs our Individualized DP-SGD} using \nameA or \nameB. %
+  \textbf{D} is the distribution of privacy groups (percentages) and $\pmb{\varepsilon}$ the privacy budget for a given group. 
+  The percentages of the three privacy groups are chosen according to~\citet{hdp} (first setup) and~\cite{upem} (second setup). 
+  Additional hyperparameters are found in \Cref{tab:hyperparameters} and \Cref{tab:hyperparameters_individual}.
+  We report the standard deviation over 10 trials.
+  }
+  \vspace{-0ex}
+  \label{tab:compare-dpsgd-individual}
+  \begin{sc}
+  \begin{center}
+  \scriptsize
+  \begin{tabular}{cccccc}
+    \toprule
+    \textbf{Dataset} & \multicolumn{2}{c}{\textbf{Setup}} & \textbf{DP-SGD} & \textbf{\nameA} & \textbf{\nameB} \\
+    \hline
+    \multirow{4}{*}{MNIST} & \textit{\textbf{D}} & \textit{34\%-43\%-23\%} & 96.75  & \textbf{97.81} & 97.78 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.15  & $\pm$\textbf{0.09} & $\pm$0.08 \\
+    \cdashlinelr{2-6}
+    & \textit{\textbf{D}} & \textit{54\%-37\%-9\%} & 96.75  & \textbf{97.6} & 97.54 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.15  & $\pm$\textbf{0.11}  & $\pm$0.09 \\
+    \hline
+    \multirow{4}{*}{SVHN} & \textit{\textbf{D}} & \textit{34\%-43\%-23\%} & 83.26 & \textbf{85.89} & 85.57 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.31  & \textbf{$\pm$0.14} & $\pm$0.24\\
+    \cdashlinelr{2-6}
+    & \textit{\textbf{D}} & \textit{54\%-37\%-9\%} & 83.26 & \textbf{85.14} & 85.08 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.31 & \textbf{$\pm$0.30} & $\pm$0.12 \\
+    \hline
+    \multirow{4}{*}{CIFAR10} & \textit{\textbf{D}} & \textit{34\%-43\%-23\%} & 52.77 & 57.86  & \textbf{58.03} \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.65 & $\pm$0.56 & \textbf{$\pm$0.36} \\
+    \cdashlinelr{2- 6}
+    & \textit{\textbf{D}} & \textit{54\%-37\%-9\%} & 52.77  & \textbf{56.83} & 56.65 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.65  & \textbf{$\pm$0.39} & $\pm$0.49 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \end{sc}
+\vspace{-0.2in}
+\end{table}
+\addtolength{\tabcolsep}{0.0pt} 
+
+
+
+Assigning heterogeneous individual privacy budgets over the training dataset yields significant improvements in terms of the resulting model's utility, as showcased in \Cref{tab:compare-dpsgd-individual}.
+For example, by following the privacy budget distribution of~\citet{hdp} with privacy budgets $\varepsilon_p=\{1,2,3\}$ for strong, medium, and weak privacy requirements, our \nameA method yields accuracy improvements of 1.06\%, 2.63\%, and 5.09\% on MNIST, SVHN, and CIFAR10, respectively.
+On the CIFAR10 dataset, our \nameB even outperforms improvement with an accuracy increase of 5.26\% in comparison to the non-individualized baseline, which would have to assign $\varepsilon=1$ to the whole training set in order to respect each individual's privacy preferences.
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.5\textwidth, trim={1.5cm 0 1.5cm 1.0cm}]{figures/advantage_mnist.pdf}
+    \caption{
+    \textbf{Comparison of \ours to DP-SGD.} 
+    We report the test accuracy on MNIST over training for our \nameA and \nameB methods with privacy budget distributions according to~\citep{hdp} ($34\%,43\%,23\%$) and~\citep{upem} ($54\%,37\%,9\%$), and the respective privacy budgets of $\varepsilon=\{1, 2, 3\}$.
+    }   
+    \label{fig:advantage_MNIST}
+\end{figure}
+\setlength{\textfloatsep}{10pt plus 1.0pt minus 2.0pt}
+
+The benefits of our individualized privacy assignment become clear in \Cref{fig:advantage_MNIST}, which depicts the test accuracy of our \nameA and \nameB over the course of training.
+Both our methods continuously outperform the non-individualized baseline with $\varepsilon=1$.
+Additionally, the test accuracy with privacy budget distribution according to~\citet{hdp} ($34\%,43\%,23\%$) is higher than the one of~\citet{upem} ($54\%,37\%,9\%$). This can be explained by the fact that in this latter distribution, more individuals exhibit a higher privacy preference.
+With more data points choosing lower privacy protection as in~\citet{hdp}, our individualization boosts the performance of the final trained model more significantly.
+For comparison, we also report results for the standard DP-SGD with $\varepsilon=3$. This corresponds to the upper bound on utility that could have been achieved by assigning the highest privacy budget to all data points---which violates the privacy requirements of individuals with strong and medium privacy preferences.
+We observe that our individualized methods' performance is close to this upper bound without violating data points' privacy requirements. 
+
+
+We report the final individualization parameters  (noise multipliers, clip norms, and sampling rates) obtained through our methods for the given training hyperparameters from \Cref{tab:hyperparameters} and our privacy budget distributions in \Cref{tab:individualization_parms} in \Cref{app:experiments}.
+\Cref{fig:privacy_spending} in \Cref{app:experiments} highlights that our parameter derivation is well calibrated: it exhausts different groups' budget simultaneously when the targeted number of iterations is reached.
+In \Cref{app:alternative_baselines}, we discuss other possible baselines (apart from DP-SGD) and empirically evaluate our individualized methods against them.
+\subsection{General Applicability of our Methods}
+\label{sub:ablation}
+
+We showcase the practical impact of individual privacy assignments on individual utility and demonstrate how our methods extend to many privacy groups and privacy budget distributions. 
+We run experiments on the CIFAR10 dataset where we assign higher or lower privacy budgets to one of the 10 classes. 
+We select all data points from the class 0 as the first privacy group and assign to it either higher ($\varepsilon=3$), the same ($\varepsilon=2$), or lower ($\varepsilon=1$) privacy budgets in comparison to all other data points from the other classes ($\varepsilon=2$). 
+\Cref{tab:bias} shows that the choice of privacy budget for a single group also impacts the other groups.
+We observe that by only changing the privacy budget for the selected group (in this case for class 0), we can flip its performance (its accuracy from being higher to being lower) in comparison to the accuracy of the other group (consisting of remaining classes). For the group consisting of class 0, if we select stronger privacy requirements (lower value of $\varepsilon$), its accuracy degrades, and the accuracy of the other group increases. In the opposite case, when less privacy is required for group 0, its utility grows while the utility of the other group drops.
+We also visualize this trend in \Cref{fig:CIFARheatmap} in \Cref{sec:ablation_study}.
+In \Cref{tab:10groups} (\Cref{sec:ablation_study}), we show how our method can even be applied to cases with substantially more privacy groups which all have different privacy budgets.  
+We manually tune the individual privacy budgets for ten privacy groups, corresponding to the ten classes of the CIFAR10 dataset, such that the accuracy gap between the privacy groups is minimized.
+
+\addtolength{\tabcolsep}{-1.2pt} 
+\begin{table}[t]
+ \caption{\textbf{Accuracy of Subgroups for Different Privacy Budgets.} Full results are shown in \Cref{tab:bias-full} in \Cref{sec:ablation_study}.
+ }
+    \label{tab:bias}
+    \scriptsize
+    \begin{center}
+    \begin{tabular}{cccc}
+    \toprule
+        \multirow{2}{*}{Classes}  & \multicolumn{3}{c}{Privacy Budget} \\ 
+        \cmidrule{2-4}
+         & Higher ($\varepsilon=3$) & Same ($\varepsilon=2$) & Lower ($\varepsilon=1$) \\
+         \cmidrule{1-4}
+         \textbf{0} & \textbf{67.76 $\pm$ 2.14} & $55.24 \pm 1.98$ & $25.76 \pm 2.52$ \\
+         \cdashlinelr{1-4}
+         1-9 & $53.41 \pm 2.2$ & $54.72 \pm 2.49$ & \textbf{56.58 $\pm$ 2.29} \\
+   \bottomrule
+\vspace{-0.1in}
+
+\end{tabular}
+\end{center}
+\end{table}
+\addtolength{\tabcolsep}{1.2pt}
+
+
+
+
+
+
+
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.4\textwidth, trim={0cm 0 0cm 1.5cm}]{figures/roc_curve_per_group_logits_sampling.pdf} 
+    \caption{\textbf{True-Positive rate vs. False-Positive Rate of Lira Membership Inference Attacks Per Privacy-Budget.} We depict the risk for membership inference (MI) according to individual data points' privacy preferences. 
+    Data points with higher privacy guarantees have a decreased risk for MI.
+    }
+\vspace{-0.in}
+    \label{fig:lira-main}
+\end{figure}
+\subsection{Privacy Assessment via Membership Inference}
+\label{sub:membership_inference}
+
+To evaluate the impact of our \ours on the privacy of individual data points, we perform membership inference based on the Lira attack~\cite{carlini2022membership}.
+Lira proceeds in three steps to determine which data points from a dataset $\mathcal{D}=\{x_1, \dots, x_N\}$ were used to train a target model $f$:
+(1)~First, multiple shadow models, similar to $f$, are trained on different subsets of $\mathcal{D}$.
+(2)~Then, the mean and variance of two loss distributions $\mathcal{N}(\mu_{\text{in}}, \sigma_{\text{in}})$ and $\mathcal{N}(\mu_{\text{out}}, \sigma_{\text{out}})$ are estimated per data point $x_i$.
+Both distributions are calculated from the logits of $x_i$ at the target class $y_i$---the former one over the shadow models that $x_i$ is a member of, the latter one on shadow models that $x_i$ is not a member of.
+(3)~Finally, the likelihood of a new data point $x$ of class $y$ being a member of the target model $f$ is calculated as $\Lambda = \frac{p(f(x)_{y}\ \mid\ \mathcal{N}(\mu_{\text{in}}, \sigma^2_{\text{in}}))}{p(f(x)_{y}\ \mid\ \mathcal{N}(\mu_{\text{out}}, \sigma^2_{\text{out}}))}$.
+
+
+We experiment with CIFAR10. We train 512 shadow models and the target model using \nameA on different subsets of 25,000 training data points each. 
+Results for \nameB can be found in \Cref{sec:mia-appendix}.
+The privacy budgets are set to $\varepsilon=10$ and $\varepsilon=20$ and evenly assigned to  the shadow models' training data, resulting in 12,500 training data points per privacy budget.
+Our target model achieves a train accuracy of 68.46\% on its 25,000 member data points, and a test accuracy of 64.89\% on its 25,000 non-member data points.
+The lower accuracy in comparison to~\citet{carlini2022membership}, who achieved 100\% and 92\% train and test accuracy respectively, results from us introducing DP to the training of the shadow models. Learning with DP is known to reduce model performance, particularly so on small datasets.
+
+We depict the membership inference risk of the target model's training data per privacy budget in \Cref{fig:lira-main}.
+The dotted blue line represents the ROC curve for Lira over all CIFAR10 data points and shows that overall, as expected by its definition, DP protects the training data well against membership inference attacks. 
+However, when inspecting the ROC curve separately for the two privacy groups ($\epsilon=10$ and $\epsilon=20$), we observe a significant difference between them. 
+The privacy group with stronger privacy guarantees ($\epsilon=10$) is protected better (AUC$=0.537$) than the group with the higher privacy budget ($\epsilon=20$, AUC$=0.581$).
+To evaluate whether the difference in the Lira-likelihood scores between the two privacy groups is statistically significant, we perform a Student t-test on the likelihood score distributions over the data points with privacy budget $\epsilon=10$ vs. the data points with privacy budget $\epsilon=20$.
+We report $\Delta=2.54$ with $p=0.01<0.05$, 
+and hence a statistically significant difference between the two groups exists.
+
+Experimental results for additional target models and  detailed per-target model statistics are presented in \Cref{fig:lira-5-appendix} and \Cref{tab:p_values} in \Cref{sec:mia-appendix}.
+These results highlight that the individual privacy assignment of our \ours approach has a practical impact: it indeed protects data points with different levels of privacy budget to different degrees.
+\section{Comparison to Other Methods}
+We first compare against Individualized PATE~\cite{iPATE} (\ipate), so far, the only other work aiming at enabling individual privacy assignment in ML.
+Then, we study the benefit of combining our individualized privacy assignment through \ours with individualized privacy accounting~\citep{renyi_filter}.
+\subsection{Comparison to Prior Work}
+\label{sub:comparison_PATE}
+
+We compare against Individualized PATE~\cite{iPATE} (\ipate), the only other work aiming at enabling individual privacy assignment in ML.
+See details of their method and the general PATE framework in \Cref{app:PATE}.
+For the comparison, we report the student model accuracies of \ipate for the MNIST, SVHN, and CIFAR10 datasets.
+The results are presented in~\Cref{tab:compare_iPATE} in \Cref{app:comparisonPATE}.
+We observe that \ours constantly outperforms \ipate with the same privacy budget assignment.
+\subsection{Individualized Privacy Accounting and Assignment}
+\label{sub:assignment+accounting}
+
+
+\addtolength{\tabcolsep}{-2pt} 
+\begin{table}[t]
+  \caption{
+  \textbf{Comparison between standard DP-SGD, individual accounting, and individual accounting+assignment.} 
+  We present the test accuracy (\%) on MNIST for training with $\varepsilon=0.3$ for standard DP-SGD and individual accounting~\cite{renyi_filter}, while setting $\varepsilon=0.30$ and $\varepsilon=0.31$ for half of the points each when using individual accounting and assignment.
+  Combining individualized privacy accounting and assignment further increases utility.
+  }
+  \label{tab:compare-dpsgd2}
+  \begin{sc}
+  \begin{center}
+  \small
+  \new{
+  \begin{tabular}{ccc}
+    \toprule
+    Vanilla & Individual & Individual Accounting\\
+    DP-SGD & Accounting & and Assignment \\
+    \hline
+    93.29 $\pm$ 0.49 & 93.64 $\pm$ 0.46 & 94.16 $\pm$ 0.23 \\
+    \bottomrule
+  \end{tabular}
+  }
+  \end{center}
+  \end{sc}
+\end{table}
+\addtolength{\tabcolsep}{2pt} 
+
+
+
+The main goal behind individualized accounting is to obtain tighter privacy analysis (recall our discussion in Section~\ref{sub:individual_privacy}). Instead of tracking a single privacy loss estimate across all data points, an individual privacy loss is kept track of for each data point. 
+\citet{renyi_filter} defines a new individual privacy filter, which drops data points that exceed the individualized privacy loss from further processing. However, the same privacy budget is assigned to each data point. The individual assignment of a privacy budget to each data point is a natural extension of individualized accounting and can be directly incorporated into this framework. Therefore, a given data point has its own privacy filter and is dropped from the analysis once the filter indicates that the data point's privacy budget is exhausted. 
+
+\begin{figure}[t]
+    \centering
+    \subfloat[Individual Accounting]{\includegraphics[scale=0.24]{figures/active_points.pdf}}%
+        \qquad
+    \subfloat[Individual Accounting plus Assignment]{\includegraphics[scale=0.24]{figures/active_points-individual.pdf}}%
+    \caption{\textbf{Active Points for Individual Accounting vs Individual Accounting+Assignment.} Integrating individual privacy assignment (b) allows us to train longer on more active data points compared to pure individual accounting~(a).}
+    \label{fig:individual_accounting}
+\end{figure}
+
+We combine the individual accounting approach of~\citet{renyi_filter} with our method for individual assignment. In the initial experiments for individual accounting, the same privacy budget of $0.3$ is assigned to all 60,000 training data points in MNIST, following the experimental setup by~\citet{renyi_filter}. We enable the individual privacy assignment and change the privacy values to $\varepsilon=0.3$ for the first half of the points and $\varepsilon=0.31$ for the second half.
+We empirically observe that in this low-$\varepsilon$ regime, such a small change is enough to cause significant differences in training and the final model.
+In~\Cref{fig:individual_accounting}, we present the number of active data points used during training. We find that many data points are used longer during training with individualized assignment compared to using only individualized accounting. This is because the data points with a higher privacy budget exhaust it later and can be used longer. 
+The effect results in a utility increase in comparison to DP-SGD or pure individual accounting, see \Cref{tab:compare-dpsgd2}. Note that the differences in accuracy reported for standard DP-SGD on MNIST between \Cref{tab:compare-dpsgd2} and \Cref{tab:compare-dpsgd} differ. This is because of the different privacy budgets 0.3 vs. 1.0.
+            We are only able to run the experiments on MNIST as done in \citet{renyi_filter} since the method is based on batch gradient descent: gradients are computed over the whole dataset at once, which limits its applicability to large and high-dimensional datasets.
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+
+
+
+
+
+
+
+
+Prior work on ML with DP guarantees mainly assigns a uniform privacy budget $\varepsilon$ over the entire dataset.
+This approach fails to capture that different individuals have different expectations towards privacy and also decreases the model's ability to learn from the data.
+To overcome the limitations of a uniform privacy budget and to implement individual users' privacy preferences, we propose two modifications to the popular DP-SGD algorithm. %
+Our \nameA and \nameB mechanisms adapt training to yield individual per-data point privacy guarantees and boost utility of the trained models.
+A potential next step could be to combine our \nameA and \nameB mechanisms to further improve the utility of the trained models through simultaneously fine-tuning over a bigger set of privacy parameters.
+Furthermore, in this work, we limited our considerations to setups where individual users specify their privacy expectations.
+Future work should explore an automated assignment of privacy levels to individual data points based on their actual vulnerability to privacy leakage.
+Finally, we believe that our individualized privacy assignment should be closely integrated with a form of practical individual privacy accounting.
+This could enable us to obtain a fine-grained notion of individualized privacy guarantees that tightly meet the users' expectations.
+\section*{Acknowledgements}
+We would like to acknowledge our sponsors, who support our research with financial and in-kind contributions: Amazon, Apple, CIFAR
+through the Canada CIFAR AI Chair, DARPA through the GARD project, Intel, Meta, NFRF through an Exploration
+grant, NSERC through the COHESA Strategic Alliance, the Ontario Early Researcher Award, and the Sloan Foundation. Resources used in preparing this research were provided,
+in part, by the Province of Ontario, the Government of Canada through CIFAR, and companies sponsoring the Vector
+Institute.
+Christopher Mühl is a team member of the Center for Trustworthy Artificial Intelligence (\href{https://www.zvki.de/}{CTAI}), funded by the German Federal Ministry for the Environment, Nature Conservation, Nuclear Safety and Consumer Protection.
+
+\newpage
+
+\bibliographystyle{plainnat}
+\bibliography{sample-base}
+
+\newpage
+\appendix
+\section{Ethical Considerations of this Work}
+\label{app:ethics}
+The specification of an adequate privacy level $\varepsilon$ is challenging since it does not only depend on the domain but also on the dataset itself.
+This challenge persists when assigning individual privacy levels over a dataset.
+Especially in sensitive domains, one needs to make sure that the assignment of individual privacy guarantees does not pose an additional risk to the individuals whose data is processed.
+Therefore, one needs to first make sure that assigning individual privacy guarantees is not abused. This can occur when the entity training the model violates underlying individuals' privacy by nudging them into choosing inadequate privacy levels.
+Second, one needs to prevent individuals from giving up their privacy due to a lack of understanding or a wrong perception of their risk.
+To do so, \ours should not be used as a stand-alone method.
+Instead, following the example of \cite{iPATE}, we suggest incorporating it into a whole process that involves communicating the functioning of DP and the risks associated with a decision to the individuals, analyzing their preferences, and supporting them in an informed decision-making process.
+There exist a growing body of work on the communication of DP methodology and associated risks to the public~\cite{xiong2020towards, cummings2021need, franzen2022private}. The most recent finding~\cite{franzen2022private} suggests that medical risk communication formats, such as percentages or frequencies, are best applicable to inform about privacy risks.
+For the identification of privacy preferences, existing frameworks, such as~\cite{sorries2021privacy} can be applied.
+Finally, we suggest giving individuals the choice between categorical privacy levels (\eg, \textit{high}, \textit{medium}, \textit{low}) while putting a regulatory entity, such as an ethics committee in charge of specifying concrete numeric values of $\varepsilon$.
+This mitigates the disadvantages of the general limited interpretability of $\varepsilon$ that exist independent of individualization.
+\section{Additional Empirical Evaluation}
+\label{app:experiments}
+
+We report the hyperparameters found for our individualized methods in \Cref{tab:hyperparameters_individual}.
+The training and standard DP-SGD hyperparameters are specified in \Cref{tab:hyperparameters}.
+The performance of our individualized methods when using the hyperparameters of standard DP-SGD is presented in \Cref{tab:compare-dpsgd}.
+Already when using these (non-individually tuned) hyperparameters, our methods yield a significant performance increase in comparison to standard DP-SGD.
+For MNIST, individual hyperparameter for our methods and individual setups did not yield significant improvements, therefore the results presented in \Cref{tab:compare-dpsgd} and \Cref{tab:compare-dpsgd-individual} are identical for MNIST.
+
+\addtolength{\tabcolsep}{-2.0pt} 
+\begin{table}[h!]
+  \caption{
+  \textbf{DP-SGD Hyperparameters.} LR: learning rate, B: expected mini-batch size, I: number of iterations, C: clip norm, $\sigd$: noise multiplier in DP-SGD derived from the desired privacy budget $\varepsilon=1$. Default target $\delta=0.00001$.
+  }
+  \label{tab:hyperparameters}
+  \begin{sc}
+  \begin{center}
+  \small
+  \new{
+  \begin{tabular}{cccccc}
+    \toprule
+    \textbf{Dataset} &  LR & B & I & C & $\sigd$ \\ 
+    \midrule
+    MNIST & 0.6 & 512 & 9375$\sim$80 epochs & 0.2 & 3.42529 \\ %
+    SVHN & 0.2 & 1024 & 2146$\sim$30 epochs&0.9 & 2.74658\\
+    CIFAR10 & 0.7& 1024& 1465$\sim$30 epochs& 0.4 & 3.29346 \\
+    \bottomrule
+  \end{tabular}
+  }
+  \end{center}
+  \end{sc}
+\vspace{-4pt}
+\end{table}
+\addtolength{\tabcolsep}{2pt} 
+
+
+
+\addtolength{\tabcolsep}{-2.0pt} 
+\begin{table}[h!]
+  \caption{
+  \textbf{DP-SGD Hyperparameters (Individually Tuned).} LR: learning rate, B: expected mini-batch size, I: number of iterations, C: clip norm, $\sigd$. Default target $\delta=0.00001$. 
+  Setup A is for privacy budgets $\varepsilon=\{1.0,2.0,3.0\}$ and their respective distribution of \textit{34\%-43\%-23\%}. Setup B is for the same privacy budgets but with their distributions \textit{54\%-37\%-9\%}.
+  }
+  \label{tab:hyperparameters_individual}
+  \begin{sc}
+  \begin{center}
+  \small
+  \new{
+  \begin{tabular}{cccccccc}
+    \toprule
+    \textbf{Dataset} & Method & Setup&  LR & B & I & C & $\sigd$ \\ 
+    \midrule
+    MNIST & \nameA & A & 0.6 & 512 & 9375$\sim$80 epochs & 0.2 & 3.42529 \\ %
+    SVHN & \nameA & A & 0.2 & 1024 & 5723$\sim$80 epochs & 0.6 & 2.53261 \\
+    CIFAR10 & \nameA & A & 0.2& 1024& 2929$\sim$60 epochs& 1.0 & 2.65712 \\
+    \hline
+    MNIST & \nameA & B & 0.6 & 512 & 9375$\sim$80 epochs & 0.2 & 3.42529 \\ %
+    SVHN & \nameA & B & 0.1 & 1024 & 3577$\sim$50 epochs & 0.6 & 2.41421 \\
+    CIFAR10 & \nameA & B & 0.1& 1024& 2929$\sim$60 epochs& 1.8 & 3.14049 \\
+    \hline
+    MNIST & \nameB & A & 0.6 & 512 & 9375$\sim$80 epochs & 0.2 & 3.42529 \\ %
+    SVHN & \nameB & A & 0.1 & 1024 & 3577$\sim$50 epochs & 2.0 & 2.09719 \\
+    CIFAR10 & \nameB & A & 0.2 & 1024 & 3418$\sim$70 epochs& 1.1 & 2.88335 \\
+    \hline
+    MNIST & \nameB & B & 0.6 & 512 & 9375$\sim$80 epochs & 0.2 & 3.42529 \\ %
+    SVHN & \nameB & B & 0.1 & 1024 & 3577$\sim$50 epochs & 1.6 & 2.45703 \\
+    CIFAR10 & \nameB & B & 0.1& 1024& 2929$\sim$60 epochs& 1.8 & 3.17792 \\
+    \bottomrule
+  \end{tabular}
+  }
+  \end{center}
+  \end{sc}
+\vspace{-4pt}
+\end{table}
+\addtolength{\tabcolsep}{2pt} 
+
+
+
+We present the individualized privacy parameters identified for our methods in \Cref{tab:individualization_parms}.
+\addtolength{\tabcolsep}{-2.0pt} 
+\begin{table}[h]
+  \caption{\textbf{Individualization Parameters Computed by our Methods for \Cref{tab:compare-dpsgd}.} 
+  We report the individualized privacy parameters identified for our \nameB and \nameA by \Cref{alg:clipping} and \Cref{alg:sampling}, respectively.
+  The parameters are obtained on the MNIST, SVHN, and CIFAR10 datasets when using the privacy budget distributions of \Cref{tab:compare-dpsgd} with $\varepsilon=\{1.0-2.0-3.0\}$
+  }
+  \label{tab:individualization_parms}
+  \begin{sc}
+  \begin{center}
+  \tiny
+  \begin{tabular}{ccccc|ccc|cc}
+    \toprule
+    \multirow{2}{*}{} & & \multicolumn{3}{c|}{\textbf{DP-SGD}} & \multicolumn{3}{c|}{\textbf{\nameB}} & \multicolumn{2}{c}{\textbf{\nameA}}\\
+    \textbf{Dataset} & \textbf{Setup} & $\pmb{\sigma}$& $\pmb{c} $& $\pmb{q}$ & $\pmb{\sigc}$ & $\pmb{\sigss}$&$\pmb{\ccs}$ &  $\pmb{\sigs}$ & $\pmb{\qqs}$\\
+    \hline
+    \multirow{2}{*}{MNIST} & \textit{34\%-43\%-23\%} & 3.425 &0.2 & 0.008 & 2.063 & \{2.189, 1.310, 1.032\}&\{0.129, 0.216, 0.274\} & 2.024 & \{0.005, 0.009, 0.013\}  \\
+    \cdashlinelr{2-10}
+    & \textit{54\%-37\%-9\%} &3.425 &0.2 & 0.008 & 2.418 & \{2.189, 1.310, 1.032\}&\{0.148, 0.248, 0.315\} & 2.376 & \{0.006, 0.011, 0.016\} \\
+    \hline
+    \multirow{2}{*}{SVHN} & \textit{34\%-43\%-23\%} &2.747&0.9&0.014& 1.896 &\{2.747, 1.589, 1.214\} &\{0.561, 0.970,   1.270\} &1.667 & \{0.008, 0.015, 0.021\}\\
+    \cdashlinelr{2-10}
+    & \textit{54\%-37\%-9\%} &2.747&0.9&0.014& 2.180 & \{2.747, 1.589, 1.214\}&\{0.651, 1.125, 1.472\}& 1.937& \{0.009, 0.018,  0.025\}\\
+    \hline
+    \multirow{2}{*}{CIFAR10} & \textit{34\%-43\%-23\%} &3.293&0.4&0.020& 2.244 & \{3.294, 1.868, 1.399\}&\{0.244, 0.430, 0.574\}& 1.965 & \{0.012, 0.022, 0.031\}\\
+    \cdashlinelr{2- 10}
+    & \textit{54\%-37\%-9\%} &3.293&0.4&0.020& 2.594& \{3.294, 1.868, 1.399\}&\{0.285, 0.502, 0.671\}& 2.300 & \{0.014, 0.026, 0.037\}\\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \end{sc}
+\vspace{-4pt}
+\end{table}
+\addtolength{\tabcolsep}{1.0pt} 
+
+
+
+\addtolength{\tabcolsep}{0.0pt} 
+\begin{table}[t]
+  \caption{\textbf{Model Test Accuracy after training with Standard DP-SGD vs our Individualized DP-SGD} using \nameA or \nameB. %
+  \textbf{D} is the distribution of privacy groups (percentages) and $\pmb{\varepsilon}$ the privacy budget for a given group. 
+  The percentages of the three privacy groups are chosen according to~\citet{hdp} (first setup) and~\cite{upem} (second setup). 
+  We used the hyperparameters found for standard DP-SGD, see \Cref{tab:hyperparameters} and report the standard deviation over 10 trials.
+  }
+  \label{tab:compare-dpsgd}
+  \begin{sc}
+  \begin{center}
+  \scriptsize
+  \begin{tabular}{cccccc}
+    \toprule
+    \textbf{Dataset} & \multicolumn{2}{c}{\textbf{Setup}} & \textbf{DP-SGD} & \textbf{\nameA} & \textbf{\nameB} \\
+    \hline
+    \multirow{4}{*}{MNIST} & \textit{\textbf{D}} & \textit{34\%-43\%-23\%} & 96.75  & \textbf{97.81} & 97.78 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$ 0.15  & $\pm$ \textbf{0.09} & $\pm$ 0.08 \\
+    \cdashlinelr{2-6}
+    & \textit{\textbf{D}} & \textit{54\%-37\%-9\%} & 96.75  & \textbf{97.6} & 97.54 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$ 0.15  & $\pm$ \textbf{0.11}  & 0.09 \\
+    \hline
+    \multirow{4}{*}{SVHN} & \textit{\textbf{D}} & \textit{34\%-43\%-23\%} & 83.26  & \textbf{84.56} & 84.48\\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.31  & \textbf{$\pm$0.25} & $\pm$0.25\\
+    \cdashlinelr{2-6}
+    & \textit{\textbf{D}} & \textit{54\%-37\%-9\%} & 83.26  & \textbf{84.32} & 84.31 \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$0.31 & \textbf{$\pm$0.31} & $\pm$0.26 \\
+    \hline
+    \multirow{4}{*}{CIFAR10} & \textit{\textbf{D}} & \textit{34\%-43\%-23\%} & 52.77 & 54.89  & \textbf{54.92} \\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$ 0.65 & $\pm$ 0.55 & \textbf{$\pm$0.63} \\
+    \cdashlinelr{2- 6}
+    & \textit{\textbf{D}} & \textit{54\%-37\%-9\%} & 52.77  & 54.88 & \textbf{55.00}\\
+    & \textit{$\pmb{\varepsilon}$} & \textit{1.0-2.0-3.0} & $\pm$ 0.65  & $\pm$ 0.45 & \textbf{$\pm$ 0.65} \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \end{sc}
+\vspace{-0.2in}
+\end{table}
+\addtolength{\tabcolsep}{0.0pt}
+\subsection{Privacy Consumption of our Methods}
+We track privacy consumption of our methods over the course of training in \Cref{fig:privacy_spending}.
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{.3\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/advantage_mnist_privacy_sample.pdf}
+    \caption{\nameA}
+  \end{subfigure}
+  \qquad
+  \begin{subfigure}[t]{.3\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/advantage_mnist_privacy_scale.pdf}
+    \caption{\nameB}
+  \end{subfigure}
+  \caption{\textbf{Individual Privacy Costs on MNIST} for $\varepsilon \in \{1, 2, 3\}$ with Distribution $(54\%, 37\%, 9\%)$.}\label{fig:privacy_spending}
+\end{figure}
+\subsection{Additional Results for MIA}
+\label{sec:mia-appendix}
+
+Membership inference success for a single target model of our \nameA and \nameB methods  is shown in~\Cref{fig:lira-single-appendix}.
+In~\Cref{fig:lira-5-appendix}, we present the results over for 5 different target models for \nameA. 
+The figure highlights that the over all target models, the two privacy groups' privacy risk is different: the group with higher protection $\varepsilon=10$ constantly has a lower AUC than the group with lower protection $\varepsilon=20$. 
+The test statistics over the different privacy groups' Lira likelihood scores for all five target models are shown in \Cref{tab:p_values}.
+
+
+\begin{figure}[h]
+    \centering
+    \subfloat[\nameA]{\includegraphics[scale=0.5]{figures/roc_curve_per_group_logits_sampling.pdf}}%
+        \qquad
+    \subfloat[\nameB]{\includegraphics[scale=0.5]{figures/roc_curve_per_group_logits_clipping.pdf}}%
+    \caption{\textbf{True-Positive rate vs. False-Positive Rate of Lira Membership Inference Attacks Per Privacy-Budget.} We follow the same setup as in~\Cref{fig:lira-main}. We show the single target model for both (a) \nameA and (b) \nameB methods.}
+    \label{fig:lira-single-appendix}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.45\textwidth]{figures/roc_curve_per_group_seaborn_logits_big.pdf} 
+    \caption{\textbf{True-Positive rate vs. False-Positive Rate of Lira Membership Inference Attacks Per Privacy-Budget.} We follow the same setup as in~\Cref{fig:lira-main}. We run the experiment for five different target models and aggregate the results with the error bars for the \nameA method. 
+    }
+    \label{fig:lira-5-appendix}
+\end{figure}
+
+
+\begin{table}[h]
+\caption{\textbf{Statistical differences between Privacy Groups.} We conduct a student t-test to determine if the Lira likelihood scores for data points with privacy budget $\varepsilon=10$ differ from the ones of data points with $\varepsilon=20$.
+All results with $p<0.05$ indicate statistically significant differences. Results for \nameA.}
+\label{tab:p_values}
+\centering
+\begin{tabular}{ccc}
+\toprule
+Target Model & $\Delta$ & $p$ \\
+\midrule
+1 & 5.16 & 2.49e-07\\
+2 &2.41 &  0.016\\
+3 &1.84&  0.066\\
+4 &-4.03& 5.52e-05\\
+5 &2.537&  0.011\\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Additional Analysis of our Methods}
+\label{sec:ablation_study}
+
+We show the full impact of the privacy assignment on the accuracy of the trained model in \Cref{tab:bias-full}. The results show that when a given class is not much more difficult to classify than other classes (which holds for the majority of classes, namely 0, 1, 4, 5, 6, 7, 8, 9), then only by changing the privacy budget for the given class, we can flip its performance (its accuracy from being higher to being lower) in comparison to the accuracy of remaining classes. 
+For example, if we consider the class 0. The accuracy for this class is 67.76\% when assigned high privacy budget ($\varepsilon=3$), which is a higher accuracy than for all other classes that have an average accuracy of around 53.41\% and assigned the privacy budget $\varepsilon=2$. Then, by modifying only the privacy budget of class 0 and by assigning to it the low privacy budget ($\varepsilon=1$), its accuracy drops to a mere 25.76\% and is below the accuracy of 56.58\% for the remaining classes.
+We visualize the impact on utility in \Cref{fig:CIFARheatmap} and \Cref{fig:MNISTheatmap} for CIFAR10 and MNIST, respectively.
+
+Furthermore, we present in \Cref{tab:10groups} the test accuracy for ten privacy groups, corresponding to the ten classes of the CIFAR10 dataset when each of the privacy groups obtains a different privacy budget.
+
+\addtolength{\tabcolsep}{-1.2pt} 
+\begin{table}[h]
+ \caption{\textbf{Accuracy for Subgroups.}
+ We assess the accuracy of subgroups when their privacy budgets differ. We select a single class for a given group and assign either higher, the same, or lower privacy budgets in comparison to groups with other classes. We change the privacy budgets only for bolded classes in a given experiment while all other classes have the same privacy budget ($\varepsilon=2$).
+ }
+ \vspace{-0ex}
+    \label{tab:bias-full}
+    \small
+    \begin{center}
+    \begin{tabular}{cccc}
+    \toprule
+        \multirow{2}{*}{Classes}  & \multicolumn{3}{c}{Privacy Budget} \\ 
+        \cmidrule{2-4}
+         & Higher ($\varepsilon=3$) & Same ($\varepsilon=2$) & Lower ($\varepsilon=1$) \\
+         \cmidrule{1-4}
+         \textbf{0} & \textbf{67.76 $\pm$ 2.14} & $55.24 \pm 1.98$ & $25.76 \pm 2.52$ \\
+         \cdashlinelr{1-4}
+         1-9 & $53.41 \pm 2.2$ & $54.72 \pm 2.49$ & \textbf{56.58 $\pm$ 2.29} \\
+         \cmidrule{1-4}
+         \textbf{1} & \textbf{80.84 $\pm$ 1.2} & $72.79 \pm 1.6$ & $46.09 \pm 3.91$ \\
+         \cdashlinelr{1-4}
+         0,2-9 & $51.65 \pm 2.28$ & $52.77 \pm 2.53$ & \textbf{54.59 $\pm$ 2.23} \\
+         \cmidrule{1-4}
+         \textbf{2} & $51.31 \pm 3.53$ & $36.59 \pm 3.33$ & $9.53 \pm 1.41$ \\
+         \cdashlinelr{1-4}
+         0-1,3-9 & \textbf{54.26 $\pm$ 2.84} & $56.79 \pm 2.34$ & \textbf{58.87 $\pm$ 2.18} \\
+         \cmidrule{1-4}
+         \textbf{3} & $52.88 \pm 2.6$ & $32.64 \pm 1.91$ & $6.67 \pm 1.09$ \\
+         \cdashlinelr{1-4}
+         0-2,4-9 & \textbf{54.62 $\pm$ 2.42} & $57.23 \pm 2.5$ & \textbf{58.75 $\pm$ 2.42} \\
+         \cmidrule{1-4}
+         \textbf{4} & \textbf{56.99 $\pm$ 1.87} & $40.06 \pm 2.88$ & $9.44 \pm 1.68$ \\
+         \cdashlinelr{1-4}
+         0-3,5-9 & $54.41 \pm 2.21$ & $56.41 \pm 2.39$ & \textbf{58.18 $\pm$ 2.02} \\
+         \cmidrule{1-4}
+         \textbf{5} & \textbf{64.11 $\pm$ 2.27} & $51.86 \pm 2.21$ & $15.04 \pm 2.31$ \\
+         \cdashlinelr{1-4}
+         0-4,6-9 & $53.28 \pm 2.16$ & $55.1 \pm 2.46$ & \textbf{57.54 $\pm$ 2.49} \\
+         \cmidrule{1-4}
+         \textbf{6} & \textbf{73.54 $\pm$ 2.36} & $65.8 \pm 4.25$ & $40.6 \pm 4.18$ \\
+         \cdashlinelr{1-4}
+         0-5,7-9 & $52.05 \pm 2.21$ & $53.55 \pm 2.23$ & \textbf{56.06 $\pm$ 2.33} \\
+         \cmidrule{1-4}
+         \textbf{7} & \textbf{68.22 $\pm$ 1.17} & $61.15 \pm 1.99$ & $41.08 \pm 2.75$ \\
+         \cdashlinelr{1-4}
+         0-6,8-9 & $52.5 \pm 2.43$ & $54.07 \pm 2.49$ & \textbf{56.01 $\pm$ 2.76} \\
+         \cmidrule{1-4}
+         \textbf{8} & \textbf{77.39 $\pm$ 1.24} & $68.53 \pm 2.34$ & $37.42 \pm 3.37$ \\
+         \cdashlinelr{1-4}
+         0-7,9 & $51.51 \pm 2.54$ & $53.25 \pm 2.45$ & \textbf{55.28 $\pm$ 2.37} \\
+         \cmidrule{1-4}
+         \textbf{9} & \textbf{72.82 $\pm$ 1.48} & $63.08 \pm 1.9$ & $32.79 \pm 2.73$ \\
+         \cdashlinelr{1-4}
+         1-8 & $52.05 \pm 2.32$ & $53.85 \pm 2.5$ & \textbf{56.06 $\pm$ 2.52} \\
+   \bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\addtolength{\tabcolsep}{1.2pt}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_cifar10_differences_high_sample.pdf}
+    \caption{\nameA (higher budget)}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_cifar10_differences_high_scale.pdf}
+    \caption{\nameB (higher budget)}
+  \end{subfigure}
+
+  \medskip
+
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_cifar10_differences_low_sample.pdf}
+    \caption{\nameA (lower budget)}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_cifar10_differences_low_scale.pdf}
+    \caption{\nameB (lower budget)}
+  \end{subfigure}
+  \caption{
+  \textbf{CIFAR10: Accuracy Changes for Subgroups.}
+ We assess how the test \textbf{Accuracy} of a \textbf{Class of interest} changes in comparison to the \textbf{Baseline Accuracy} (standard DP-SGD with $\varepsilon=2$) when we, during training, assign a lower ($\varepsilon=1$) or a higher ($\varepsilon=3$) privacy budget to data points from a class (shown on the x-axis).
+The diagonals show that by increasing a class' privacy budget (lower privacy), their utility increases, while it decreases with the decrease of privacy budget (higher privacy). Similar results for MNIST can be found in \Cref{fig:MNISTheatmap}.
+  }\label{fig:CIFARheatmap}
+\end{figure}
+
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_mnist_differences_high_sample.pdf}
+    \caption{Sample | higher budget}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_mnist_differences_high_scale.pdf}
+    \caption{Scale | higher budget}
+  \end{subfigure}
+
+  \medskip
+
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_mnist_differences_low_sample.pdf}
+    \caption{Sample | lower budget}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{.475\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fairness_mnist_differences_low_scale.pdf}
+    \caption{Scale | lower budget}
+  \end{subfigure}
+  \caption{\textbf{MNIST: Accuracy Changes for Subgroups.}
+ We assess how the test accuracy of a class changes (in comparison to standard DP-SGD with $\varepsilon=2$) when we, during training, assign a lower ($\varepsilon=1$) or a higher ($\varepsilon=3$) privacy budget to data points from this class.
+The diagonals show that by increasing a class' privacy budget (lower privacy), their utility increases, while it decreases with the decrease of privacy budget (higher privacy).}\label{fig:MNISTheatmap}
+\end{figure}
+
+\addtolength{\tabcolsep}{-1.2pt} 
+\begin{table}
+ \caption{\textbf{Per-class Individual Privacy Assignments.} 
+ We manually optimize the per-class individual privacy budgets for \nameA such that the model achieves the same accuracy over all classes.
+ The resulting per-class privacy budgets yield the maximum gap $\Delta$ between the highest and lowest accuracy level of only 0.39\% for \nameA, and 0.88\% for \nameB. 
+For the baseline ($\varepsilon=3$ for all classes)  $\Delta=2.03$ is significantly higher, highlighting that our approach can successfully minimize the accuracy gap between different privacy groups.
+We run the experiment on the MNIST dataset and report average per-class test-accuracies over three separate runs.
+See each privacy group's test accuracy over training in \Cref{fig:balance_histories}.
+ }
+ \vspace{-0ex}
+    \label{tab:10groups}
+    \small
+    \begin{center}
+    \begin{tabular}{cccccccccccc}
+    \toprule
+        Class & 0 & 1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 & 9 & $\Delta$\\
+        \midrule
+        Baseline ($\varepsilon=3$) &  98.95 &  99.06 &  98.39 &  98.09 &  97.93 &  98.47 &  98.16 &  98.12 &  97.78 &  97.03 & 2.03\\
+        \hline
+        Budgets &0.75& 0.5& 2.0&2.6&4.1& 2.1& 2.05& 3.0& 3.1 & 6.1\\
+        \cdashlinelr{1-12}
+\nameA &  98.16 &  98.09 &  98.16 &  97.95 &  98.10 &  97.91 &  97.77 &  97.99 &  98.02 &  97.89 & 0.39\\
+    \nameB &  98.44 &  98.36 &  98.13 &  98.02 &  97.76 &  98.17 &  97.91 &  97.96 &  97.91 &  97.56 & 0.88\\
+
+    \bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\addtolength{\tabcolsep}{1.2pt}
+
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{.7\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/balanced_standard_eps=3.pdf}
+    \caption{Baseline}
+  \end{subfigure}
+  \qquad
+  \begin{subfigure}[t]{.7\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/balanced_sample.pdf}
+    \caption{\nameA}
+  \end{subfigure}
+  \begin{subfigure}[t]{.7\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/balanced_scale.pdf}
+    \caption{\nameB}
+  \end{subfigure}
+  \caption{\textbf{Per-class test accuracies over CIFAR10 training with Per-Class Privacy Budgets.} We manually tune the per-class privacy budgets for \nameA to obtain the same per-class accuracy at the end of training, see \Cref{tab:10groups}.
+  Comparison with the Baseline (a) where all classes obtain $\varepsilon=3$ highlight that \nameA (b) and \nameB (c) successfully reduce the accuracy gap between the different classes.
+  }\label{fig:balance_histories}
+\end{figure}
+\subsection{Additional Baseline Results}
+\label{app:comparisonPATE}
+
+We present the comparison between our \ours and IPATE~\cite{iPATE} in \Cref{tab:compare_iPATE}.
+In PATE, accuracy refers to the student model accuracy. The results in \Cref{tab:compare_iPATE} are averaged over three experiments for \ipate and ten runs for \ours. Note that the accuracies we report for \ipate differ from the accuracy values reported by~\cite{iPATE} in Table 1, since they report average voting accuracy (\ie, how correct are individual teacher model votes), whereas we report the resulting student model accuracies, which corresponds to the final performance of the method. Note that \ipate does not apply the performance improvements suggested by \citet{papernot2018scalable} (\eg,virtual adversarial training) or MixMatch which could increase the student model's performance.
+
+\begin{table*}[h]
+  \caption{
+  \textbf{Comparison between \ours and Individualized PATE (\ipate).}
+  We select the weighting mechanism from \ipate that performs better than the upsampling method.
+  The \textit{Setup} indicates the size (in \%) of privacy groups.
+  We present the accuracy (\%) for training with $\varepsilon=\{1.0, 2.0, 3.0\}$ privacy budgets, respectively to the order of the privacy groups. 
+  }
+  \label{tab:compare_iPATE}
+  \begin{sc}
+  \begin{center}
+  \small
+  \new{
+  \begin{tabular}{cccccc}
+    \toprule
+    \textbf{Dataset} & \textbf{Setup} & Baseline PATE& \textbf{\ipate} & \textbf{\nameA} & \textbf{\nameB} \\
+    \hline
+    \multirow{2}{*}{MNIST} & 34\%-43\%-23\% &  \multirow{2}{*}{91.17$\pm$ 1.25}  & 95.27 $\pm$ 0.33 &\textbf{97.81} & 97.78 \\
+      & 54\%-37\%-9\% &  &95.74 $\pm$ 0.43 & \textbf{97.6} & 97.54\\
+      \hline
+      \multirow{2}{*}{SVHN} & 34\%-43\%-23\% & \multirow{2}{*}{22.46 $\pm$ 5.19} &41.45 $\pm$  1.69 &\textbf{84.56} & 84.48\\
+      & 54\%-37\%-9\% & &44.64 $\pm$ 0.55 &\textbf{84.32} & 84.31 \\
+        \hline
+      \multirow{2}{*}{CIFAR10} & 34\%-43\%-23\% & \multirow{2}{*}{24.83 $\pm$ 1.56}  &33.20 $\pm$ 0.94 & 54.89  & \textbf{54.92}\\
+      & 54\%-37\%-9\% & &35.59 $\pm$ 0.73 & 54.88 & \textbf{55.00}\\
+    \bottomrule 
+  \end{tabular}
+  }
+  \end{center}
+  \end{sc}
+\vspace{-4pt}
+\end{table*}
+\section{Extended Background}
+\label{app:extended_background}
+\subsection{Differential Privacy}
+\label{app:dp}
+Differential Privacy (DP)~\cite{dwork2008differential} provides a theoretical upper bound on the influence that a single data point can have on the outcome of an analysis over the whole dataset. 
+
+
+The most commonly applied instantiation of DP is $(\varepsilon, \delta)$-DP which is defined as follows:
+\begin{definition}
+\label{df:Differential Privacy}
+Let  $D, D' \subseteq \mathcal{D}$ be two neighboring datasets, \ie, datasets that differ in exactly one data point. %
+Let further $M \colon \mathcal{D}^* \rightarrow \mathcal{R}$ be a mechanism that processes an arbitrary number of data points.
+$M$ satisfies $(\varepsilon, \delta)$-DP if for all datasets $D \sim D'$, and for all result events $R \subseteq \mathcal{R}$
+\begin{align}
+    \mathbb{P}\left[M(D) \in R\right] \leq e^\varepsilon \cdot \mathbb{P}\left[M(D') \in R\right] + \delta \, .
+\end{align}
+\end{definition}
+In the definition, the privacy level is specified by $\varepsilon \in \mathbb{R}_+$, while $\delta \in [0, 1]$ offers a relaxation, \ie, a small probability of violating the guarantees.
+\subsection{Differential Privacy Accounting in Machine Learning}
+Privacy accounting in DP-SGD is most commonly implemented by the moments accountant which keeps track of a bound on the moments of the privacy loss random variable at outcome $R$, defined by
+\begin{equation}\label{eq:privacyloss}
+  c(R; M,  \textsf{aux}, D, D') = \log \frac{\Pr[M( \textsf{aux}, D) \in R]}{\Pr[M( \textsf{aux}, D') \in R]}.
+\end{equation}
+for $D, D', M$ and $R$ as above, and an auxiliary input \textsf{aux}. %
+\subsection{Formalizing Individualized Privacy}
+\label{app:formulizing_iDP}
+Individualized privacy guarantees with DP can be formalized as follows~\cite{pdp}:
+\begin{definition}%
+\label{df:Personalized Differential Privacy}
+Let $d \in \mathcal{D}$ be a data point.
+$M$ satisfies $(\varepsilon_d, \delta_d)$-DP if for all datasets $D \overset{d}{\sim} D'$, and for all result events $R \subseteq \mathcal{R}$
+\begin{align}
+    \mathbb{P}\left[M(D) \in R\right] \leq e^{\varepsilon_d} \cdot \mathbb{P}\left[M(D') \in R\right] + \delta_d \, .
+\end{align}
+\end{definition}
+Note that other notions of DP (\eg, RDP) can analogously be generalized to enable per-data point privacy guarantees.
+\subsection{PATE Algorithm}
+\label{app:PATE}
+
+The Private Aggregation of Teacher Ensembles (PATE) algorithm~\cite{papernot2016semi} represents an alternative to DP-SGD for training ML models with privacy guarantees.
+This ensemble-based algorithm implements privacy guarantees through a knowledge transfer from the ensemble to a separate student model.
+More concretely, in PATE, the private training data is split into non-overlapping subsets and distributed among several teacher models.
+Once each teacher is trained on their own data subset, they perform a privacy-preserving knowledge transfer by jointly labeling an additional unlabeled public dataset.
+To implement DP guarantees, noise is added to the labeling process.
+On completion, an independent student model is trained on the public dataset using the generated labels, and thereby incorporating knowledge about the original training data without ever requiring access to it. 
+
+\paragraph{Individualized PATE.}
+The individualized PATE variants by \cite{iPATE} are \textit{Upsample} and \textit{Weight}.
+Upsample duplicates data points and distributes them to different teachers in the PATE ensemble.
+Utility increase in this method result from the availability of more training data points for the teachers.
+Since the sensitivity for a duplicated data point increases (it can change the votes of all the teachers that are trained on its duplicates), privacy consumption of that data point is higher.
+Since each data point can be duplicated individually, this method allows for a fine-grained individualization.
+In contrast, the weight method allows for a per-teacher model privacy individualization. 
+Data points with the same privacy budget are assigned to the same teacher model(s) and the impact of that teacher model's weight on the final vote is weighted according to its training data points' privacy preferences.
+Teachers that are trained on data points with low privacy requirements are weighted higher, increasing the privacy consumption of their training data.
+\section{Details on the Methods}
+
+\subsection{\nameA}
+\label{app:method-sample}
+
+
+\paragraph{Leveraging Higher Sampling Rates for Increased Utility.}
+\label{app:extended_sampling}
+With higher sampling rates for certain data points, utility could, in principle be increased in several ways.
+(1)~Larger sampling rates can be used to obtain higher mini-batch sizes $B$ (while keeping the number of training iterations $I$ constant).
+Line~3 in \Cref{alg:dpsgd} shows that noise is added to the aggregate of all gradients.
+Hence, with larger mini-batches, the signal-to-noise ratio is higher, which can improve training.
+(2)~Alternatively, the mini-batch size $B$ can be kept constant while increasing the number of training iterations $I$.
+Longer training can increase model performance.
+However, these two approaches result in a change of core training hyperparamters (mini-batch size and number of iterations).
+As we discuss in \Cref{sec:method}, changing training hyperparameters would require a separate fine-tuning, for example, to adapt the learning rate for larger mini-batches, as in (1) or longer training as in (2).
+Since the training parameters would change according to the privacy budgets encountered in the private training dataset, and the ratios of these budgets over the training data points, the hyperparameter-tuning would have to be repeated whenever the dataset is updated, individuals change their privacy preferences, or decide to withdraw their consent for leveraging their data for the ML model alltogether, yielding significant overheads.
+We, therefore, implement our \nameA according to the third option (3), described in \Cref{sub:individual_sampling} which leverages higher sampling rates for improved utility by reducing the \nm of the added noise $\sigma$.
+This allows us to perform an apple to apple comparison between both our methods and to the standard DP-SGD.
+\subsection{\nameB}
+\label{app:method-scaling}
+
+\paragraph{Deriving Noise Multiplier $\pmb{\sigc}$.}
+Given the desired clip norm $c$ found through hyperparameter tuning of the standard DP-SGD, we set the individual clip norms such that their weighted average yields $c$ as $c = \sum_{p=1}^{P} \frac{|G_p|}{N} c_p$. So, we derive the $\sigc$ in the following way:
+
+\begin{align}
+    c &= \sum_{p=1}^{P} \frac{|G_p|}{N} c_p \label{align:sig1}\\ 
+    c &= \sum_{p=1}^{P} \frac{|G_p|}{N} \left(c \frac{\sigc}{\sigma_p}\right) \label{align:sig2}\\ 
+    c &= c \sigc \sum_{p=1}^{P} \frac{|G_p|}{N\sigma_p}  \label{align:sig3}\\ 
+    \sigc &= \left(\sum_{p=1}^{P} \frac{|G_p|}{N\sigma_p}\right)^{-1} \label{align:sig4}
+\end{align}
+
+From (\ref{align:sig1}) to~(\ref{align:sig2}), we use the equality between the \nm of added noise $\sigc c = \sigma_p c_p$. In~(\ref{align:sig3}), we extract terms that are independent of the privacy groups ($c$ and $\sigc$) before the summation.
+\subsection{Algorithmic Details}
+\label{app:algos}
+We specify our used sub-routines used for determining a sample rate or \nm based on given privacy parameters in \Cref{alg:getSampleRate} and \Cref{alg:getNoiseMultiplier}, respectively. 
+\begin{algorithm}[h]
+	\caption{\textbf{Subroutine getSampleRate.} Is the equivalent to Opacus' function get\_noise\_multiplier~\cite{opacusNoise} for deriving an adequate sample rate for given paramteters.}\label{alg:getSampleRate}
+	\begin{algorithmic}[1]
+		\REQUIRE Target $\varepsilon$, target $\delta$, iterations $I$, \nm $\sigma$, precision $\gamma=0.01$
+    \STATE{{\bf init} $\varepsilon_{\text{high}}$:} $\varepsilon_{\text{high}} \gets \infty$ 
+    \STATE{{\bf init} $q_{\text{low}}, q_{\text{high}}$:} $q_{\text{low}} \gets 1\mathrm{e}{-9}, q_{\text{high}} \gets 0.1$ 
+    \WHILE{$\varepsilon_{\text{high}} > \varepsilon$}
+    \STATE $q_{\text{high}} \gets 2q_{\text{high}}$
+    \STATE{$\varepsilon_{\text{high}} \gets I\cdot 2q_{\text{high}}^2\frac{1}{\sigma^2}$} \COMMENT{approximate epsilon according to \Cref{align:sgm_privacy}, we suppress $\alpha$ for simplicity}
+    \ENDWHILE
+    \WHILE{$\varepsilon - \varepsilon_{\text{high}} > \gamma$}
+    \STATE $q \gets (q_{\text{low}}+ q_{\text{high}}) / 2$
+    \STATE{$\varepsilon_{\text{temp}} \gets I\cdot 2q^2\frac{1}{\sigma^2}$} \COMMENT{approximate epsilon according to \Cref{align:sgm_privacy}, we suppress $\alpha$ for simplicity}
+    \IF{$\varepsilon_{\text{temp}} < \varepsilon$}
+    \STATE $q_{\text{high}} \gets q$
+    \STATE $\varepsilon_{\text{high}} \gets \varepsilon_{\text{temp}}$
+    \ELSE 
+    \STATE $q_{\text{low}} \gets q$
+    \ENDIF
+    \ENDWHILE
+    \STATE{\bf Output} $q_{\text{high}}$
+	\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[h]
+	\caption{\textbf{Subroutine getNoise.} Implements Opacus' function get\_noise\_multiplier~\cite{opacusNoise}.}\label{alg:getNoiseMultiplier}
+	\begin{algorithmic}[1]
+	\REQUIRE Target $\varepsilon$, target $\delta$, iterations $I$, sample rate $q$, precision $\gamma=0.01$
+    \STATE{{\bf init} $\varepsilon_{\text{high}}$:} $\varepsilon_{\text{high}} \gets \infty$ 
+    \STATE{{\bf init} $\sigma_{\text{low}}, \sigma_{\text{high}}$:} $\sigma_{\text{low}} \gets 0, \sigma_{\text{high}} \gets 10$ 
+    \WHILE{$\varepsilon_{\text{high}} > \varepsilon$}
+    \STATE $\sigma_{\text{high}} \gets 2\sigma_{\text{high}}$
+    \STATE{$\varepsilon_{\text{high}} \gets I\cdot 2q^2\frac{1}{\sigma_{\text{high}}^2}$} \COMMENT{approximate epsilon according to \Cref{align:sgm_privacy}, we suppress $\alpha$ for simplicity}
+    \ENDWHILE
+    \WHILE{$\varepsilon - \varepsilon_{\text{high}} > \gamma$}
+    \STATE $\sigma \gets (\sigma_{\text{low}}+ \sigma_{\text{high}}) / 2$
+    \STATE{$\varepsilon_{\text{temp}} \gets I\cdot 2q^2\frac{1}{\sigma^2}$} \COMMENT{approximate epsilon according to \Cref{align:sgm_privacy}, we suppress $\alpha$ for simplicity}
+    \IF{$\varepsilon_{\text{temp}} < \varepsilon$}
+    \STATE $\sigma_{\text{high}} \gets \sigma$
+    \STATE $\varepsilon_{\text{high}} \gets \varepsilon_{\text{temp}}$
+    \ELSE 
+    \STATE $\sigma_{\text{low}} \gets \sigma$
+    \ENDIF
+    \ENDWHILE
+    \STATE{\bf Output} $\sigma_{\text{high}}$
+	\end{algorithmic}
+\end{algorithm}
+\subsection{Combining \nameA and \nameB}
+\label{app:combining}
+As we state in our future work section, both methods can be combined. The combination of both methods can be implemented as follows: We obtain individual sampling probabilities from the privacy engine, as in SAMPLE. Once a mini-batch of data points is sampled accordingly, we use the respective data points’ indices and clip their gradients to their individual norms as in SCALE. The optimizer then applies the adequate corresponding amount of noise. Combining both methods gives us the opportunity to tune for a good utility over more privacy hyperparameters (both the respective methods’ hyperparameters plus a weighting over the methods’ impact on the total privacy costs). The individual noise multipliers and sampling rates can be searched for together analogously to the binary searches that we already leverage now for SAMPLE and SCALE, where the proportions of individualization (e.g. 70\% SAMPLE, 30\% SCALE) can be selected.
+\section{Alternative Baselines}
+\label{app:alternative_baselines}
+Throughout this work, we compare our methods with Standard DP-SGD which cannot take into account different privacy requirements at the same time.
+Thus, we consider it to apply the highest privacy protection required to all data points equally.
+Nonetheless, we can think of two more ways to use Standard DP-SGD on data having heterogeneous privacy requirements.
+Those approaches have different benefits and drawbacks and might perform better than our chosen baseline approach in some scenarios.
+\subsection{Exclude Lower Privacy Groups}
+\label{app:baseline1}
+Instead of applying the strongest privacy protection, the deciding ML expert could entirely exclude data of low privacy groups from training for loosening the restrictions on the remaining data points' influence on model updates.
+In some cases, it would be worth giving up the information and privacy budgets of those lower privacy groups to achieve utility improvements.
+This approach performs poorly if important information is wasted, e.g. most data of one class has the highest privacy requirement.
+\subsection{Learn Privacy Groups Separately}
+\label{app:baseline2}
+It is also possible to make use of all privacy budgets, independent of their diversity, although only using Standard DP-SGD.
+Namely, a model can be trained on each privacy group separately one after another, whereby the corresponding lowest budget is regarded for each group.
+A drawback of this approach is that the model could forget its knowledge about previously learned privacy groups.
+\subsection{Empirical Comparison of Baselines}
+\begin{table}[!ht]
+    \label{tab:other_baselines}
+    \caption{\textbf{Empirical evaluation against other baselines.} We report the obtained test accuracy obtained with our two methods vs. two other baselines for individualized privacy on the MNIST dataset.
+    Similar to \Cref{tab:compare-dpsgd}, we use $\varepsilon=1,2,3$.
+    Both our \nameA and \nameB outperform the other baselines.}
+    \centering
+    \begin{tabular}{cccccc}
+    \toprule
+        Setup & DP-SGD & E.1 Baseline & E.2 Baseline & \nameA & \nameB \\ \midrule
+        34\%-43\%-23\% & 96.75 & 97.6 & 97.4 & 97.81 & 97.78 \\ 
+        54\%-37\%-9\% & 96.75 & 97.1 & 97.3 & 97.6 & 97.54 \\ \bottomrule
+    \end{tabular}
+\end{table}
+
+We empirically evaluate against these two additional baselines using the MNIST dataset.
+For baseline~\ref{app:baseline1}, we include all data points with a privacy budget of $\varepsilon\geq2$ und use $\varepsilon=2$ as the privacy budget for training. After hyperparameter tuning, the training on the remaining data points (43\%+23\% and 37\%+9\% of the total data) yields the accuracy reported in \Cref{tab:other_baselines}.
+
+For baseline~\ref{app:baseline2}, we also did hyperparameter tuning and used the best noise multiplier of 2.5 for training. We trained the groups sequentially, always continuing training with the next group once the privacy budget of the previous groups was exhausted. We evaluated both starting with the privacy group that has loosest and strongest preferences (orders [3,2,1] and [1,2,3], respectively). Starting with the group that has strongest privacy requirements and ending on the group that has loosest privacy requirements yielded the best results which we report in \Cref{tab:other_baselines}.
+
+In summary, we observe that our methods outperform the other baselines.
+\section{Alternative Individualization}
+We present the alternative ways of individualizing privacy guarantees in DP-SGD that we considered in the design process of \ours and describe their drawbacks.
+\subsection{Individual Per-Data Point Noise}
+\label{app:per_point_noise}
+Individualized privacy could, in principle also be obtained by adding different amounts of noise to different data points. 
+Every of the $P$ privacy group would have their individual $\sigss$.
+Utility improvements would result from some data points requiring smaller amounts of added noise.
+Note however, that in DP-SGD, while clipping is performed on a per-data point basis, noise addition is performed on a per-mini-batch basis (line~8 in \Cref{alg:dpsgd}).
+Hence, there are two possibilities to implement individual noise addition: either (i) by operating on mini-batch sizes of 1, or (ii) by implementing a two-step sampling approach which first randomly samples a privacy group for a given training iteration and then applies the standard Poisson sampling to obtain the mini-batch consisting of data points from this group.
+While both approaches are conceptually correct, they exhibit significant drawbacks.
+Approach (i) first slows down training performance due to more operations requiring to be carried out on individual data points, rather than a mini-batch.
+Second, due to the weak signal-to-noise ratio when adding noise to individual gradients, model performance is likely to degrade.
+Finally, sampling cannot be performed with Poisson anymore since with Poisson sampling, it is not possible to pre-determine and specify exact mini-batch sizes, instead these depend on the outcome of the random sampling process.
+Approach (ii) could overcome the first two issues.
+However, the different groups sizes are still strictly smaller than the entire dataset and large parts of DP-SGD's degrading the tight privacy bounds obtained by privacy amplification through subsampling.\footnote{Note that there exist other, less popular approaches to implement DP in ML than the DP-SGD algorithm, such as Differentially Private Follow-the-Regularized-Leader (DP-FTRL) which do not rely on subsampling but instead obtain tighter privacy bounds from adding correlated noise over the training iterations. However, since DP-FTRL under-performs DP-SGD for high-privacy regimes, and unfolds it advantages mainly in FL scenarios where the same data is only learned from once, or with a small number of epochs, we consider the approach outside of the scope of this work.
+}
+The privacy amplification through subsampling allows to scale down the noise $\sigma$ by the factor $B/N$ (with $B$ being the expected mini-batch size, $N$ the total number of data points, and $B \ll N$) while still ensuring the same $\varepsilon$ as with $\sigma$~\cite{kairouz2021practical}.
+This privacy amplification is crucial to the practical performance (privacy-utility trade-offs) of DP-SGD.
+Hence, by using the $P$ privacy groups of sizes $\{N_1, \dots, N_P\}$ with $N_i \ll N$, the factors $B/N_i \ll B/N$ for all $i\{1,\dots, P\}$. 
+This effect cancels out, or in the worst case even inverts the privacy-utility benefits that should arise from assigning individual data points less noise based on their privacy preference in our individualization.
+\subsection{Duplicating Data Points}
+\label{app:duplicating_data}
+When duplicating data points in the training dataset, similar to the Upsampling mechanism in \ipate~\cite{iPATE}, the DP-SGD algorithm itself does not need to be adapted.
+Instead, different privacy levels of different data points stem from their individual number of replication within the training data.
+This approach offers a very fine-grained control on individual privacy levels, since, in principle, each data point could be replicated a different number of times.
+Utility gain would result from the larger training dataset.
+However, this type of upsampling opens the possibility for the same data point to be present multiple times in the mini-batch used for training in a given iteration.
+This stands in contrast to the original DP-SGD, where participation of each data point for training at a given iteration is determined by an independent Bernoulli trial, and hence, a data point can be either included once or not at all in a mini-batch.
+The possibility for a data point to be included multiple times $n$ inside the same mini-batch changes the sensitivity of the mechanism from $c$ to $nc$.
+According to~\cite{mironov2017renyi}, when noise is added according to $\sigma$, a mechanism with sensitivity $nc$ is $(\alpha, \frac{2(nc)^2}{2\sigma^2})$-RDP.
+The quadratic influence of the sensitivity to privacy bound results in a severe increase in the RDP $\varepsilon$, making the approach suboptimal in terms of privacy-utility guarantees.
+Additionally, upsampling leads to an effective increase in a data point's the sample-rate which further increases privacy costs.
+\section{Privacy Proofs for the \nameA and \nameB Mechanisms}
+\label{app:proofs}
+\subsection{Proofs for \nameA}
+\label{app:proofs_sample}
+\begin{theorem}
+Our \nameA mechanism satisfies $(\varepsilon_p, \delta_p)$-DP.
+\end{theorem} 
+
+\begin{proof}
+
+We base our proof on~\citet{mironov2019r} who show that a Sampled Gaussian Mechanism (SGM) parametrized with $0<q<1$ and $\sigma>0$, fulfills $(\alpha, \bar{\varepsilon})$-RDP with $\bar{\varepsilon}=2q^2\frac{\alpha}{\sigma^2}$\footnote{We denote $\varepsilon$ in RDP with a bar as $\bar{\varepsilon}$.}. We replace $q$ with our individualized $q_p$ and $\sigma$ with the corresponding $\sigs$. Since also $0<q_p<1$ and also $\sigs > 0$, the proofs of~\citet{mironov2019r} directly transfer.
+
+For any two neighboring dataset $D \overset{x_i}{\sim} D'$ and any data point $x_i$, we derive the individual sample rate $q_p$ and the general \nm $\sigs$ from $x_i$'s privacy budget $\varepsilon_p$ by applying~\Cref{alg:sampling}.
+Following~\citet{mironov2019r}'s approach on a numerically stable computation of privacy guarantees, this \Cref{alg:sampling} derives $q_p$ and $\sigs$ such that they fulfill the Inequality~(\ref{align:sgm_privacy})
+with the given number of iterations $I$.
+Therefore, it follows that:
+
+
+
+
+
+\begin{align}
+\label{align:sgm_privacy_individual_sample}
+   I\cdot 2q_p^2\frac{\alpha}{\sigs^2} \leq \bar{\varepsilon}_p\text{.}
+\end{align}
+
+
+
+As a final step of the proof, we need to convert from RDP guarantees back to $(\varepsilon,\delta)$-DP guarantees (see \Cref{sub:DP}).
+We do so following~\citet{mironov2017renyi}: our \nameA mechanism is an $(\alpha, \bar{\varepsilon}_p)$-RDP mechanism.
+Therefore, it also satisfies $(\varepsilon_p, \delta_p)$-DP with $\varepsilon_p=\bar{\varepsilon}_p+\frac{\log 1/\delta_p}{\alpha-1}$.
+
+
+\end{proof}
+\subsection{Proofs for \nameB}
+\label{app:proofs_scale}
+
+\begin{theorem}
+Our \nameB mechanism satisfies $(\varepsilon_p, \delta_p)$-DP.
+\end{theorem} 
+\begin{proof}
+In \nameB, the sole parameter that needs to be adapted according to the individual privacy preferences is $\sigma_p$.
+We find the $\sigma_p$-s required to obtain each privacy groups' desired $\varepsilon_p$ using the \textit{getNoise} function (see \Cref{alg:clipping} line 1).
+The \textit{getNoise} function implements ~\citet{mironov2019r}'s approach on a numerically stable computation of privacy guarantees, such that they fulfill the Inequality~(\ref{align:sgm_privacy}), and therefore, it follows that
+
+\begin{align}
+\label{align:sgm_privacy_individual_scale}
+ I\cdot 2q^2\frac{\alpha }{\sigma_p^2}\leq\bar{\varepsilon}_p\text{.}
+\end{align}
+
+As we explain in \Cref{sub:individual_clipping}, we cannot directly set an individual per-data point noise.
+Therefore, we have to rely on adapting the individual data points' clip norms.
+In \Cref{app:method-scaling},we show that we set $\sigc = \left(\sum_{p=1}^{P} \frac{|G_p|}{N\sigma_p}\right)^{-1}$ based on a given $c$.
+When we assign the effective noise added as $c_p=s_pc$, it follows that $\sigc c=\sigc \frac{c_p}{s_p}$, and hence, our $\sigma_p=\frac{1}{s_p}\sigc$.
+Given that we know $\sigc$ and $\sigma_p$ (the latter one from the \textit{getNoise} function), solving for $s_p$ yields the scaling factor for the respective privacy group.
+
+
+Since $\sigc>0$ and $s_p>0$, also $\sigma_p>0$, so the proofs of~\citet{mironov2019r} directly transfer.
+The remaining proof of the \nameB mechanism is symmetric to the proof of the \nameA mechanism.
+
+
+
+
+
+
+
+\end{proof}

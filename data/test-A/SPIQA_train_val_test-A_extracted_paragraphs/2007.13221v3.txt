@@ -1,0 +1,1561 @@
+\section{Introduction}
+In recent years, the sizes of both machine-learning models and  datasets have been increasing rapidly. 
+To accelerate the training, it is common to distribute the computation on multiple machines. We focus on 
+Stochastic Gradient Descent~(SGD). 
+SGD and its variants  are commonly used for training large-scale deep neural networks. 
+A common way to distribute SGD is to synchronously compute the gradients at multiple worker nodes, and then aggregate the global average. This is akin to single-threaded SGD with large mini-batch sizes~\cite{Goyal2017AccurateLM,You2017ScalingSB,You2017ImageNetTI,You2019LargeBO}. Increasing the number of workers is attractive because it holds the potential to reduce training time.  
+However, more workers also means more communication, and overwhelmed communication links hurt  scalability. 
+
+
+
+The state-of-the-art work in communication-efficient SGD is called QSparse-local-SGD~\cite{basu2019qsparse}, which combines two prevailing techniques: message compression and infrequent synchronization. Message compression methods use  compressors such as quantization~\cite{Seide20141bitSG,Strom2015ScalableDD,Wen2017TernGradTG,Alistarh2016QSGDCS,Bernstein2018signSGDCO,Karimireddy2019ErrorFF,Zheng2019CommunicationEfficientDB} and sparsification~\cite{Aji2017SparseCF,Stich2018SparsifiedSW,Jiang2018ALS} to reduce the number of bits in each synchronization round. This necessitates error feedback~(EF-SGD)~\cite{Karimireddy2019ErrorFF,Zheng2019CommunicationEfficientDB} to correct for the residual errors incurred by the compressors, and to guarantee theoretical convergence. On the other hand, infrequent synchronization methods such as local SGD~\cite{Stich2018LocalSC,Lin2018DontUL,Yu2018ParallelRS,Wang2018CooperativeSA,Yu2019OnTL} would decrease the overall number of synchronization rounds.
+The former, QSparse-local-SGD, periodically synchronizes the model parameters like local SGD, and compresses the synchronization messages to further reduce the communication overhead. Similar to EF-SGD, it also uses error feedback to correct for the residual errors of compression.
+
+QSparse-local-SGD reduces more bidirectional communication overhead~(in both aggregation and broadcasting)  than its ancestors EF-SGD and local SGD. However, it also inherits  weaknesses from both ancestor algorithms, especially when compression ratios are increased. For instance, our experiments reveal that QSparse-local-SGD  fails to converge at a compression ratio of $256 \times$. %
+
+
+In this paper, we introduce a new algorithm called  \underline{C}ommunication-efficient \underline{S}GD with \underline{E}rror \underline{R}eset, or CSER. 
+The key idea in CSER is a new technique called {\it error reset} that corrects for the local model using the compression errors, and we show this converges better than the error feedback technique used in QSparse-local-SGD.
+On top of the error reset, we also introduce partial synchronization, leveraging advantages from both gradient and model synchronizations. These two techniques together allow the proposed method to scale up the compression ratio to as high as $1024 \times$ and significantly outperform the existing approaches.
+
+ 
+
+
+
+
+
+
+The main contributions of our paper are as follows:
+\setitemize[0]{leftmargin=*}
+\begin{itemize} \setlength\itemsep{0.2em}
+\item We propose a novel communication-efficient SGD algorithm, called \underline{C}ommunication-efficient \underline{S}GD with \underline{E}rror \underline{R}eset~(CSER) as well as its variant with Nesterov's momentum~\cite{nesterov1983method}. 
+CSER includes a new technique that adapts arbitrary compressors for SGD, and achieves better convergence than the baselines when aggressive compressors are used.
+\item We add a second compressor to partially synchronize the gradients between the resets of errors on local models. We show that tuning the compression ratios between the gradient synchronization and model synchronization improves the convergence.
+\item We show empirically that with appropriate compression ratios, CSER accelerates   distributed training by nearly $10\times$ for CIFAR-100, and by $4.5\times$ for ImageNet.
+
+\end{itemize}
+\section{Related work}
+Recently, \citeauthor{basu2019qsparse} (\citeyear{basu2019qsparse}) proposed QSparse-local-SGD, which combines local SGD~\cite{Stich2018LocalSC,Lin2018DontUL,Yu2018ParallelRS,Wang2018CooperativeSA,Yu2019OnTL} and EF-SGD~\cite{Karimireddy2019ErrorFF,Zheng2019CommunicationEfficientDB}, and reduces more communication overhead than any single one of them. The detailed algorithm of QSparse-local-SGD is shown in Algorithm~\ref{alg:qlsgd-1}. 
+In the algorithm, $x_{i,t}$ is the local model on the $i$th worker in the $t^{\mbox{th}}$ iteration, and $\hat{x}_t$ is the globally synchronized model in the $t^{\mbox{th}}$ iteration.
+Note that $\hat{x}_t$ is always the same across different workers, which is used to track the synchronized part of the local model $x_{i,t}$. In Line 9, the local residual error $e_{i,t-1}$ from the previous synchronization round is added to the accumulated local update $x_{i, t-\frac{1}{2}} - \hat{x}_{t-1}$. In Line 10, the message $p_{i,t}$ is compressed into $p'_{i,t}$. Line 11 produces the residual error $e_{i,t}$ of the compression, and synchronizes the compressed messages. Finally, in Line 12, the synchronized update is accumulated to the local models.
+When $H=1$, the algorithm is reduced to EF-SGD. If the message compression in Line 10 is an identity mapping (i.e., $\CM_1(p_{i,t}) = p_{i,t}$), then the algorithm is reduced to local SGD.
+
+
+
+\begin{algorithm}[htb!]
+\caption{Qsparse-local-SGD}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - compressor, $H > 0$ - synchronization interval
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i,t}=\0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - \eta\nabla f(x_{i, t-1}; z_{i, t})$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$, 
+    	    \quad $\hat{x}_t \leftarrow \hat{x}_{t-1}$, 
+    	    \quad $e_{i,t} \leftarrow e_{i,t-1}$
+    	\Else
+    	    \State $p_{i,t} \leftarrow e_{i,t-1} + x_{i, t-\frac{1}{2}} - \hat{x}_{t-1}$
+    	    \State $p'_{i,t} \leftarrow \CM_1(p_{i,t})$
+    	    \State $e_{i,t} \leftarrow p_{i,t} - p'_{i,t}$, 
+    	    \quad $\bar{p}'_{t} \leftarrow \frac{1}{n} \sum_{i \in [n]} p'_{i,t}$ \Comment{Synchronization}
+    	    \State $x_{i, t} \leftarrow \hat{x}_{t-1} + \bar{p}'_{t}$, 
+    	    \quad $\hat{x}_{t} \leftarrow \hat{x}_{t-1} + \bar{p}'_{t}$
+
+
+
+
+
+
+
+
+
+
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:qlsgd-1}
+\end{algorithm}
+
+In QSparse-local-SGD, the residual error $e_{i,t}$ are left aside from gradient computation in the $H$ local steps. It is not applied to the local models until synchronization. Thus, the staleness of the residual error is at least $H$ iterations. %
+Such staleness in the error feedback grows with the compression ratio $R_{\CM_1}$ and synchronization interval $H$, which causes potential convergence issues when the overall compression ratio $R_{\CM} = R_{\CM_1} \times H$ is large. 
+As a result, we observe bad convergence of QSparse-local-SGD in our experiments when $R_{\CM} \geq 256$. On the other hand, EF-SGD uses $H=1$ but also shows relatively bad performance using random sparsifiers in both previous work~\cite{Stich2018SparsifiedSW} and our experiments. 
+When $\mathcal{C}_1$ is an identity mapping, QSparse-local-SGD reduces to local SGD, in which the differences between the local models still grow with the synchronization interval $H$, resulting in slow convergence when $H$ is large.
+\section{Methodology}
+We consider the following optimization problem with $n$ workers:
+$
+\min_{x \in \R^d} F(x), 
+$
+where $F(x) = \frac{1}{n} \sum_{i \in [n]} F_i(x) = \frac{1}{n} \sum_{i \in [n]} \E_{z_i \sim \mathcal{D}_i} f(x; z_i)$, $\forall i \in [n]$, and $z_i$ is sampled from the local data $\mathcal{D}_i$ on the $i$th device. Furthermore, we assume $\mathcal{D}_i \neq \mathcal{D}_j, \forall i \neq j.$
+
+We solve this optimization problem using distributed SGD and its variants. To reduce the communication overhead, we compress the messages via $\delta$-approximate compressors.
+
+\begin{definition}[\citet{Karimireddy2019ErrorFF}]
+An operator $\CM: \R^d \rightarrow \R^d$ is a $\delta$-approximate compressor for $\delta \in [0, 1]$ if $\|\CM(v) - v\|^2 \leq (1-\delta) \|v\|^2, \forall v \in \R^d$.
+\end{definition}
+Note that in the original definition of the compressor, it is required that $\delta \in (0, 1]$. In this paper, we extend this assumption by allowing $\delta = 0$, where $\CM(v) = 0$ in some cases.
+\subsection{Communication-efficient SGD with error reset}
+\label{sec:ersgd}
+
+We propose a new procedure to apply arbitrary $\delta$-approximate compressors to distributed SGD, which achieves good accuracy when using aggressive compressors and fixes the potential convergence issues of QSparse-local-SGD. Our procedure directly applies the residuals to the local models, then uses the local models to compute the gradients in the next iteration, which results in bifurcated local models similar to local SGD. Observe that in contrast, QSparse-local-SGD has the local models fully synchronized across the workers after each synchronization round, and puts the residuals aside from the gradient computation during the local updates.
+
+The proposed algorithm periodically resets the errors that are locally accumulated on the models on workers. Thus, we denote this algorithm as \underline{c}ommunication-efficient \underline{S}GD with \underline{e}rror \underline{r}eset~(CSER). In Table~\ref{tbl:alg_summary}, we summarize the techniques used in CSER, and how this differs from existing work. 
+
+\begin{table}[htb]
+\caption{Our approach (CSER) vs. Existing Techniques (EF-SGD, QSparse-local-SGD)}
+\label{tbl:alg_summary}
+\begin{center}
+\begin{small}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+ & \shortstack[l]{Message \\ compression}  & \shortstack[l]{Infrequent \\ synchronization}  &  \shortstack[l]{Momentum with \\ provable convergence}  & \shortstack[l]{Aggressive \\ compressor}  & Error reset \\ \hline
+EF-SGD & $\checkmark$ &  & $\checkmark$ & &  \\ \hline
+QSparse-local-SGD & $\checkmark$ & $\checkmark$ &  & &  \\ \hline
+\textbf{CSER (this paper)} & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\ \hline
+\end{tabular}
+\end{small}
+\end{center}
+\end{table}
+
+
+In Algorithm~\ref{alg:ps_func}, we define a sub-routine which partially synchronizes the tensors. Given any compressor $\CM$, on any worker $i$, the sub-routine takes the average only over the compressed part of the messages, and locally combines the residual with the averaged value. 
+
+Applying the sub-routine (Algorithm~\ref{alg:ps_func}) to distributed SGD, we propose a new algorithm with two arbitrary compressors: $\CM_1$ and $\CM_2$, with approximation factor $\delta_1 \in (0,1]$ and $\delta_2 \in [0,1]$, respectively.
+The detailed algorithm is shown in Algorithm~\ref{alg:ersgd}. 
+In the algorithm, $x_{i,t}$ is the local model on the $i$th worker in the iteration $t$. 
+In Line 11 and 12, the first compressor $\CM_1$ flushes the local error $e_{i,t}$ by partial synchronization, i.e., the local errors are (partially) reset for every $H$ iterations, which is similar to QSparse-local-SGD. Between the error-reset rounds, we add a second compressor $\CM_2$ to  partially synchronize the gradients~(Line 6), and accumulate both the synchronized values and the residuals to the local models~(Line 7).
+
+The locally accumulated residual error $e_{i,t}$ maintains the differences between the local models, which causes additional noise to the convergence. Formally, we have 
+\begin{lemma}\label{lem:local_diff}
+$x_{i,t}-e_{i,t}$ is the same across different workers:
+$
+x_{i, t} - e_{i,t} = x_{j,t} - e_{j,t}, \forall i,j\in [n], t.
+$
+\end{lemma}
+
+Different from the error feedback of QSparse-local-SGD, the error reset of CSER applies the residual errors immediately to the local models without delay, and thus avoids the issue of staleness and improves the convergence.
+Additionally, by utilizing both gradient and model synchronization, and balancing the communication budget between them, CSER achieves a better trade-off between the accuracy and the reduction of bidirectional communication. When all the budget is on $\CM_1$, the local models bifurcate too much, which leads to bad accuracy as local SGD. Instead, we trade off some budget of $\CM_1$ for the partial synchronization of gradients with $\CM_2$, thus mitigate the weaknesses. 
+Furthermore, with specially designed sparsifiers, the proposed algorithms no longer need to maintain the variables $e_{i,t}$. The resultant implementation reduces the memory footprint and the corresponding overhead of memory copy. Details are introduced in Section~\ref{sec:grbs} and Appendix A.4. 
+
+Algorithm~\ref{alg:ersgd} allows great freedom in tuning the two different compressors $\CM_1$ and $\CM_2$, as well as the error-reset interval $H$. By specifying the hyperparameters, we recover some important special cases of CSER. Some existing approaches are similar to these special cases, though the differences often turn out to be important. The details can be found in Appendix A.
+
+
+\begin{minipage}[t]{0.635\textwidth}
+\begin{algorithm}[H]
+\caption{CSER}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1, \CM_2$ - compressors, $H > 0$ - error-reset interval
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i,0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $g_{i, t} \leftarrow \nabla f(x_{i, t-1}; z_{i, t})$, $z_{i, t} \sim \mathcal{D}_i$
+        \State $g'_{i, t}, r_{i, t} \leftarrow PSync(g_{i, t}, \CM_2)$
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - \eta g'_{i, t}$, 
+        \quad $e_{i, t-\frac{1}{2}} \leftarrow e_{i, t-1} - \eta r_{i,t}$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$, \quad
+    	    $e_{i, t} \leftarrow e_{i, t-\frac{1}{2}}$
+    	\Else
+    	    \State $e'_{i,t-\frac{1}{2}}, e_{i, t} \leftarrow PSync(e_{i, t-\frac{1}{2}}, \CM_1)$
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}} - e_{i,t-\frac{1}{2}} + e'_{i,t-\frac{1}{2}}$
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:ersgd}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.355\textwidth}
+\begin{algorithm}[H]
+\caption{Partial Synchronization (PSync)}
+\begin{algorithmic}[1]
+\State{\bf Input}: $v_i \in \R^d$, $\CM$ - compressor
+\Function{PSync}{$v_i$, $\CM$} 
+    \State On worker $i$:
+    \State $v'_i = \CM(v_i)$
+    \State $r_i = v_i - v'_i$
+	\State Partial synchronization: 
+	\State \quad $\bar{v}' = \frac{1}{n} \sum_{i \in [n]} v'_i$
+	\State $v'_i = \bar{v}' + r_i$
+	\State \Return $v'_i, r_i$
+\EndFunction
+\end{algorithmic}
+\label{alg:ps_func}
+\end{algorithm}
+\end{minipage}
+\subsection{Momentum variant}
+Nesterov's momentum~\cite{nesterov1983method} is a variant of SGD that has been widely used to accelerate the convergence. \citeauthor{sutskever2013importance} (\citeyear{sutskever2013importance}) show that Nesterov's momentum can be expressed in terms of a classic momentum update as: 
+\begin{alignat*}{2}
+m_t \quad & = \quad && \beta m_{t-1} + g_t, \\
+x_t \quad & = \quad && x_{t-1} - \eta(\beta m_t + g_t),
+\end{alignat*}
+where $\beta$ is the momentum parameter, $g_t$ is the gradient. Nesterov's momentum moves the model parameters in the direction of the accumulated gradient. Very recently,  \citeauthor{Zheng2019CommunicationEfficientDB} (\citeyear{Zheng2019CommunicationEfficientDB}) incorporate Nesterov's momentum into EF-SGD with bidirectional communication and obtains faster convergence. 
+In this section, we introduce M-CSER that adopts Nesterov's momentum in CSER. Compared to Algorithm~\ref{alg:ersgd}, the momentum variant simply adds momentum to the gradients before applying the second compressor $\CM_2$, as shown in Algorithm~\ref{alg:ersgdm_1}.
+
+\begin{algorithm}[hbtp!]
+\caption{Distributed Momentum SGD with Error-Reset (M-CSER, implementation I)}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1, \CM_2$ - compressors, $H > 0$ - synchronization interval
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i, 0} = \0, m_{i, 0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $g_{i, t} \leftarrow \nabla f(x_{i, t-1}; z_{i, t})$, $z_{i, t} \sim \mathcal{D}_i$
+        \State $m_{i, t} \leftarrow \beta m_{i, t-1} + g_{i, t}$
+        \State $p_{i, t} \leftarrow \eta (\beta m_{i, t} + g_{i, t})$
+        \State $p'_{i, t}, r_{i,t} \leftarrow PSync(p_{i, t}, \CM_2)$
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} -  p'_{i, t}$,\quad 
+        $e_{i, t-\frac{1}{2}} \leftarrow e_{i, t-1} -  r_{i,t}$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$,\quad 
+    	    $e_{i, t} \leftarrow e_{i, t-\frac{1}{2}}$
+    	\Else
+    	    \State $e'_{i,t-\frac{1}{2}}, e_{i, t} \leftarrow PSync(e_{i, t-\frac{1}{2}}, \CM_1)$ \Comment{error reset}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}} - e_{i,t-\frac{1}{2}} + e'_{i,t-\frac{1}{2}}$
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:ersgdm_1}
+\end{algorithm}
+\subsection{Globally-randomized blockwise sparsifier~(GRBS)}
+\label{sec:grbs}
+
+There are two sparsifiers widely used with SGD: random-$k$ and top-$k$ sparsifiers. Random-$k$ sparsifiers select random elements for synchronization, while top-$k$ sparsifiers select the most significant elements. Top-$k$ sparsifiers typically achieve better convergence~\cite{Stich2018SparsifiedSW}, but also incur heavier overhead.
+
+In this paper, we use a blockwise random sparsifier with synchronized random seed, which is also mentioned in \cite{vogels2019powersgd}.
+
+\begin{definition}~(Globally-Randomized Blockwise Sparsifier, GRBS) \label{def:grbs}
+Given any tensors $v_i \in \R^d, i \in [n]$ distributed on the $n$ workers, the compression ratio $R_{\CM}$, and the number of blocks $B$, GRBS partitions each $v_i$ into $B$ blocks. In each iteration, GRBS globally picks $\frac{B}{R_{\CM}}$ random blocks for synchronization, and GRBS is a $1/R_{\CM}$-approximate compressor in expectation.
+\end{definition}
+
+
+
+Compared to the other compressors, GRBS has the following advantages:
+\setitemize[0]{leftmargin=*}
+\begin{itemize} \setlength\itemsep{0.3em}
+\item \textbf{Adaptivity to AllReduce and parameter server:} Due to the synchronized random seed, different workers always choose the same blocks for synchronization. Thus, GRBS is compatible with  AllReduce~\cite{Sergeev2018HorovodFA,walker1996mpi} and parameter server~\cite{li2014scaling,ho2013more,li2014communication}. Other compressors such as random sparsifier and quantization cannot be directly employed with Allreduce or parameter server since their compressed gradients cannot be directly summed without first be decompressed. 
+\item \textbf{Less memory footprint:} With GRBS, CSER can further reduce the memory footprint and the corresponding overhead of memory copy. 
+Implementation details are shown in Appendix A.4.
+\end{itemize}
+
+Although GRBS has less communication and computation overhead, it is too aggressive for the existing algorithms such as QSparse-local-SGD when we consider a large $R_{\CM}$. In Section~\ref{sec:experiments}, we show that CSER improves the convergence when the overall compression ratio is as large as $1024 \times$.
+\section{Convergence analysis}
+In this section, we present the convergence guarantees of CSER.
+\subsection{Assumptions}
+First, we introduce some assumptions for our convergence analysis.
+
+\begin{assumption}
+$F_i(x), \forall i \in [n]$ are $L$-smooth:
+$
+F_i(y) - F_i(x) 
+\leq \ip{\nabla F_i(x)}{y-x} + \frac{L}{2} \|y-x\|^2, \forall x, y.
+$
+\label{asm:smoothness}
+\end{assumption}
+
+\begin{assumption} 
+For any stochastic gradient $g_{i, t} = \nabla f(x_{i,t-1}; z_{i,t}), z_{i,t} \sim \mathcal{D}_i$, we assume bounded variance and expectation:
+$
+    \E[ \|g_{i, t} - \nabla F_i (x_{i, t-1})\|^2 ] \leq V_1,
+$
+$
+    \| \E[ g_{i, t} ] \|^2 \leq V_1', \forall i \in [n], t \in [T].
+$
+Furthermore, gradients from different workers are independent from each other.
+\label{asm:gradient}
+\end{assumption}
+Note that this implies the bounded second moment:  $\E[ \|  g_{i, t} \|^2 ] \leq V_2\equiv V_1 + V_1', \forall i \in [n], t \in [T]$.
+
+\begin{assumption}
+There exists at least one global minimum $x_*$, where
+$
+F(x_*) \leq F(x), \forall x.
+$
+\label{asm:global_min}
+\end{assumption}
+\subsection{Main results}
+Based on the assumptions above, we have the following convergence guarantees. The detailed proof can be found in Appendix B.
+To analyze the proposed algorithms, we introduce auxiliary variables:
+\begin{align*}
+    \bar{x}_{t} = \frac{1}{n} \sum_{i \in [n]} x_{i, t}.
+\end{align*}
+We show that the sequence $\{ \bar{x}_{t-1}: t\in [T] \}$ converge to a critical point.
+
+\begin{theorem}\label{thm:ersgd}
+Taking $\eta \leq \frac{1}{L}$, after $T$ iterations, Algorithm~\ref{alg:ersgd}~(CSER) has the following error bound: 
+\begin{align*}
+\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] 
+\leq \mathcal{O}\left( \frac{1}{\eta T} \right)
+ + \mathcal{O}\left( \frac{\eta L V_1}{n} \right)
+ + 2\left[ \frac{4(1-\delta_1) }{\delta_1^2} + 1 \right] (1-\delta_2) \eta^2  H^2 L^2 V_2.
+\end{align*}
+\end{theorem}
+
+
+The following corollary shows that CSER has a convergence rate of $\mathcal{O}\left( \frac{1}{\sqrt{nT}} \right)$, leading a linear speedup using more workers. 
+\begin{corollary}\label{coro:ersgd}
+Taking $\eta = \min \left\{ \frac{\gamma}{\sqrt{T / n} + \left[ 4(1-\delta_1) / \delta_1^2 + 1 \right]^{1/3} 2^{1/3} (1-\delta_2)^{1/3}  H^{2/3} T^{1/3}}, \frac{1}{L} \right\}$ for some $\gamma > 0$, after $T \gg n$ iterations, Algorithm~\ref{alg:ersgd}~(CSER) converges to a critical point: 
+\begin{align*}
+\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] 
+\leq \mathcal{O}\left( \frac{1}{\sqrt{nT}} \right).
+\end{align*}
+\end{corollary}
+
+
+To compare the error bounds between CSER and QSparse-local-SGD, we quote the following results (reformatted to match the notations in this paper) from Theorem 1 of \cite{basu2019qsparse} without proof.
+
+\begin{lemma} \cite{basu2019qsparse} \label{lem:qsparse}
+Taking $\eta \leq \frac{1}{2L}$, QSparse-local-SGD has the error bound:
+\begin{align*}
+\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] 
+\leq \mathcal{O}\left( \frac{1}{\eta T} \right)
+ + \mathcal{O}\left( \frac{\eta L V_1}{n} \right)
+ + 8\left[ \frac{4(1-\delta_1^2) }{\delta_1^2} + 1 \right] \eta^2  H^2 L^2 V_2.
+\end{align*}
+\end{lemma}
+Comparing Lemma~\ref{lem:qsparse} with Theorem~\ref{thm:ersgd}, CSER shows a better error bound than QSparse-local-SGD.
+\begin{remark}
+Taking $\delta_2 = 0$, and the same $\delta_1$ as QSparse-local-SGD, CSER reduces the compression error to $2\left[ \frac{4(1-\delta_1) }{\delta_1^2} + 1 \right] \eta^2  H^2 L^2 V_2$, compared to $8\left[ \frac{4(1-\delta_1^2) }{\delta_2^2} + 1 \right] \eta^2  H^2 L^2 V_2$ of QSparse-local-SGD. Ignoring the constant factors, the error caused by $\CM_1$ is reduced from $\frac{4(1-\delta_1^2) }{\delta_1^2}$ to $\frac{4(1-\delta_1)}{\delta_1^2}$. 
+\end{remark}
+Though the eliminated factor $(1+\delta_1)$ seems small, it could lead to significant gaps in the convergence. For example, taking $H=8$ and $\delta_1 = 1/2$, CSER reduces the compression error from $832$ to $576$. 
+
+Furthermore, note that error reset utilizes the local residuals $e_{i,t}$ in a way different from error feedback. Diving deep into the proofs, we find that their compression errors have different sources.
+\begin{remark}
+The compression error term of the error reset comes from the variance of the local models: $\frac{1}{n} \sum_{i \in [n]} \left\| \frac{1}{n} \sum_{j \in [n]} x_{j, t} - x_{i, t} \right\|^2$, which equals to $\frac{1}{n} \sum_{i \in [n]} \left\| \frac{1}{n} \sum_{j \in [n]} e_{j, t} - e_{i, t} \right\|^2 \leq \frac{1}{n} \sum_{i \in [n]} \left\| e_{i, t} \right\|^2$ using Lemma~\ref{lem:local_diff}. This variance vanishes when $n=1$. However, for error feedback, the compression error is bounded by $\frac{1}{n} \sum_{i \in [n]} \left\| e_{i, t} \right\|^2$, which does not vanish when $n=1$.  
+\end{remark}
+The remark above shows that error reset always has a smaller error bound compared to error feedback. 
+Especially, when using a single worker, CSER is equivalent to SGD with no compression error, while QSparse-local-SGD has the compressor error even using a single worker with $H=1$. 
+
+Besides error reset, CSER introduces partial synchronization for both the gradients and the models. 
+By carefully tuning the communication budget between them, the convergence can be improved.
+
+For example, assume that we use $\CM_{GRBS}$ introduced in Definition~\ref{def:grbs} that has a compression ratio $R_{\CM}$ and satisfies $\E[\|\CM_{GRBS}(v) - v\|_2^2] \leq (1 - \frac{1}{R_{\CM}})\|v\|_2^2$. If we put all the budget to model synchronization, and take $H=4$, $\delta_1=1/3$, $\delta_2=0$, the compression error is $\left[ \frac{4(1-\delta_1) }{\delta_1^2} + 1 \right] \eta^2  H^2 L^2 V_2 = 400 \eta^2 L^2 V_2$. However, if we move some 
+budget to gradient synchronization and take $H=12, \delta_1=7/8, \delta_2 = 1/96$, the overall compression budget remains the same, but the error term is reduced to less than $236 \eta^2 L^2 V_2$.
+
+
+We also establish the convergence analysis for CSER with Nesterov's momentum.
+\begin{theorem}\label{thm:ersgdm}
+Taking $\eta \leq \min\{\frac{1}{2}, \frac{1-\beta}{2L}\}$, after $T$ iterations, Algorithm~\ref{alg:ersgdm_1}~(M-CSER) has the following error bound: 
+\begin{align*}
+\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] 
+&\leq \frac{2(1-\beta)\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T} \\
+&\quad+ \frac{\eta^2 \beta^4 L^2 V_2}{(1-\beta)^4} 
++ \frac{\eta L V_1}{n (1-\beta)} 
+ + \left(\frac{4(1-\delta_1)}{\delta_1^2} + 1\right) \frac{2(1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2}.
+\end{align*}
+\end{theorem}
+Note that larger $\beta$ leads to faster escape from the initial point, but worse asymptotic performance.
+
+
+
+\begin{corollary}\label{coro:ersgdm}
+Taking $\eta = \min \left\{ \frac{\gamma}{\sqrt{T / n} + \left[ 2 \left( 4(1-\delta_1) / \delta_1^2 + 1 \right) (1-\delta_2)  H^2 + 1 \right]^{1/3} T^{1/3}}, \frac{1}{2} \right\}$ for some $\gamma > 0$, after $T \geq \frac{4 \gamma^2 L^2 n}{(1-\beta)^2}$ iterations, Algorithm~\ref{alg:ersgdm_1}~(M-CSER) converges to a critical point: 
+\begin{align*}
+\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] 
+\leq \mathcal{O}\left( \frac{1}{\sqrt{nT}} \right).
+\end{align*}
+\end{corollary}
+
+Similar to CSER, Corollary~\ref{coro:ersgdm} shows that Algorithm~\ref{alg:ersgdm_1}~(M-CSER) converges to a critical point at the rate $\mathcal{O}\left( \frac{1}{\sqrt{nT}} \right)$.
+Increasing the number of workers $n$ accelerates the convergence.
+\section{Experiments}
+In this section, we report the empirical results in a distributed environment.
+\subsection{Evaluation setup}
+We compare our algorithms with 3 baselines: SGD with full precision~(SGD in brief), EF-SGD, and QSparse-local-SGD.
+We use momentum to accelerate the training in all the experiments, though QSparse-local-SGD with momentum does not have convergence guarantees in its original paper~\cite{basu2019qsparse}. 
+
+We conduct experiments on two image classification benchmarks: CIFAR-100~\cite{krizhevsky2009learning}, and ImageNet dataset~\citep{russakovsky2015imagenet}, in a cluster of 8 machines where each machine has 1 NVIDIA V100 GPU and up to 10 Gb/s networking bandwidth. 
+Each experiment is repeated 5 times. 
+
+For CIFAR-100, we use the wide residual network~(Wide-ResNet-40-8, \cite{zagoruyko2016wide}). We set weight decay to 0.0005, momentum to 0.9, and minibatch size to 16 per worker. We decay the learning rates by 0.2 at 60, 120 and 160 epochs, and train for 200 epochs. The initial learning rate is varied in $\{0.05, 0.1, 0.5, 1.0\}$.
+
+For ImageNet, we use a 50-layer ResNet~\cite{he2016identity}. We set weight decay to 0.0001, momentum to 0.9, and minibatch size to 32 per worker. We use a learning rate schedule consisting of 5 epochs of linear warmup, followed by a cosine-annealing learning-rate decay~\cite{loshchilov2016sgdr}, and train for total 120 epochs. We enumerate the initial learning rates in $\{0.025, 0.05, 0.1, 0.5\}$.
+
+For all the algorithms, we test the performance with different overall compression ratios~($R_{\CM}$). We use the globally-randomized blockwise sparsifier~(GRBS) as the compressor, as proposed in Section~\ref{sec:grbs}. Note that CSER has not only two different compressors with compression ratios $R_{\CM_1}$ and $R_{\CM_2}$ respectively, but also the synchronization interval $H$. The overall compression ratio $R_{\CM}$ of CSER is $\frac{1}{1/R_{\CM_2} + 1/(R_{\CM_1} \times H)}$. For QSparse-local-SGD, its overall $R_{\CM}$ is $R_{\CM_1} \times H$. Note that QSparse-local-SGD is reduced to local SGD when taking $R_{\CM_1} = 1$, which is also tested in our experiments. The detailed configurations of of $H$, $R_{\CM_1}$, and $R_{\CM_2}$ can be found in Appendix C.
+
+Due to brevity we show only high compression ratio results. Appendix D shows further results. %
+\subsection{Empirical results}
+\label{sec:experiments}
+
+Table~\ref{tbl:cifar100} presents the test accuracy on CIFAR-100 with various compression ratios. We evaluate not only CSER, but also the other two special cases: CSEA and CSER-PL. The details of the special cases could be found in Appendix A. Note that for CSER, CSER-PL,  and QSparse-local-SGD with the same overall $R_{\CM}$, the configurations of $H$, $R_{\CM_1}$, and $R_{\CM_2}$ are not unique. We try multiple configurations and report the ones perform best on the training loss. 
+
+\begin{table}[htb!]
+\caption{Testing accuracy (\%) on CIFAR-100 with different overall compression ratios~($R_{\CM}$). Note that fully synchronous SGD does not have compression, thus $R_{\CM}=1$, and all the other algorithms do not have the fully synchronous cases, thus $R_{\CM} \geq 2$. 
+}
+\label{tbl:cifar100}
+\begin{center}
+\begin{small}
+\begin{tabular}{|r|r|r|r|r|r|r|}
+\hline
+   & \multicolumn{3}{|c|}{Baseline} & \multicolumn{3}{|c|}{Proposed algorithm} \\ \hline
+   Optimizer/  & \multicolumn{1}{|c|}{SGD}            & \multicolumn{1}{|c|}{EF-SGD}         & \multicolumn{1}{|c|}{QSparse-local}   & \multicolumn{1}{|c|}{CSEA}         & \multicolumn{1}{|c|}{CSER}         & \multicolumn{1}{|c|}{CSER-PL}
+   \\ $R_{\CM}$ & & & -SGD & & & \\ \hline
+              1 & \textbf{87.01$\pm$0.11} & \strike{|c|}{} & \strike{|c|}{}      & \strike{|c|}{} & \strike{|c|}{}          & \strike{|c|}{}          \\ \hline
+              2 & \strike{|c|}{}          & 87.20$\pm$0.10 & 87.16$\pm$0.03      & 87.17$\pm$0.21 & \textbf{87.47$\pm$0.03} & \strike{|c|}{}          \\ \hline
+              4 & \strike{|c|}{}          & 86.97$\pm$0.08 & 87.08$\pm$0.22      & 87.25$\pm$0.23 & 87.22$\pm$0.03          & \textbf{87.33$\pm$0.05} \\ \hline
+              8 & \strike{|c|}{}          & 86.61$\pm$0.23 & 87.15$\pm$0.10      & 87.14$\pm$0.05 & 87.09$\pm$0.05          & \textbf{87.27$\pm$0.04} \\ \hline
+             16 & \strike{|c|}{}          & 85.69$\pm$0.31 & 87.02$\pm$0.13      & 87.15$\pm$0.09 & \textbf{87.28$\pm$0.04} & 86.72$\pm$0.05          \\ \hline
+             32 & \strike{|c|}{}          & 85.17$\pm$0.12 & 86.70$\pm$0.04      & 86.83$\pm$0.20 & 86.90$\pm$0.15          & \textbf{86.92$\pm$0.26} \\ \hline
+             64 & \strike{|c|}{}          & 84.65$\pm$0.07 & 80.64$\pm$0.47      & 86.63$\pm$0.16 & 86.78$\pm$0.11          & \textbf{86.91$\pm$0.15} \\ \hline
+            128 & \strike{|c|}{}          & 83.50$\pm$0.87 & 70.27$\pm$2.37      & 86.30$\pm$0.15 & \textbf{86.81$\pm$0.17} & 86.36$\pm$0.21          \\ \hline
+            256 & \strike{|c|}{}          & 83.92$\pm$0.55 & diverge             & 86.34$\pm$0.20 & \textbf{86.68$\pm$0.07} & 86.27$\pm$0.02          \\ \hline
+            512 & \strike{|c|}{}          & 76.05$\pm$0.56 & diverge             & 85.75$\pm$0.34 & \textbf{86.20$\pm$0.09} & 85.68$\pm$0.12          \\ \hline
+           1024 & \strike{|c|}{}          & diverge        & diverge             & 85.13$\pm$0.13 & \textbf{85.66$\pm$0.07} & 84.94$\pm$0.37          \\ \hline
+\end{tabular}
+\end{small}
+\end{center}
+\end{table}
+
+
+
+
+\begin{figure*}[htb!]
+\centering
+\subfigure{\includegraphics[width=0.6\textwidth]{result_val_epoch_imagenet_ersgd_legend.pdf}}\vspace{-0.35cm}\\
+\setcounter{subfigure}{0}
+\subfigure[$R_{\CM}=32$]{\includegraphics[width=0.32\textwidth]{result_val_epoch_cifar100_ersgd_32.pdf}}
+\subfigure[$R_{\CM}=256$]{\includegraphics[width=0.32\textwidth]{result_val_epoch_cifar100_ersgd_256.pdf}}
+\subfigure[$R_{\CM}=1024$]{\includegraphics[width=0.32\textwidth]{result_val_epoch_cifar100_ersgd_1024.pdf}}
+\subfigure[$R_{\CM}=32$]{\includegraphics[width=0.32\textwidth]{result_val_time_cifar100_ersgd_32.pdf}}
+\subfigure[$R_{\CM}=256$]{\includegraphics[width=0.32\textwidth]{result_val_time_cifar100_ersgd_256.pdf}}
+\subfigure[$R_{\CM}=1024$]{\includegraphics[width=0.32\textwidth]{result_val_time_cifar100_ersgd_1024.pdf}}
+\caption{Testing accuracy with different algorithms, for WideResNet-40-8 on CIFAR-100.}
+\label{fig:cifar100}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure{\includegraphics[width=0.6\textwidth]{result_val_epoch_imagenet_ersgd_legend.pdf}}\vspace{-0.35cm}\\ \setcounter{subfigure}{0}
+\subfigure[$R_{\CM}=32$]{\includegraphics[width=0.32\textwidth]{result_val_epoch_imagenet_ersgd_32.pdf}}
+\subfigure[$R_{\CM}=256$]{\includegraphics[width=0.32\textwidth]{result_val_epoch_imagenet_ersgd_256.pdf}}
+\subfigure[$R_{\CM}=1024$]{\includegraphics[width=0.32\textwidth]{result_val_epoch_imagenet_ersgd_1024.pdf}}
+\subfigure[$R_{\CM}=32$]{\includegraphics[width=0.32\textwidth]{result_val_time_imagenet_ersgd_32.pdf}}
+\subfigure[$R_{\CM}=256$]{\includegraphics[width=0.32\textwidth]{result_val_time_imagenet_ersgd_256.pdf}}
+\subfigure[$R_{\CM}=1024$]{\includegraphics[width=0.32\textwidth]{result_val_time_imagenet_ersgd_1024.pdf}}
+\caption{Testing accuracy with different algorithms, for ResNet-50 on ImageNet.}
+\label{fig:imagenet}
+\end{figure*}
+
+In Figure~\ref{fig:cifar100} and Figure~\ref{fig:imagenet}, we show the test accuracy on CIFAR-100 and ImageNet respectively,  with the overall compression ratios in $\{32, 256, 1024\}$. 
+Since the experiments on ImageNet are expensive, we do not tune different configurations of compressors~($H, R_{\CM_1}, R_{\CM_2}$) for each overall $R_{\CM}$ on ImageNet, but directly use the best configurations tuned on CIFAR-100.
+\subsection{Discussion}
+We can see that in all the experiments, with the same compression ratio, CSER shows better performance than the baselines. When the compression ratio is small enough~($\leq 16$), the test accuracy is even better than fully synchronous SGD on CIFAR-100. When $R_{\CM} \leq 32$, for CIFAR-100, QSparse-local-SGD has comparable performance to CSER or its special cases. 
+Even with very large compression ratio~($\approx 256$), the proposed algorithm can achieve comparable accuracy to SGD with full precision. CSER  accelerates training by $10 \times$ for CIFAR-100, and $4.5 \times$ for ImageNet. 
+
+Compared to EF-SGD, CSER shows much better performance when the compression ratio is large~($R_{\CM} \geq 64$). We can see that CSER fixes the convergence issue in EF-SGD and QSparse-local-SGD when aggressive compressors are used, as discussed in Section~\ref{sec:ersgd}. For ImageNet with $R_C=1024$, even if we decrease the learning rates to $0.025$, EF-SGD and QSparse-local-SGD still diverge, while CSER still converges well with even larger learning rates.
+
+Note that in most cases, CSER performs better than CSEA and CSER-PL. The reason is that CSER uses both gradient partial synchronization and model partial synchronization. With finely tuned compression ratios, the local models will not be too far away from each other between the model synchronization rounds, which results in better convergence. Note that although CSEA has slightly worse performance compared to CSER and CSER-PL, it has less hyperparameters to be tuned for the compressors, which is more user-friendly in practice.
+\section{Conclusion}
+We proposed a novel communication-efficient SGD algorithm called CSER. 
+We introduce error reset and partial synchronization that enable an aggressive compression rate as high as $1024 \times$. 
+Theoretically, we show that the proposed algorithm enjoys a linear speedup using more workers. Our empirical results show that the proposed algorithm accelerates the training of deep neural networks.
+In future work, we will apply our algorithms to other datasets and applications.
+\section*{Broader Impact}
+As this work is mainly algorithmic, the impact is mainly in scientific aspects rather than ethical and societal aspects. Hopefully, our work would enable faster training of machine learning models without regression in accuracy. It would save not only the time but also the expense cost by training large and complex models. On the other hand, there are some related aspects that we have not studied in this work. For example, we do not know how our approaches impact fairness and privacy of the model training, which will be our future work.
+
+\begin{ack}
+This work was funded in part by the following grants: NSF IIS 1909577, NSF CNS 1908888, NSF CCF 1934986 and a JP Morgan Chase Fellowship, along with computational resources donated by Intel, AWS, and Microsoft Azure.
+\end{ack}
+
+\bibliography{ersgd}
+\bibliographystyle{abbrvnat}
+
+\appendix
+\newpage
+\onecolumn
+
+\vspace*{0.1cm}
+\begin{center}
+	\Large\textbf{Appendix}
+\end{center}
+
+\setcounter{theorem}{0}
+\setcounter{corollary}{0}
+\setcounter{lemma}{0}
+\section{Special cases}
+In this section, we introduce some important special cases of CSER, as well as the memory-efficient implementation of CSER with GRBS as the compressor. The corresponding experiments are shown in Appendix~\ref{sec:additional_exp}.
+\subsection{Special cases of CSER}
+By specifying $\delta_1$, $\delta_2$ and $H$, we recover some important special cases of CSER. Some existing approaches are similar to these special cases, though the differences often turn out to be important.
+\subsubsection{SGD with error assimilation}
+Taking $\CM_2(v) = 0$ and $H=1$, we recover a special case similar to EF-SGD~\cite{Karimireddy2019ErrorFF}.
+However, different from EF-SGD, our special case directly assimilates the remaining error into the local model used for gradient computation in the next iteration. We name this special case ``communication-efficient SGD with error assimilation''~(CSEA). 
+Importantly, ``error assimilation'' results in bifurcated local models without staleness in the local residuals-- in contrast, ``error feedback'' of EF-SGD always produces synchronized local models but delayed local residuals. Thus, CSEA trades off the synchronization of the local models for the elimination of the staleness in the local residuals, and potentially mitigates the noise caused by staleness when high compression ratios are used.
+
+
+
+
+
+
+\begin{minipage}[t]{0.50\textwidth}
+\vspace{-0.5cm}
+\begin{algorithm}[H]
+\caption{CSER}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1, \CM_2$ - compressors, $H > 0$ - synchronization interval
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i,0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $g_{i, t} \leftarrow \nabla f(x_{i, t-1}; z_{i, t})$, $z_{i, t} \sim \mathcal{D}_i$
+        \State $g'_{i, t}, r_{i, t} \leftarrow PSync(g_{i, t}, \CM_2)$
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - \eta g'_{i, t}$
+        \State $e_{i, t-\frac{1}{2}} \leftarrow e_{i, t-1} - \eta r_{i,t}$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$, \quad
+    	    $e_{i, t} \leftarrow e_{i, t-\frac{1}{2}}$
+    	\Else
+    	    \State $e'_{i,t-\frac{1}{2}}, e_{i, t} \leftarrow PSync(e_{i, t-\frac{1}{2}}, \CM_1)$
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}} - e_{i,t-\frac{1}{2}} + e'_{i,t-\frac{1}{2}}$
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:ersgd-1}
+\end{algorithm}
+\vspace{-0.5cm}
+\begin{algorithm}[H]
+\caption{Partial Synchronization (PSync)}
+\begin{algorithmic}[1]
+\Function{PSync}{$v_i \in \R^d$, $\CM$ - compressor} 
+    \State On worker $i$:
+    \State $v'_i = \CM(v_i)$
+    \State $r_i = v_i - v'_i$
+	\State Partial synchronization: 
+	\State \quad $\bar{v}' = \frac{1}{n} \sum_{i \in [n]} v'_i$
+	\State $v'_i = \bar{v}' + r_i$
+	\State \Return $v'_i, r_i$
+\EndFunction
+\end{algorithmic}
+\label{alg:ps_func-1}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\vspace{-0.5cm}
+\begin{algorithm}[H]
+\caption{CSEA (Implementation I)}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - compressor
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i,0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $p_{i,t} \leftarrow e_{i,t-1} - \eta\nabla f(x_{i, t-1}; z_{i, t})$
+    	   \State $e'_{i,t}, e_{i,t} \leftarrow PSync(p_{i,t}, \CM_1)$
+	    \State $x_{i, t} \leftarrow x_{i, t-1} + e'_{i,t} - e_{i,t-1}$
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:easgd-1}
+\end{algorithm}
+\begin{algorithm}[H]
+\caption{CSER-PL (Implementation I)}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - compressor, $H > 0$ - synchronization interval
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i,0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $g_{i,t} \leftarrow \nabla f(x_{i, t-1}; z_{i, t})$
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - \eta g_{i,t}$
+    	\State $e_{i, t-\frac{1}{2}} \leftarrow e_{i, t-1} - \eta g_{i,t}$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$, \quad
+    	    $e_{i, t} \leftarrow e_{i, t-\frac{1}{2}}$
+    	\Else
+    	    \State $e'_{i,t}, e_{i,t} \leftarrow PSync(e_{i,t-\frac{1}{2}}, \CM_1)$
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}} + e'_{i,t} - e_{i,t-\frac{1}{2}} $
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:partial-local-sgd-1}
+\end{algorithm}
+\end{minipage}
+\subsubsection{Partial-local-SGD}
+Taking $\CM_2(v) = 0$, we recover a special case of CSER, which is similar to QSparse-local-SGD~\cite{basu2019qsparse}. To distinguish it from Qsparse-local-SGD, we call this special case ``Partial-local-SGD'', or CSER-PL~(partial-local special case of CSER) in brief. While QSparse-local-SGD keeps the local models fully synchronized after every communication round, CSER-PL maintains different local models across the workers. Taking $\delta_1 = 1$, CSER-PL recovers local SGD with synchronization interval $H$.
+\subsection{Comparision to the existing work}
+
+\subsubsection{CSEA}
+If we take $\CM_2(v) = 0$~(i.e., no synchronization at all) and $H=1$, then we recover a special case similar to EF-SGD, with the same communication overhead, if the same compressor $\CM_1$ is used.
+\begin{minipage}{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{CSEA}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - compressor
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i,t}=\0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $p_{i,t} \leftarrow e_{i,t-1} - \eta\nabla f(x_{i, t-1}; z_{i, t})$
+    	    \State $p'_{i,t} \leftarrow \CM_1(p_{i,t})$
+	    \State $e_{i,t} \leftarrow p_{i,t} - p'_{i,t}$
+	    \State $\bar{p}'_{t} \leftarrow \frac{1}{n} \sum_{i \in [n]} p'_{i,t}$
+	    \State \colorbox{green}{$x_{i, t} \leftarrow x_{i, t-1} - e_{i,t-1} + e_{i,t} + \bar{p}'_{t}$}
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:emsgd}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{EF-SGD}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - compressor
+\State Initialize $x_{i, 0} = \hat{x}_0 \in \R^d, e_{i,t}=\0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $p_{i,t} \leftarrow e_{i,t-1} - \eta\nabla f(x_{i, t-1}; z_{i, t})$
+	    \State $p'_{i,t} \leftarrow \CM_1(p_{i,t})$
+	    \State $e_{i,t} \leftarrow p_{i,t} - p'_{i,t}$
+	    \State $\bar{p}'_{t} \leftarrow \frac{1}{n} \sum_{i \in [n]} p'_{i,t}$
+	    \State \colorbox{green}{$x_{i, t} \leftarrow x_{i, t-1} + \bar{p}'_{t}$}
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:efsgd}
+\end{algorithm}
+\end{minipage}
+\subsection{CSER-PL}
+By taking $\CM_2(v) = 0$~(i.e., no partial synchronization of gradients), we recover a special case of CSER, which is similar to Qspars-local-SGD. To distinguish it from Qsparse-local-SGD, we call this special case ``CSER-PL'', or CSER-PL in brief. The major differences between CSER-PL and Qspars-local-SGD are shown below. 
+
+Note that we rewrite both algorithms into a new format for an easier comparison. Some notations are inconsistent to Algorithm~\ref{alg:ersgd}.
+
+CSER-PL is more memory-efficient compared to Qsparse-local-SGD, since it does not maintain the variable $r_{i,t}$ during the local updates.
+
+\begin{minipage}{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{CSER-PL}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - compressor, $H > 0$ - synchronization interval
+\State Initialize $x_{i, 0} = \hat{x}_0 = \0, \forall i \in [n]$
+\State \colorbox{green}{Pass} \colorbox{white}{\color{white}Initialize $r_{i, 0} = \0, \forall i \in [n]$}
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - \eta\nabla f(x_{i, t-1}; z_{i, t})$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$
+    	    \State $\hat{x}_{t} \leftarrow \hat{x}_{t-1}$
+    	    \State \colorbox{green}{Pass} 
+    	\Else
+	        \State \colorbox{green}{$p_{i,t} \leftarrow  x_{i, t-\frac{1}{2}}  - \hat{x}_{t}$}
+    	    \State $p'_{i,t} \leftarrow \CM_1(p_{i,t})$
+    	    \State $e_{i,t} \leftarrow p_{i,t} - p'_{i,t}$
+    	    \State $\bar{p}'_{t} \leftarrow \frac{1}{n} \sum_{i \in [n]} p'_{i,t}$
+    	    \State \colorbox{green}{$x_{i, t} \leftarrow \hat{x}_{t-1} +\bar{p}'_{t} + e_{i,t} $}
+	    \State $\hat{x}_{t} \leftarrow  \hat{x}_{t-1} + \bar{p}'_{t}$
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:plsgd}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{Qsparse-local-SGD}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - compressor, $H > 0$ - synchronization interval
+\State Initialize $x_{i, 0} = \hat{x}_0 = \0, \forall i \in [n]$
+\State \colorbox{green}{Initialize $e_{i, 0} = \0, \forall i \in [n]$}
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - \eta\nabla f(x_{i, t-1}; z_{i, t})$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$
+    	    \State $\hat{x}_t \leftarrow \hat{x}_{t-1}$
+    	    \State \colorbox{green}{$e_{i,t} \leftarrow e_{i,t-1}$}
+    	\Else
+    	    \State \colorbox{green}{$p_{i,t} \leftarrow e_{i,t-1} + x_{i, t-\frac{1}{2}} - \hat{x}_{t-1}$}
+    	    \State $p'_{i,t} \leftarrow \CM_1(p_{i,t})$
+    	    \State $e_{i,t} \leftarrow p_{i,t} - p'_{i,t}$
+    	    \State $\bar{p}'_{t} \leftarrow \frac{1}{n} \sum_{i \in [n]} p'_{i,t}$
+    	    \State \colorbox{green}{$x_{i, t} \leftarrow \hat{x}_{t-1} + \bar{p}'_{t}$}
+    	    \State $\hat{x}_{t} \leftarrow \hat{x}_{t-1} + \bar{p}'_{t}$
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:qlsgd}
+\end{algorithm}
+\end{minipage}
+\subsection{Special implementations with GRBS}
+Using GRBS as the compressor, the implementation of CSER can be simplified. For any block, its local residual is either already assimilated into the local model, or reset to $0$. Thus, we can directly do partial synchronization on the local models $x_{i,t}$, instead of the residuals $e_{i,t}$. The detailed implementations are shown in Algorithm~\ref{alg:ersgdm-2}, \ref{alg:CSER-PL-2}, and \ref{alg:easgd-2}.
+
+
+\begin{minipage}[t]{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{CSER (implementation II)}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1, \CM_2$ - randomized sparsifiers, $H > 0$ - synchronization interval
+\State $x_{i, 0} = \hat{x}_0 \in \R^d, m_{i, 0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $p_{i, t} \leftarrow Get\_p(x_{i, t-1}, m_{i, t-1})$
+        \State $p'_{i, t}, \_ \leftarrow PSync(p_{i, t}, \CM_2)$
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} -  p'_{i, t}$
+    	\If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t} \leftarrow x_{i, t-\frac{1}{2}}$
+    	\Else
+    	    \State $x_{i, t},\_  \leftarrow PSync(x_{i, t-\frac{1}{2}}, \CM_1)$ 
+    	\EndIf 
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:ersgdm-2}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{CSER-PL (implementation II)}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - randomized sparsifier, $H > 0$ - synchronization interval
+\State $x_{i, 0} = \hat{x}_0 \in \R^d, m_{i, 0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $p_{i, t} \leftarrow Get\_p(x_{i, t-1}, m_{i, t-1})$
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - p_{i, t}$
+        \If{$\mod(t, H) \neq 0$}
+    	    \State $x_{i, t}  \leftarrow x_{i, t-\frac{1}{2}}$
+    	\Else
+    	    \State $x_{i, t},\_  \leftarrow PSync(x_{i, t-\frac{1}{2}}, \CM_1)$
+    	\EndIf
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:CSER-PL-2}
+\end{algorithm}
+\end{minipage}
+
+
+\begin{minipage}[t]{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{CSEA (implementation II)}
+\begin{algorithmic}[1]
+\State{\bf Input}: $\CM_1$ - randomized sparsifier
+\State $x_{i, 0} = \hat{x}_0 \in \R^d, m_{i, 0} = \0, \forall i \in [n]$
+\ForAll{iteration $t \in [T]$}
+    \ForAll{Workers $i \in [n]$ in parallel}
+        \State $p_{i, t} \leftarrow Get\_p(x_{i, t-1}, m_{i, t-1})$
+        \State $x_{i, t-\frac{1}{2}} \leftarrow x_{i, t-1} - p_{i, t}$
+    	\State $x_{i, t},\_  \leftarrow PSync(x_{i, t-\frac{1}{2}}, \CM_1)$
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:easgd-2}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\begin{algorithm}[H]
+\caption{Calculate update on worker $i$}
+\begin{algorithmic}[1]
+\Function{Get\_p}{$x_{i, t-1}, m_{i, t-1}$}
+\State $g_{i, t} \leftarrow \nabla f(x_{i, t-1}; z_{i, t})$, $z_{i, t} \sim \mathcal{D}_i$
+\If{use momentum}
+    \State $m_{i, t} \leftarrow \beta m_{i, t-1} + g_{i, t}$
+    \State $p_{i, t} \leftarrow \eta (\beta m_{i, t} + g_{i, t})$
+\Else
+    \State $p_{i, t} \leftarrow \eta g_{i, t}$
+\EndIf
+\State \Return $p_{i, t}$
+\EndFunction
+\end{algorithmic}
+\label{alg:momentum}
+\end{algorithm}
+\end{minipage}
+\section{Proofs}
+\begin{lemma}~(Bifurcated local models)
+$e_{i,t}, \forall i \in [n], t$ maintains the differences between the local models $x_{i,t}$:
+\begin{align*}
+x_{i, t} - e_{i,t} = x_{j,t} - e_{j,t}, \forall i,j\in [n], t.
+\end{align*}
+\end{lemma}
+
+\begin{proof}
+We prove the lemma by induction.
+
+For $t=0$, we have $x_{i,0} = \hat{x}_0, e_{i,0} = \0, \forall i\in [n]$, thus $x_{i, 0} - e_{i,0} = x_{j,0} - e_{j,0}, \forall i,j\in [n]$.
+
+Assume that 
+\begin{align*}
+x_{i, t-1} - e_{i,t-1} = x_{j,t-1} - e_{j,t-1}, \forall i,j\in [n],
+\end{align*}
+then we have 2 cases:
+
+\textbf{Case 1:} $\mod(t,H) \neq 0$.
+Then we have
+\begin{align*}
+    x_{i,t} &= x_{i, t-\frac{1}{2}} = x_{i, t-1} - \eta \left[ \frac{1}{n} \sum_{k \in [n]} \CM_2(g_{k,t}) + r_{i,t} \right], \\
+    e_{i,t} &= e_{i,t-\frac{1}{2}} = e_{i, t-1}- \eta r_{i,t}.
+\end{align*}
+Thus, we have
+\begin{align*}
+    x_{i, t} - e_{i,t} 
+    = x_{i, t-1} - e_{i, t-1} - \eta  \frac{1}{n} \sum_{k \in [n]} \CM_2(g_{k,t}) 
+    = x_{j, t-1} - e_{j, t-1} - \eta  \frac{1}{n} \sum_{k \in [n]} \CM_2(g_{k,t}) 
+    =  x_{j,t} - e_{j,t}
+\end{align*}
+
+\textbf{Case 2:} $\mod(t,H) = 0$.
+Note that in Case 1 we have already proved 
+\begin{align*}
+x_{i, t-\frac{1}{2}} - e_{i,t-\frac{1}{2}} = x_{j,t-\frac{1}{2}} - e_{j,t-\frac{1}{2}}, \forall i,j\in [n].
+\end{align*}
+Then, we have
+\begin{align*}
+x_{i, t} 
+= x_{i, t-\frac{1}{2}} - e_{i,t-\frac{1}{2}} + e'_{i,t-\frac{1}{2}}
+= x_{i, t-\frac{1}{2}} - e_{i,t-\frac{1}{2}} + \left[  
+\frac{1}{n} \sum_{k} \CM_1(e_{k,t-\frac{1}{2}}) + e_{i,t} \right].
+\end{align*}
+Thus, we get
+\begin{align*}
+x_{i, t} - e_{i,t}
+= x_{i, t-\frac{1}{2}} - e_{i,t-\frac{1}{2}} +  
+\frac{1}{n} \sum_{k} \CM_1(e_{k,t-\frac{1}{2}})
+= x_{j, t-\frac{1}{2}} - e_{j,t-\frac{1}{2}} +  
+\frac{1}{n} \sum_{k} \CM_1(e_{k,t-\frac{1}{2}})
+= x_{j, t} - e_{j,t}.
+\end{align*}
+
+\end{proof}
+
+\setcounter{lemma}{2}
+\begin{lemma}\label{lem:error_reset}~(Error Reset of CSER)
+After every $H$ steps, the local error will be reset to 
+\begin{align*}
+&\E\left\| e_{i,t} \right\|^2 \leq \frac{(1-\delta_2) (1-\delta_1) \eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2},
+\end{align*}
+for $\forall t \in [T], \mod(t,H) = 0$.
+\end{lemma}
+
+\begin{proof}
+
+First, we establish the bound of the local error $\E \|e_{i,t-\frac{1}{2}}\|^2$ before (partial) synchronization. 
+
+\textbf{Case I:}
+For $t=0$, we have no local error:
+\begin{align*}
+e_{i,0} = \0.
+\end{align*}
+
+\textbf{Case II:}
+For $t = H$, we have the local error:
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \\
+&= \E \left\|  - \eta \sum_{\tau = 1}^{H} r_{i,\tau} \right\|^2 \\
+&= \eta^2 \E \left\|  \sum_{\tau = 1}^{H} r_{i,\tau} \right\|^2 \\
+&\leq \eta^2 H \sum_{\tau = 1}^{H} \E \left\| r_{i,\tau} \right\|^2 \\
+&= \eta^2 H \sum_{\tau = 1}^{H} \E \left\| g_{i,\tau} - \CM_1\left( g_{i,\tau} \right) \right\|^2 \\
+&\leq \eta^2 H (1-\delta_2) \sum_{\tau = 1}^{H} \E \left\| g_{i,\tau} \right\|^2 \\
+&\leq (1-\delta_2) \eta^2 H^2 V_2.
+\end{align*}
+
+\textbf{Case III:}
+For any $t \in [T]$ such that $\mod(t,H) = 0, t > H$, we can bound the local error:
+\begin{align*}
+\E \|e_{i,t-\frac{1}{2}}\|^2 
+= \E \left\| e_{i,t-H}  - \eta \sum_{\tau = t-H+1}^{t} r_{i,\tau} \right\|^2.
+\end{align*}
+
+Note that after (partial) synchronization, the local error is reset as $e_{i,t-H} = e_{i,t-H-\frac{1}{2}} - \CM_2\left(e_{i,t-H-\frac{1}{2}}\right)$. 
+
+Thus, we have
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \\
+&= \E \left\| e_{i,t-H-\frac{1}{2}} - \CM_2\left(e_{i,t-H-\frac{1}{2}}\right) - \eta\sum_{\tau = t-H+1}^{t} \left( g_{i,\tau} - \CM_1\left( g_{i,\tau} \right) \right)  \right\|^2 \\
+&\leq (1+a)\E \left\| e_{i,t-H-\frac{1}{2}} - \CM_2\left(e_{i,t-H-\frac{1}{2}}\right) \right\|^2 + (1+1/a)\E \left\| \eta\sum_{\tau = t-H+1}^{t} \left( g_{i,\tau} - \CM_1\left( g_{i,\tau} \right) \right)  \right\|^2 \\
+&\leq (1+a)(1-\delta_1)\E \left\| e_{i,t-H-\frac{1}{2}} \right\|^2 + (1+1/a)\eta^2 H (1-\delta_2) \sum_{\tau = t-H+1}^{t} \E \left\| g_{i,\tau}  \right\|^2 \\
+&\leq (1+a)(1-\delta_1)\E \left\| e_{i,t-H-\frac{1}{2}} \right\|^2 + (1+1/a)(1-\delta_2)\eta^2 H^2 V_2 \\
+&\leq (1+1/a)(1-\delta_2)\eta^2 H^2 V_2 \sum_{\tau=0}^{+\infty} \left[ (1+a)(1-\delta_1) \right]^{\tau} \\
+&\leq \frac{1+1/a}{1- (1+a)(1-\delta_1)}  (1-\delta_2)\eta^2 H^2 V_2,
+\end{align*}
+for any $a > 0$, such that $(1+a)(1-\delta_1) \in (0,1)$.
+The bound above is minimized when we take $a = \frac{1}{\sqrt{1-\delta_1}} - 1$, which results in
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \leq \frac{(1-\delta_2)\eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2}.
+\end{align*}
+
+Combining all the 3 cases above, we obtain that for $\forall t \in [T]$ such that $\mod(t,H) = 0$:
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \leq \frac{(1-\delta_2)\eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2}.
+\end{align*}
+
+Then, after the (partial) synchronization, we have
+\begin{align*}
+&\E \left\| e_{i,t} \right\|^2 \\
+&\leq (1-\delta_1) \E \left\| e_{i,t} \right\|^2 \\
+&\leq \frac{(1-\delta_2) (1-\delta_1) \eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2},
+\end{align*}
+for $\forall t \in [T], \mod(t,H) = 0$.
+\end{proof}
+
+
+\begin{theorem}
+Taking $\eta \leq \frac{1}{L}$, after $T$ iterations, Algorithm~\ref{alg:ersgd} has the following error bound: 
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{2\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \left[ \frac{(1-\delta_1) }{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1 \right] 2(1-\delta_2) \eta^2 L^2  H^2 V_2
++ \frac{L\eta V_1}{n} \\
+&\leq \frac{2\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \left[ \frac{4(1-\delta_1) }{\delta_1^2} + 1 \right] 2(1-\delta_2) \eta^2 L^2  H^2 V_2
++ \frac{L\eta V_1}{n}.
+\end{align*}
+\end{theorem}
+
+\begin{proof}
+
+Conditional on the previous states~($x_{i, t}$), using smoothness, we have 
+\begin{align*}
+\E \left[ F(\bar{x}_t) \right] 
+\leq F(\bar{x}_{t-1}) + \underbrace{ \E\left[ \ip{\nabla F(\bar{x}_{t-1})}{\bar{x}_t - \bar{x}_{t-1}} \right] }_{\mcir{1}} + \frac{L}{2} \underbrace{ \E\left[ \| \bar{x}_t - \bar{x}_{t-1} \|^2 \right] }_{\mcir{2}}.
+\end{align*}
+
+We bound the terms step by step.
+
+Note that $\E\left[ g_{i,t} \right] = \nabla F_i(x_{i, t-1})$. Thus, we have
+\begin{align*}
+&\mcir{2} \\
+&= \E\| \bar{x}_t - \bar{x}_{t-1} \|^2 \\
+&= \E\left\| \frac{\eta}{n} \sum_{i \in [n]} g_{i,t} \right\|^2 \\
+&= \eta^2 \E\left\| \frac{1}{n} \sum_{i \in [n]} \left( g_{i,t} - \nabla F_i(x_{i, t-1}) + \nabla F_i(x_{i, t-1}) \right) \right\|^2 \\
+&= \eta^2 \E\left\| \frac{1}{n} \sum_{i \in [n]} \left( g_{i,t} - \nabla F_i(x_{i, t-1}) \right) \right\|^2 + \eta^2 \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2 \\
+&\leq \frac{\eta^2}{n} V_1 + \eta^2 \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2.
+\end{align*}
+
+
+\begin{align*}
+&\mcir{1} \\
+&= \E\left[ \ip{\nabla F(\bar{x}_{t-1})}{\bar{x}_t - \bar{x}_{t-1}} \right] \\
+&= -\eta \E\left[ \ip{\nabla F(\bar{x}_{t-1})}{ \frac{1}{n} \sum_{i \in [n]} g_{i,t} } \right] \\
+&= -\eta \ip{\nabla F(\bar{x}_{t-1})}{ \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) } \\
+&= -\frac{\eta}{2}\left\| \nabla F(\bar{x}_{t-1}) \right\|^2 - \frac{\eta}{2} \left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) \right\|^2 + \frac{\eta}{2} \underbrace{ \left\| \nabla F(\bar{x}_{t-1}) - \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) \right\|^2 }_{\mcir{3}}.
+\end{align*}
+
+Using smoothness, we have
+\begin{align*}
+&\mcir{3} \\
+&= \left\| \nabla F(\bar{x}_{t-1}) - \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) \right\|^2 \\
+&= \left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(\bar{x}_{t-1}) - \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) \right\|^2 \\
+&\leq \frac{1}{n} \sum_{i \in [n]} \E\left\| \nabla F_i(\bar{x}_{t-1}) - \nabla F_i(x_{i,t-1}) \right\|^2 \\
+&\leq \frac{L^2}{n} \sum_{i \in [n]} \E\left\| \bar{x}_{t-1} - x_{i,t-1} \right\|^2.
+\end{align*}
+
+Without loss of generality, assume that the latest synchronized model is $x_{i, t_0}$, where $t_0 \leq t-1$.
+
+Thus, we have
+\begin{align*}
+x_{i,t-1} &= x_{i, t_0} - \eta \sum_{\tau = t_0+1}^{t-1} g'_{i, \tau}, \\
+\bar{x}_{t-1} &= \frac{1}{n} \sum_{j \in [n]} x_{j, t_0} - \eta \sum_{\tau = t_0+1}^{t-1} \left( \frac{1}{n} \sum_{j \in [n]} g'_{i, \tau} \right),
+\end{align*}
+which implies that
+\begin{align*}
+\bar{x}_{t-1} - x_{i,t-1} 
+= \frac{1}{n} \sum_{j \in [n]} x_{j, t_0} - x_{i, t_0} + \eta \sum_{\tau = t_0+1}^{t-1} \left( g'_{i, \tau} - \frac{1}{n} \sum_{j \in [n]} g'_{j, \tau} \right).
+\end{align*}
+
+It is easy to check that
+\begin{align*}
+\frac{1}{n} \sum_{j \in [n]} x_{j, t_0} - x_{i, t_0} 
+= \frac{1}{n} \sum_{j \in [n]} e_{j, t_0}  - e_{i, t_0},
+\end{align*}
+and 
+\begin{align*}
+&g'_{i, \tau} - \frac{1}{n} \sum_{j \in [n]} g'_{j, \tau} \\
+&= r_{i, \tau}  - \frac{1}{n} \sum_{j \in [n]} r_{j, \tau} \\
+&= g_{i,\tau} - \CM_1\left( g_{i,\tau} \right) - \frac{1}{n} \sum_{j \in [n]} \left( g_{j,\tau} - \CM_1\left( g_{i,\tau} \right) \right).
+\end{align*}
+
+Thus, we have
+\begin{align*}
+&\mcir{3} \\
+&\leq \frac{L^2}{n} \sum_{i \in [n]} \E\left\| \frac{1}{n} \sum_{j \in [n]} x_{j, t_0} - x_{i, t_0} + \eta \sum_{\tau = t_0+1}^{t-1} \left( g'_{i, \tau} - \frac{1}{n} \sum_{j \in [n]} g'_{j, \tau} \right) \right\|^2 \\
+&\leq \frac{2L^2}{n} \sum_{i \in [n]} \E\left\| \frac{1}{n} \sum_{j \in [n]} x_{j, t_0} - x_{i, t_0} \right\|^2 + \frac{2L^2}{n} \sum_{i \in [n]} \E\left\| \eta \sum_{\tau = t_0+1}^{t-1} \left( g'_{i, \tau} - \frac{1}{n} \sum_{j \in [n]} g'_{j, \tau} \right) \right\|^2 \\
+&\leq \frac{2L^2}{n} \sum_{i \in [n]} \E\left\| \frac{1}{n} \sum_{j \in [n]} e_{j, t_0}  - e_{i, t_0} \right\|^2 \\
+&\quad+ \frac{2L^2 \eta^2 H}{n} \sum_{\tau = t_0+1}^{t-1} \sum_{i \in [n]} \E\left\| g_{i,\tau} - \CM_1\left( g_{i,\tau} \right) - \frac{1}{n} \sum_{j \in [n]} \left( g_{j,\tau} - \CM_1\left( g_{i,\tau} \right) \right) \right\|^2 \\
+&\leq \frac{2L^2}{n} \sum_{i \in [n]} \E\left\| e_{i, t_0} \right\|^2 
++ \frac{2L^2 \eta^2 H}{n} \sum_{\tau = t_0+1}^{t-1} \sum_{i \in [n]} \E\left\| g_{i,\tau} - \CM_1\left( g_{i,\tau} \right) \right\|^2 \\
+&\leq \frac{(1-\delta_2) (1-\delta_1) \eta^2 H^2 2L^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2} 
++ \frac{2L^2 \eta^2 H (1-\delta_2)}{n} \sum_{\tau = t_0+1}^{t-1} \sum_{i \in [n]} \E\left\| g_{i,\tau} \right\|^2 \\
+&\leq \frac{2(1-\delta_2) (1-\delta_1) \eta^2 H^2 L^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 2(1-\delta_2) \eta^2 L^2  H^2 V_2 \\
+\end{align*}
+
+Put together all the ingredients above, using $\eta \leq \frac{1}{L}$, we have
+\begin{align*}
+&\E \left[ F(\bar{x}_t) \right] \\
+&\leq F(\bar{x}_{t-1}) + \mcir{1} + \frac{L}{2} \mcir{2} \\
+&\leq F(\bar{x}_{t-1}) -\frac{\eta}{2}\left\| \nabla F(\bar{x}_{t-1}) \right\|^2 - \frac{\eta}{2} \left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) \right\|^2 + \frac{\eta}{2} \mcir{3} + \frac{L}{2} \mcir{2} \\
+&\leq F(\bar{x}_{t-1}) -\frac{\eta}{2}\left\| \nabla F(\bar{x}_{t-1}) \right\|^2 - \frac{\eta}{2} \left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) \right\|^2 \\
+&\quad + \frac{(1-\delta_2) (1-\delta_1) \eta^3 H^2 L^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + (1-\delta_2) \eta^3 L^2  H^2 V_2 \\
+&\quad + \frac{L}{2} \left[ \frac{\eta^2}{n} V_1 + \eta^2 \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2 \right] \\
+&= F(\bar{x}_{t-1}) -\frac{\eta}{2}\left\| \nabla F(\bar{x}_{t-1}) \right\|^2
++ \frac{L\eta^2-\eta}{2} \left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i,t-1}) \right\|^2 \\
+&\quad + \frac{(1-\delta_2) (1-\delta_1) \eta^3 H^2 L^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + (1-\delta_2) \eta^3 L^2  H^2 V_2
++ \frac{L\eta^2}{2n} V_1 \\
+&= F(\bar{x}_{t-1}) -\frac{\eta}{2}\left\| \nabla F(\bar{x}_{t-1}) \right\|^2
++ \left[ \frac{(1-\delta_1) }{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1 \right] (1-\delta_2) \eta^3 L^2  H^2 V_2
++ \frac{L\eta^2}{2n} V_1.
+\end{align*}
+
+By telescoping and taking total expectation, after $T$ iterations, we have
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{2\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \left[ \frac{(1-\delta_1) }{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1 \right] 2(1-\delta_2) \eta^2 L^2  H^2 V_2
++ \frac{L\eta V_1}{n} \\
+&\leq \frac{2\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \left[ \frac{(1-\delta_1) }{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1 \right] 2(1-\delta_2) \eta^2 L^2  H^2 V_2
++ \frac{L\eta V_1}{n}.
+\end{align*}
+
+\end{proof}
+
+\begin{corollary}
+Taking $\eta = \min \left\{ \frac{\gamma}{\sqrt{T / n} + \left[ 4(1-\delta_1) / \delta_1^2 + 1 \right]^{1/3} 2^{1/3} (1-\delta_2)^{1/3}  H^{2/3} T^{1/3}}, \frac{1}{L} \right\}$ for some $\gamma > 0$, after $T \gg n$ iterations, Algorithm~\ref{alg:ersgd}~(CSER) converges to a critical point: 
+$
+\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] 
+\leq \frac{1}{\sqrt{nT}} \left[ \frac{F_o}{\gamma} + \gamma L V_1 \right] 
++ \frac{\left[ 4(1-\delta_1) / \delta_1^2 + 1 \right]^{1/3} 2^{1/3} (1-\delta_2)^{1/3}  H^{2/3}}{T^{2/3}} \left[  \frac{F_o}{\gamma} + \gamma^2 L^2 V_2 \right]
+\leq \mathcal{O}\left( \frac{1}{\sqrt{nT}} \right).
+$
+\end{corollary}
+
+\begin{proof}
+From Theorem~\ref{thm:ersgd}, we have
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{2\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \left[ \frac{4(1-\delta_1) }{\delta_1^2} + 1 \right] 2(1-\delta_2) \eta^2 L^2  H^2 V_2
++ \frac{L\eta V_1}{n}.
+\end{align*}
+
+Denote $F_o = 2\left[ F(\bar{x}_0) - F(x_*) \right]$, and $C = \left[ \frac{4(1-\delta_1) }{\delta_1^2} + 1 \right] 2(1-\delta_2)  H^2$.
+Taking $\eta = \min \left\{ \frac{\gamma}{\sqrt{T / n} + C^{1/3} T^{1/3}}, \frac{1}{L} \right\}$, we have
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{F_o}{\eta T}
++ C \eta^2 L^2 V_2
++ \frac{L\eta V_1}{n} \\
+&\leq \frac{F_o}{ T} \frac{\sqrt{T / n} + C^{1/3} T^{1/3}}{\gamma}
++ C  L^2 V_2 \frac{\gamma^2}{C^{2/3} T^{2/3}}
++ \frac{L V_1}{n} \frac{\gamma}{\sqrt{T / n}} \\
+&\leq \frac{F_o}{\gamma \sqrt{nT}}  + \frac{F_o C^{1/3}}{\gamma T^{2/3}}
++  \frac{C^{1/3} \gamma^2 L^2 V_2}{ T^{2/3}}
++ \frac{\gamma L V_1}{\sqrt{nT}} \\
+&\leq \frac{1}{\sqrt{nT}} \left[ \frac{F_o}{\gamma} + \gamma L V_1 \right] 
++ \frac{C^{1/3}}{T^{2/3}} \left[  \frac{F_o}{\gamma} + \gamma^2 L^2 V_2 \right].
+\end{align*}
+\end{proof}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{lemma}\label{lem:bounded_p}~(Bounded update)
+For any local update, we have $\E\left\| p_{i,t} \right\|^2 \leq \frac{\eta^2}{(1-\beta)^2} V_2$, $\forall i, t$.
+\end{lemma}
+
+\begin{proof}
+It is easy to check that 
+\begin{align*}
+    m_{i, t} = \sum_{\tau=1}^t \beta^{t-\tau} g_{i,\tau}.
+\end{align*}
+Thus, taking $s_t = \sum_{\tau=0}^t \beta^{\tau}$, we have
+\begin{align*}
+\E\left\| p_{i,t} \right\|^2 \\
+&= \eta^2 \E\left\| \beta m_{i,t} + g_{i,t} \right\|^2 \\
+&= \eta^2 \E\left\| \left( \beta \sum_{\tau=1}^t \beta^{t-\tau} g_{i,\tau} \right) + g_{i,t} \right\|^2 \\
+&= \eta^2 s^2_t \E\left\| \left( \sum_{\tau=1}^t \frac{\beta^{t-\tau+1}}{s_t} g_{i,\tau} \right) + \frac{1}{s_t} g_{i,t} \right\|^2 \\
+&\leq \eta^2 s^2_t \left[ \left( \sum_{\tau=1}^t \frac{\beta^{t-\tau+1}}{s_t} \E\left\| g_{i,\tau} \right\|^2 \right)  + \frac{1}{s_t} \E\left\| g_{i,t} \right\|^2 \right] \comment{Jensen's inequality} \\
+&\leq \eta^2 s^2_t \left[ \left( \sum_{\tau=1}^t \frac{\beta^{t-\tau+1}}{s_t} V_2 \right)  + \frac{1}{s_t} V_2 \right] \comment{Assumption~\ref{asm:gradient}} \\
+&= \eta^2 s_t \left[ \left( \sum_{\tau=1}^t \beta^{t-\tau+1} V_2 \right)  + V_2 \right] \\
+&= \eta^2 s_t \left[ \left( \sum_{\tau=1}^t \beta^{t-\tau+1} V_2 \right)  + V_2 \right] \\
+&= \eta^2 s_t \left( \sum_{\tau=1}^{t+1} \beta^{t-\tau+1} V_2 \right)\\
+&= \eta^2 s^2_t V_2 \\
+&\leq \frac{\eta^2}{(1-\beta)^2} V_2.
+\end{align*}
+\end{proof}
+
+\begin{lemma}\label{lem:error_reset_m}~(Error Reset of M-CSER)
+With momentum, after every $H$ steps, the local error will be reset to 
+\begin{align*}
+&\E\left\| e_{i,t} \right\|^2 \leq \frac{(1-\delta_2) (1-\delta_1) \eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2 (1-\beta)^2},
+\end{align*}
+for $\forall t \in [T], \mod(t,H) = 0$.
+\end{lemma}
+
+\begin{proof}
+
+First, we establish the bound of the local error $\E \|e_{i,t-\frac{1}{2}}\|^2$ before (partial) synchronization. 
+
+\textbf{Case I:}
+For $t=0$, we have no local error:
+\begin{align*}
+e_{i,0} = \0.
+\end{align*}
+
+\textbf{Case II:}
+For $t = H$, we have the local error:
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \\
+&= \E \left\| -  \sum_{\tau = 1}^{H} r_{i,\tau} \right\|^2 \\
+&= \E \left\|  \sum_{\tau = 1}^{H} r_{i,\tau} \right\|^2 \\
+&\leq H \sum_{\tau = 1}^{H} \E \left\| r_{i,\tau} \right\|^2 \\
+&= H \sum_{\tau = 1}^{H} \E \left\| p_{i,\tau} - \CM_1\left( p_{i,\tau} \right) \right\|^2 \\
+&\leq H (1-\delta_2) \sum_{\tau = 1}^{H} \E \left\| p_{i,\tau} \right\|^2 \\
+&\leq  \frac{(1-\delta_2) \eta^2 H^2}{(1-\beta)^2} V_2. \comment{Lemma~\ref{lem:bounded_p}}
+\end{align*}
+
+\textbf{Case III:}
+For any $t \in [T]$ such that $\mod(t,H) = 0, t > H$, we can bound the local error:
+\begin{align*}
+\E \|e_{i,t-\frac{1}{2}}\|^2 
+= \E \left\| e_{i,t-H} - \sum_{\tau = t-H+1}^{t} r_{i,\tau}  \right\|^2.
+\end{align*}
+
+Note that after (partial) synchronization, the local error is reset as $e_{i,t-H}  = e_{i,t-H-\frac{1}{2}} - \CM_2\left(e_{i,t-H-\frac{1}{2}}\right)$. 
+
+Thus, we have
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \\
+&= \E \left\| e_{i,t-H-\frac{1}{2}} - \CM_2\left(e_{i,t-H-\frac{1}{2}}\right) - \sum_{\tau = t-H+1}^{t} \left( p_{i,\tau} - \CM_1\left( p_{i,\tau} \right) \right)  \right\|^2 \\
+&\leq (1+a)\E \left\| e_{i,t-H-\frac{1}{2}} - \CM_2\left(e_{i,t-H-\frac{1}{2}}\right) \right\|^2 + (1+1/a)\E \left\| \sum_{\tau = t-H+1}^{t} \left( p_{i,\tau} - \CM_1\left( p_{i,\tau} \right) \right)  \right\|^2 \\
+&\leq (1+a)(1-\delta_1)\E \left\| e_{i,t-H-\frac{1}{2}} \right\|^2 + (1+1/a)\eta^2 H (1-\delta_2) \sum_{\tau = t-H+1}^{t} \E \left\| p_{i,\tau}  \right\|^2 \\
+&\leq (1+a)(1-\delta_1)\E \left\| e_{i,t-H-\frac{1}{2}} \right\|^2 + \frac{(1+1/a)(1-\delta_2)\eta^2 H^2}{(1-\beta)^2} V_2 \\
+&\leq \frac{(1+1/a)(1-\delta_2)\eta^2 H^2}{(1-\beta)^2} V_2 \sum_{\tau=0}^{+\infty} \left[ (1+a)(1-\delta_1) \right]^{\tau} \\
+&\leq \frac{1+1/a}{1- (1+a)(1-\delta_1)}  \frac{(1-\delta_2)\eta^2 H^2}{(1-\beta)^2} V_2,
+\end{align*}
+for any $a > 0$, such that $(1+a)(1-\delta_1) \in (0,1)$.
+The bound above is minimized when we take $a = \frac{1}{\sqrt{1-\delta_1}} - 1$, which results in
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \leq \frac{(1-\delta_2)\eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2 (1-\beta)^2}.
+\end{align*}
+
+Combining all the 3 cases above, we obtain that for $\forall t \in [T]$ such that $\mod(t,H) = 0$:
+\begin{align*}
+&\E \|e_{i,t-\frac{1}{2}}\|^2 \leq \frac{(1-\delta_2)\eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2 (1-\beta)^2}.
+\end{align*}
+
+Then, after the (partial) synchronization, we have
+\begin{align*}
+&\E \left\| e_{i,t}  \right\|^2 \\
+&= \E \left\| e_{i,t-\frac{1}{2}} - \CM_2\left(e_{i,t-\frac{1}{2}}\right) \right\|^2 \\
+&\leq (1-\delta_1) \E \left\| e_{i,t-\frac{1}{2}} \right\|^2 \\
+&\leq \frac{(1-\delta_2) (1-\delta_1) \eta^2 H^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2 (1-\beta)^2},
+\end{align*}
+for $\forall t \in [T], \mod(t,H) = 0$.
+\end{proof}
+
+\begin{theorem}
+Taking $\eta \leq \min\{\frac{1}{2}, \frac{1-\beta}{2L}\}$, after $T$ iterations, Algorithm~\ref{alg:ersgdm_1} has the following error bound: 
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{2(1-\beta)\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \frac{\eta^2 \beta^4 L^2 V_2}{(1-\beta)^4} 
++ \frac{\eta L V_1}{n (1-\beta)} \\
+&\quad + \left(\frac{1-\delta_1}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1\right) \frac{2(1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2} \\
+&\leq \frac{2(1-\beta)\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \frac{\eta^2 \beta^4 L^2 V_2}{(1-\beta)^4} 
++ \frac{\eta L V_1}{n (1-\beta)} \\
+&\quad + \left(\frac{4(1-\delta_1)}{\delta_1^2} + 1\right) \frac{2(1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2}.
+\end{align*}
+\end{theorem}
+
+\begin{proof}
+
+To prove the convergence, we introduce 2 sequences of auxiliary variables: $\{\bar{x}_t, t \geq 0\}$ and $\{\bar{z}_t, t \geq 0\}$, where
+\begin{align*}
+\bar{x}_t &= \frac{1}{n} \sum_{i \in [n]} x_{i, t}, \forall t \geq 0, \\
+\bar{z}_t &= 
+\begin{cases}
+x_0, & t = 0, \\
+\bar{x}_t - \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t}, & t \geq 1.
+\end{cases}
+\end{align*}
+
+For $t = 0$, we have
+\begin{align*}
+&\bar{z}_{t+1} - \bar{z}_t \\
+&= \bar{z}_{1} - \bar{z}_0 \\
+&= \bar{x}_1 - \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, 1} - \bar{x}_0 \\
+&= - \frac{1}{n} \sum_{i \in [n]} p_{i, 1} - \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, 1} \\
+&= -\eta \frac{1}{n} \sum_{i \in [n]} \left( \beta m_{i, 1} + g_{i,1} \right) - \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, 1} \\
+&= -\eta \frac{1}{n} \sum_{i \in [n]} \left[ (\beta + \frac{\beta^2}{1-\beta}) m_{i,1} + g_{i,1}  \right] \\
+&= -\eta \frac{1}{n} \sum_{i \in [n]} \left[ \frac{\beta}{1-\beta} g_{i,1} + g_{i,1}  \right] \\
+&= - \frac{\eta}{1-\beta} \frac{1}{n} \sum_{i \in [n]}  g_{i,t+1}
+\end{align*}
+
+For $t \geq 1$, we have
+\begin{align*}
+&\bar{z}_{t+1} - \bar{z}_t \\
+&= \bar{x}_{t+1} - \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t+1} - \bar{x}_t + \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t} \\
+&= -  \frac{1}{n} \sum_{i \in [n]} p_{i, t+1} - \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t+1} + \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t} \\
+&= - \eta \frac{1}{n} \sum_{i \in [n]} (\beta m_{i, t+1} + g_{i,t+1}) - \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t+1} + \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t} \\
+&= - \eta \frac{1}{n} \sum_{i \in [n]} g_{i,t+1} - \frac{\eta \beta}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t+1} + \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t} \\
+&= - \eta \frac{1}{n} \sum_{i \in [n]} g_{i,t+1} - \frac{\eta \beta}{1-\beta} \frac{1}{n} \sum_{i \in [n]} (\beta m_{i, t} + g_{i,t+1}) + \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t} \\
+&= - \frac{\eta }{1-\beta} \frac{1}{n} \sum_{i \in [n]} g_{i,t+1} \\
+\end{align*}
+
+Thus, for $\forall t \geq 0$, we have
+\begin{align}
+\bar{z}_{t+1} - \bar{z}_t = - \frac{\eta}{1-\beta} \frac{1}{n} \sum_{i \in [n]} g_{i, t+1}.
+\end{align}
+
+Conditional on all the states previous to $x_{i, t}$, using smoothness, we have 
+\begin{align*}
+\E \left[ F(\bar{z}_t) \right] 
+\leq F(\bar{z}_{t-1}) + \underbrace{ \E\left[ \ip{\nabla F(\bar{z}_{t-1})}{\bar{z}_t - \bar{z}_{t-1}} \right] }_{\mcir{1}} + \frac{L}{2} \underbrace{ \E\left[ \| \bar{z}_t - \bar{z}_{t-1} \|^2 \right] }_{\mcir{2}}.
+\end{align*}
+
+We bound the terms step by step.
+
+Note that $\E\left[ g_{i,t} \right] = \nabla F_i(x_{i, t-1})$. 
+Thus, for $\mcir{2}$, we have
+\begin{align*}
+&\mcir{2} \\
+&= \E\| \bar{z}_t - \bar{z}_{t-1} \|^2 \\
+&= \E\left\| \frac{\eta}{1-\beta} \frac{1}{n} \sum_{i \in [n]} g_{i,t} \right\|^2 \\
+&= \frac{\eta^2}{(1-\beta)^2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \left( g_{i,t} - \nabla F_i(x_{i, t-1}) + \nabla F_i(x_{i, t-1}) \right) \right\|^2 \\
+&= \frac{\eta^2}{(1-\beta)^2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \left( g_{i,t} - \nabla F_i(x_{i, t-1}) \right) \right\|^2 + \frac{\eta^2}{(1-\beta)^2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2 \\
+&= \frac{\eta^2}{n (1-\beta)^2} V_1 + \frac{\eta^2}{(1-\beta)^2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2.
+\end{align*}
+
+Then, for $\mcir{1}$, we have 
+\begin{align*}
+&\mcir{1} \\
+&= \E\left[ \ip{\nabla F(\bar{z}_{t-1})}{\bar{z}_t - \bar{z}_{t-1}} \right] \\
+&= \E\left[ \ip{\nabla F(\bar{z}_{t-1})}{- \frac{\eta}{1-\beta} \frac{1}{n} \sum_{i \in [n]} g_{i, t}} \right] \\
+&= - \frac{\eta}{1-\beta} \E\ip{\nabla F(\bar{z}_{t-1})}{ \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) }  \\
+&= \underbrace{ - \frac{\eta}{1-\beta} \E\ip{\nabla F(\bar{z}_{t-1}) - \nabla F(\bar{x}_{t-1})}{ \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) } }_{\mcir{3}} \underbrace{ - \frac{\eta}{1-\beta} \E\ip{ \nabla F(\bar{x}_{t-1})}{ \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) } }_{\mcir{4}} .
+\end{align*}
+
+For $\mcir{3}$, we have
+\begin{align*}
+&\mcir{3} \\
+&= - \frac{\eta}{1-\beta} \E\ip{\nabla F(\bar{z}_{t-1}) - \nabla F(\bar{x}_{t-1})}{ \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) } \\
+&= - \frac{1}{1-\beta} \E\ip{\nabla F(\bar{z}_{t-1}) - \nabla F(\bar{x}_{t-1})}{ \frac{\eta}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) } \\
+&\leq \frac{1}{2(1-\beta)} \underbrace{ \E\left\| \nabla F(\bar{z}_{t-1}) - \nabla F(\bar{x}_{t-1}) \right\|^2 }_{\mcir{5}} + \frac{\eta^2}{2(1-\beta)} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2,
+\end{align*}
+where (using smoothness)
+\begin{align*}
+&\mcir{5} \\
+&= \E\left\| \nabla F(\bar{z}_{t-1}) - \nabla F(\bar{x}_{t-1}) \right\|^2 \\
+&\leq L^2 \E\left\| \bar{z}_{t-1} - \bar{x}_{t-1} \right\|^2 \\
+&= L^2 \E\left\| \frac{\eta \beta^2}{1-\beta} \frac{1}{n} \sum_{i \in [n]} m_{i, t-1} \right\|^2 \\
+&= \frac{L^2 \eta^2 \beta^4}{(1-\beta)^2} \left\| \frac{1}{n} \sum_{i \in [n]} m_{i, t-1} \right\|^2 \\
+&\leq \frac{L^2 \eta^2 \beta^4}{(1-\beta)^4} V_2.
+\end{align*}
+
+For $\mcir{4}$, we have
+\begin{align*}
+&\mcir{4} \\
+&= - \frac{\eta}{1-\beta} \E\ip{ \nabla F(\bar{x}_{t-1})}{ \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) } \\
+&= - \frac{\eta}{1-\beta} \left[ \frac{1}{2} \E\left\| \nabla F(\bar{x}_{t-1}) \right\|^2 + \frac{1}{2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 - \frac{1}{2} \E\left\| \nabla F(\bar{x}_{t-1}) - \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 \right] \\
+&= - \frac{\eta}{2(1-\beta)} \E\left\| \nabla F(\bar{x}_{t-1}) \right\|^2 - \frac{\eta}{2(1-\beta)} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 \\
+&\quad + \frac{\eta}{2(1-\beta)} \underbrace{ \E\left\| \nabla F(\bar{x}_{t-1}) - \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 }_{\mcir{6}},
+\end{align*}
+where
+\begin{align*}
+&\mcir{6} \\
+&= \E\left\| \nabla F(\bar{x}_{t-1}) - \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 \\
+&= \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(\bar{x}_{t-1}) - \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 \\
+&\leq \frac{1}{n} \sum_{i \in [n]} \E\left\| \nabla F_i(\bar{x}_{t-1}) - \nabla F_i(x_{i, t-1}) \right\|^2 \\
+&\leq \frac{L^2}{n} \sum_{i \in [n]} \E\left\| \bar{x}_{t-1} - x_{i, t-1} \right\|^2.
+\end{align*}
+
+Without loss of generality, assume that the latest synchronized model is $x_{i, t_0}$, where $t_0 \leq t-1$, $\mod(t_0, H) = 0$.
+Thus, we have
+\begin{align*}
+x_{i,t-1} &= x_{i, t_0} -  \sum_{\tau = t_0+1}^{t-1} p'_{i, \tau}, \\
+\bar{x}_{t-1} &= \frac{1}{n} \sum_{j \in [n]} x_{j, t_0} -  \sum_{\tau = t_0+1}^{t-1} \left( \frac{1}{n} \sum_{j \in [n]} p_{i, \tau} \right),
+\end{align*}
+which implies that
+\begin{align*}
+\bar{x}_{t-1} - x_{i,t-1} 
+= \frac{1}{n} \sum_{j \in [n]} x_{j, t_0} - x_{i, t_0} +  \sum_{\tau = t_0+1}^{t-1} \left( p'_{i, \tau} - \frac{1}{n} \sum_{j \in [n]} p_{j, \tau} \right).
+\end{align*}
+
+It is easy to check that 
+\begin{align*}
+&\frac{1}{n} \sum_{j \in [n]} x_{j, t_0} - x_{i, t_0} \\
+&= \frac{1}{n} \sum_{j \in [n]} e_{j, t_0}  - e_{i, t_0}, 
+\end{align*}
+and 
+\begin{align*}
+&p'_{i, \tau} - \frac{1}{n} \sum_{j \in [n]} p_{j, \tau} \\
+&= r_{i, \tau}  - \frac{1}{n} \sum_{j \in [n]} r_{j, \tau}  \\
+&= p_{i, \tau} - \CM_1(p_{i, \tau}) - \frac{1}{n} \sum_{j \in [n]} \left( p_{j, \tau} - \CM_1(p_{j, \tau}) \right) \\
+\end{align*}
+
+Then, we have
+\begin{align*}
+&\mcir{6} \\
+&\leq \frac{L^2}{n} \sum_{i \in [n]} \E\left\| \bar{x}_{t-1} - x_{i, t-1} \right\|^2 \\
+&\leq \frac{2L^2}{n} \sum_{i \in [n]} \E\left\| \frac{1}{n} \sum_{j \in [n]} e_{j, t_0}  - e_{i, t_0} \right\|^2 \\
+&\quad + \frac{2L^2}{n} \sum_{i \in [n]} \E\left\| \sum_{\tau = t_0+1}^{t-1} \left[ p_{i, \tau} - \CM_1(p_{i, \tau}) - \frac{1}{n} \sum_{j \in [n]} \left( p_{j, \tau} - \CM_1(p_{j, \tau}) \right) \right] \right\|^2 \\
+&\leq \frac{2L^2}{n} \sum_{i \in [n]} \E\left\| e_{i, t_0} \right\|^2 
++ \frac{2L^2  H}{n} \sum_{i \in [n]} \sum_{\tau = t_0+1}^{t-1} \E\left\| p_{i, \tau} - \CM_1(p_{i, \tau}) \right\|^2 \\
+&\leq \frac{2(1-\delta_2) (1-\delta_1) \eta^2 H^2 L^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2 (1-\beta)^2} 
++ \frac{2L^2  H}{n} \sum_{i \in [n]} \sum_{\tau = t_0+1}^{t-1} \E\left\| p_{i, \tau} - \CM_1(p_{i, \tau}) \right\|^2 \comment{Lemma~\ref{lem:error_reset_m}} \\
+&\leq \frac{2(1-\delta_2) (1-\delta_1) \eta^2 H^2 L^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2 (1-\beta)^2} 
++ \frac{2 (1-\delta_2)  H L^2}{n} \sum_{i \in [n]} \sum_{\tau = t_0+1}^{t-1} \E\left\| p_{i, \tau} \right\|^2 \\
+&\leq \frac{2(1-\delta_2) (1-\delta_1) \eta^2 H^2 L^2 V_2}{\left( 1 - \sqrt{1-\delta_1} \right)^2 (1-\beta)^2} 
++ \frac{2 (1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2} \comment{Lemma~\ref{lem:bounded_p}} \\
+&\leq \left(\frac{1-\delta_1}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1\right)
+ \frac{2 (1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2} .
+\end{align*}
+
+Finally, combining all the ingredients above, we have
+\begin{align*}
+&\E \left[ F(\bar{z}_t) - F(\bar{z}_{t-1}) \right] \\
+&\leq  \mcir{1} + \frac{L}{2} \mcir{2} \\
+&=  \mcir{3} + \mcir{4} + \frac{L}{2} \left[ \frac{\eta^2}{n (1-\beta)^2} V_1 + \frac{\eta^2}{(1-\beta)^2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2 \right] \\
+&\leq \frac{1}{2(1-\beta)} \mcir{5} + \frac{\eta^2}{2(1-\beta)} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 \\
+&\quad - \frac{\eta}{2(1-\beta)} \E\left\| \nabla F(\bar{x}_{t-1}) \right\|^2 - \frac{\eta}{2(1-\beta)} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 + \frac{\eta}{2(1-\beta)} \mcir{6} \\
+&\quad+ \frac{L}{2} \left[ \frac{\eta^2}{n (1-\beta)^2} V_1 + \frac{\eta^2}{(1-\beta)^2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2 \right] \\
+&\leq \frac{1}{2(1-\beta)} \frac{L^2 \eta^2 \beta^4}{(1-\beta)^4} V_2 + \frac{\eta^2}{2(1-\beta)} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 \\
+&\quad - \frac{\eta}{2(1-\beta)} \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 - \frac{\eta}{2(1-\beta)} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1}) \right\|^2 \\
+&\quad + \frac{\eta}{2(1-\beta)} \left(\frac{1-\delta_1}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1\right) \frac{2 (1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2} \\
+&\quad+ \frac{L}{2} \left[ \frac{\eta^2}{n (1-\beta)^2} V_1 + \frac{\eta^2}{(1-\beta)^2} \E\left\| \frac{1}{n} \sum_{i \in [n]} \nabla F_i(x_{i, t-1})  \right\|^2 \right] \\
+&\leq \frac{1}{2(1-\beta)} \frac{L^2 \eta^2 \beta^4}{(1-\beta)^4} V_2 + \frac{L}{2} \frac{\eta^2}{n (1-\beta)^2} V_1 - \frac{\eta}{2(1-\beta)} \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \comment{using $\eta \leq \min\{\frac{1}{2}, \frac{1-\beta}{2L}\}$}\\
+&\quad + \frac{\eta}{2(1-\beta)} \left(\frac{1-\delta_1}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1\right) \frac{2 (1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2} \\
+&\leq \frac{\eta^2 \beta^4 L^2 V_2}{2(1-\beta)^5}  + \frac{\eta^2 L V_1}{2n (1-\beta)^2} - \frac{\eta}{2(1-\beta)} \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \\
+&\quad + \left(\frac{1-\delta_1}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1\right) \frac{(1-\delta_2) \eta^3 H^2 L^2 V_2}{(1-\beta)^3}.
+\end{align*}
+
+By re-arranging the terms, we have
+\begin{align*}
+&\left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \\
+&\leq \frac{2(1-\beta) \E \left[ F(\bar{z}_{t-1}) - F(\bar{z}_t) \right]}{\eta}
++ \frac{\eta^2 \beta^4 L^2 V_2}{(1-\beta)^4} 
++ \frac{\eta L V_1}{n (1-\beta)} \\
+&\quad + \left(\frac{1-\delta_1}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1\right) \frac{2(1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2}.
+\end{align*}
+
+By telescoping and taking total expectation, after $T$ iterations, we have
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{2(1-\beta)\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \frac{\eta^2 \beta^4 L^2 V_2}{(1-\beta)^4} 
++ \frac{\eta L V_1}{n (1-\beta)} \\
+&\quad + \left(\frac{1-\delta_1}{\left( 1 - \sqrt{1-\delta_1} \right)^2} + 1\right) \frac{2(1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2}
+\end{align*}
+
+\end{proof}
+
+
+\begin{corollary}
+Taking $\eta = \min \left\{ \frac{\gamma}{\sqrt{T / n} + \left[ \left( 4(1-\delta_1) / \delta_1^2 + 1 \right) 2(1-\delta_2)  H^2 + 1 \right]^{1/3} T^{1/3}}, \frac{1}{2} \right\}$ for some $\gamma > 0$, after $T \geq \frac{4 \gamma^2 L^2 n}{(1-\beta)^2}$ iterations, Algorithm~\ref{alg:ersgdm_1}~(CSERM) converges to a critical point: 
+$
+\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] 
+\leq \frac{1}{\sqrt{nT}} \left[ \frac{2(1-\beta)\left[ F(\bar{x}_0) - F(x_*) \right]}{\gamma} + \frac{\gamma L V_1}{(1-\beta)} \right] 
++ \frac{\left[ \left( 4(1-\delta_1) / \delta_1^2 + 1 \right) 2(1-\delta_2)  H^2 + 1 \right]^{1/3}}{T^{2/3}} \left[  \frac{ 2(1-\beta)\left[ F(\bar{x}_0) - F(x_*) \right]}{\gamma} + \frac{\gamma^2 L^2 V_2}{(1-\beta)^4} \right].
+$
+\end{corollary}
+
+\begin{proof}
+From Theorem~\ref{thm:ersgdm}, taking $\eta \leq \min\{\frac{1}{2}, \frac{1-\beta}{2L}\}$, we have
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{2(1-\beta)\left[ F(\bar{x}_0) - F(x_*) \right]}{\eta T}
++ \frac{\eta^2 \beta^4 L^2 V_2}{(1-\beta)^4} 
++ \frac{\eta L V_1}{n (1-\beta)} \\
+&\quad + \left(\frac{4(1-\delta_1)}{\delta_1^2} + 1\right) \frac{2(1-\delta_2) \eta^2 H^2 L^2 V_2}{(1-\beta)^2}.
+\end{align*}
+
+Denote $F_o = 2\left[ F(\bar{x}_0) - F(x_*) \right]$, and $C = \left[ \frac{4(1-\delta_1) }{\delta_1^2} + 1 \right] 2(1-\delta_2)  H^2 + 1$.
+Taking $\eta = \min \left\{ \frac{\gamma}{\sqrt{T / n} + C^{1/3} T^{1/3}}, \frac{1}{2} \right\}$, and $T \geq \frac{4 \gamma^2 L^2 n}{(1-\beta)^2}$, we have $\eta \leq \frac{1-\beta}{2L}$. Thus, we have
+\begin{align*}
+&\frac{1}{T} \sum_{t=1}^T \E\left[ \left\| \nabla F(\bar{x}_{t-1}) \right\|^2 \right] \\
+&\leq \frac{(1-\beta)F_o}{\eta T}
++ \frac{L\eta V_1}{n (1-\beta)}
++ \frac{C \eta^2 L^2 V_2}{(1-\beta)^4} \\
+&\leq \frac{(1-\beta) F_o}{ T} \frac{\sqrt{T / n} + C^{1/3} T^{1/3}}{\gamma} 
++ \frac{L V_1}{n (1-\beta)} \frac{\gamma}{\sqrt{T / n}}
++ C  L^2 V_2 \frac{\gamma^2}{C^{2/3} T^{2/3} (1-\beta)^4} \\
+&\leq \frac{(1-\beta) F_o}{\gamma \sqrt{nT}}  + \frac{(1-\beta) F_o C^{1/3}}{\gamma T^{2/3}}
++  \frac{C^{1/3} \gamma^2 L^2 V_2}{ T^{2/3} (1-\beta)^4}
++ \frac{\gamma L V_1}{(1-\beta)\sqrt{nT}} \\
+&\leq \frac{1}{\sqrt{nT}} \left[ (1-\beta) \frac{F_o}{\gamma} + \frac{\gamma L V_1}{(1-\beta)} \right] 
++ \frac{C^{1/3}}{T^{2/3}} \left[  \frac{(1-\beta) F_o}{\gamma} + \frac{\gamma^2 L^2 V_2}{(1-\beta)^4} \right].
+\end{align*}
+\end{proof}
+\section{Compressor configurations}
+\begin{table}[htb!]
+\caption{Compressor configurations}
+\label{tbl:config}
+\begin{center}
+\begin{small}
+\begin{tabular}{|l|r|l|r|l|}
+\hline
+ Optimizer         &   Overall $R_{\CM}$ & $R_{\CM_2}$          &   $R_{\CM_1}$ & H              \\ \hline
+ EF-SGD            &            2 & \strike{|c|}{} &       2 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &            2 & \strike{|c|}{} &       1 & 2              \\ \hline
+ CSEA            &            2 & \strike{|c|}{} &       2 & \strike{|c|}{} \\ \hline
+ CSER            &            2 & 4              &       2 & 2              \\ \hline
+ EF-SGD            &            4 & \strike{|c|}{} &       4 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &            4 & \strike{|c|}{} &       1 & 4              \\ \hline
+ CSEA            &            4 & \strike{|c|}{} &       4 & \strike{|c|}{} \\ \hline
+ CSER            &            4 & 8              &       2 & 4              \\ \hline
+ CSER-PL &            4 & \strike{|c|}{} &       2 & 2              \\ \hline
+ EF-SGD            &            8 & \strike{|c|}{} &       8 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &            8 & \strike{|c|}{} &       1 & 8              \\ \hline
+ CSEA            &            8 & \strike{|c|}{} &       8 & \strike{|c|}{} \\ \hline
+ CSER            &            8 & 16             &       2 & 8              \\ \hline
+ CSER-PL &            8 & \strike{|c|}{} &       2 & 4              \\ \hline
+ EF-SGD            &           16 & \strike{|c|}{} &      16 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &           16 & \strike{|c|}{} &       4 & 4              \\ \hline
+ CSEA            &           16 & \strike{|c|}{} &      16 & \strike{|c|}{} \\ \hline
+ CSER            &           16 & 32             &       8 & 4              \\ \hline
+ CSER-PL &           16 & \strike{|c|}{} &       4 & 4              \\ \hline
+ EF-SGD            &           32 & \strike{|c|}{} &      32 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &           32 & \strike{|c|}{} &       4 & 8              \\ \hline
+ CSEA            &           32 & \strike{|c|}{} &      32 & \strike{|c|}{} \\ \hline
+ CSER            &           32 & 64             &       8 & 8              \\ \hline
+ CSER-PL &           32 & \strike{|c|}{} &       8 & 4              \\ \hline
+ EF-SGD            &           64 & \strike{|c|}{} &      64 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &           64 & \strike{|c|}{} &      16 & 4              \\ \hline
+ CSEA            &           64 & \strike{|c|}{} &      64 & \strike{|c|}{} \\ \hline
+ CSER            &           64 & 128            &       8 & 16             \\ \hline
+ CSER-PL &           64 & \strike{|c|}{} &       8 & 8              \\ \hline
+ EF-SGD            &          128 & \strike{|c|}{} &     128 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &          128 & \strike{|c|}{} &      16 & 8              \\ \hline
+ CSEA            &          128 & \strike{|c|}{} &     128 & \strike{|c|}{} \\ \hline
+ CSER            &          128 & 256            &       4 & 64             \\ \hline
+ CSER-PL &          128 & \strike{|c|}{} &       8 & 16             \\ \hline
+ EF-SGD            &          256 & \strike{|c|}{} &     256 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &          256 & \strike{|c|}{} &     128 & 2              \\ \hline
+ CSEA            &          256 & \strike{|c|}{} &     256 & \strike{|c|}{} \\ \hline
+ CSER            &          256 & 512            &      16 & 32             \\ \hline
+ CSER-PL &          256 & \strike{|c|}{} &      16 & 16             \\ \hline
+ EF-SGD            &          512 & \strike{|c|}{} &     512 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &          512 & \strike{|c|}{} &     128 & 4              \\ \hline
+ CSEA            &          512 & \strike{|c|}{} &     512 & \strike{|c|}{} \\ \hline
+ CSER            &          512 & 1024           &       8 & 128            \\ \hline
+ CSER-PL &          512 & \strike{|c|}{} &      16 & 32             \\ \hline
+ EF-SGD            &         1024 & \strike{|c|}{} &    1024 & \strike{|c|}{} \\ \hline
+ QSparse-local-SGD &         1024 & \strike{|c|}{} &     128 & 8              \\ \hline
+ CSEA            &         1024 & \strike{|c|}{} &    1024 & \strike{|c|}{} \\ \hline
+ CSER            &         1024 & 2048           &      32 & 64             \\ \hline
+ CSER-PL &         1024 & \strike{|c|}{} &      32 & 32             \\ \hline
+\end{tabular}
+\end{small}
+\end{center}
+\end{table}
+
+In Table~\ref{tbl:config}, we show the best configurations of the hyperparameters $H$, $R_{\CM_1}$, and $R_{\CM_2}$ for each optimizer and overall compression ratio $R_{\CM}$. When tuning the hyperparameters, given the overall compression ratio $R_{\CM}$, we enumerate the hyperparameters that satisfies $R_{\CM} = \frac{1}{1/R_{\CM_2} + 1/(R_{\CM_1} \times H)}$, such that $H \geq 2$, $R_{\CM_1} \geq 1$, and $R_{\CM_2} \geq 4$ are all varied in $\{2^c: c \in \{0, 1, \ldots, 10\} \}$
+
+\newpage
+\section{Additional experiments}
+\label{sec:additional_exp}
+
+In this section, we present additional experiments, including the results on the special cases CSEA and CSER-PL. For CIFAR-100, we also report the results on relatively small overall compression ratios~($R_{\CM} \in \{ 2,4,8 \}$). The training loss vs. the number of epochs is also reported for both CIFAR-100 and ImageNet. Furthermore, we report the testing accuracy vs. the communication overhead~(in bits).
+
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, accuracy vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_val_epoch_cifar100_32.pdf}}
+\subfigure[$CR=256$, accuracy vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_val_epoch_cifar100_256.pdf}}
+\subfigure[$CR=1024$, accuracy vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_val_epoch_cifar100_1024.pdf}}
+\caption{Testing accuracy vs.\# of epochs with different algorithms, for WideResNet-40-8 on CIFAR-100.}
+\label{fig:cifar100_epoch}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, accuracy vs. training time]{\includegraphics[width=0.7\textwidth]{result_val_time_cifar100_32.pdf}}
+\subfigure[$CR=256$, accuracy vs. training time]{\includegraphics[width=0.7\textwidth]{result_val_time_cifar100_256.pdf}}
+\subfigure[$CR=1024$, accuracy vs. training time]{\includegraphics[width=0.7\textwidth]{result_val_time_cifar100_1024.pdf}}
+\caption{Testing accuracy vs. training time with different algorithms, for WideResNet-40-8 on CIFAR-100.}
+\label{fig:cifar100_time}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, accuracy vs. communication]{\includegraphics[width=0.7\textwidth]{result_val_comm_cifar100_32.pdf}}
+\subfigure[$CR=256$, accuracy vs. communication]{\includegraphics[width=0.7\textwidth]{result_val_comm_cifar100_256.pdf}}
+\subfigure[$CR=1024$, accuracy vs. communication]{\includegraphics[width=0.7\textwidth]{result_val_comm_cifar100_1024.pdf}}
+\caption{Testing accuracy vs. communication with different algorithms, for WideResNet-40-8 on CIFAR-100.}
+\label{fig:cifar100_comm}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, loss vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_train_epoch_cifar100_32.pdf}}
+\subfigure[$CR=256$, loss vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_train_epoch_cifar100_256.pdf}}
+\subfigure[$CR=1024$, loss vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_train_epoch_cifar100_1024.pdf}}
+\caption{Training loss vs.\# of epochs with different algorithms, for WideResNet-40-8 on CIFAR-100.}
+\label{fig:cifar100_epoch_train}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, accuracy vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_val_epoch_imagenet_32.pdf}}
+\subfigure[$CR=256$, accuracy vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_val_epoch_imagenet_256.pdf}}
+\subfigure[$CR=1024$, accuracy vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_val_epoch_imagenet_1024.pdf}}
+\caption{Testing accuracy vs.\# of epochs with different algorithms, for ResNet-50 on Imagenet.}
+\label{fig:imagenet_epoch}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, accuracy vs. training time]{\includegraphics[width=0.7\textwidth]{result_val_time_imagenet_32.pdf}}
+\subfigure[$CR=256$, accuracy vs. training time]{\includegraphics[width=0.7\textwidth]{result_val_time_imagenet_256.pdf}}
+\subfigure[$CR=1024$, accuracy vs. training time]{\includegraphics[width=0.7\textwidth]{result_val_time_imagenet_1024.pdf}}
+\caption{Testing accuracy vs. training time with different algorithms, for ResNet-50 on Imagenet.}
+\label{fig:imagenet_time}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, accuracy vs. communication]{\includegraphics[width=0.7\textwidth]{result_val_comm_imagenet_32.pdf}}
+\subfigure[$CR=256$, accuracy vs. communication]{\includegraphics[width=0.7\textwidth]{result_val_comm_imagenet_256.pdf}}
+\subfigure[$CR=1024$, accuracy vs. communication]{\includegraphics[width=0.7\textwidth]{result_val_comm_imagenet_1024.pdf}}
+\caption{Testing accuracy vs. communication with different algorithms, for ResNet-50 on Imagenet.}
+\label{fig:imagenet_comm}
+\end{figure*}
+
+\begin{figure*}[htb!]
+\centering
+\subfigure[$CR=32$, loss vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_loss_epoch_imagenet_32.pdf}}
+\subfigure[$CR=256$, loss vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_loss_epoch_imagenet_256.pdf}}
+\subfigure[$CR=1024$, loss vs. \# epochs]{\includegraphics[width=0.7\textwidth]{result_loss_epoch_imagenet_1024.pdf}}
+\caption{Training loss vs.\# of epochs with different algorithms, for ResNet-50 on Imagenet.}
+\label{fig:imagenet_epoch_train}
+\end{figure*}

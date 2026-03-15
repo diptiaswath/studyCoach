@@ -1,0 +1,677 @@
+\section{Introduction}
+\label{sec:intro}
+
+
+
+
+
+
+
+
+Drawing inspiration from biology and neurophysiology, recent progress for many natural language processing (NLP) tasks has been remarkable with deep neural network based approaches, %
+including machine translation~\cite{learning-phrase-representations-using-rnn, rnn-machine-translation, seq2seq-nips14}, sentence  summarization~\cite{summarization}, dialogue agents~\cite{li2016deepdialogue}, speech recognition~\cite{speech-recognition-with-rnn, deep-speech, all-neural-speech-recognition}, and conversational bots~\cite{neural-conversational-model-with-rnn,sordoni2015neural}. 
+Such approaches often employ a neural language model (NLM) 
+as a decoder at inference time to generate a sequence of tokens (\eg, words) given an input, 
+typically via beam search~\cite{
+learning-phrase-representations-using-rnn, rnn-machine-translation, seq2seq-nips14, summarization, attention-sentence-summarization, sentence-compression, li2016deepdialogue, end-to-end-dialogue, speech-recognition-with-rnn, deep-speech, all-neural-speech-recognition, neural-conversational-model-with-rnn, sordoni2015neural}.
+
+One long-recognized issue of decoding using NLMs
+is the computational complexity, which easily becomes a bottleneck when the vocabulary size is large. 
+Consider a beam search decoder using a NLM.
+At each decoding step, a recurrent neural network~\cite{lstm-1997,gru-arxiv} first generates a context vector based on each partial hypothesis in the beam. %
+It then uses a softmax layer to 
+compute a normalized word probability distribution over the vocabulary~\cite{rnn-based-language-model, neural-probabilistic-lm-bengio, explore-the-limits-of-lm}. The softmax layer consists of an inner product operator that projects the context vector into a vocabulary-sized vector of scores, followed by a softmax function that transforms a vocabulary-sized logits into a vector of probabilities. 
+Finally, the decoder selects top-$K$ words with the highest probabilities given the context (\ie, \emph{top-$K$ maximum subset} of inner product), and stores the expended hypotheses and their probabilities in the beam.
+The most computationally expensive part in this process is the softmax layer, where the complexity 
+is linear with respect to the vocabulary size.
+In this paper we strive to develop new softmax approximation methods for fast decoding.
+
+Many techniques have been proposed to speed up the softmax layer in training, such as hierarchical softmax~\cite{hierarchical-softmax} and sampling-based approaches~\cite{negative-sampling, noise-contrastive-estimation, strategies-training-large-vocabulary-nn, on-very-large-target-vocab-for-nmt}. However, most of them cannot be directly applied to decoding because they rely on knowing the words to be predicted and need to calculate the probability of all words to find the most likely prediction during decoding.
+\jianfeng{we need to explain why these tech cannot be applied to inference!\minjia{Please let me if the added explanation works.Sampling-based approaches speedup training by approximating the normalization in the denominator of the softmax; HS speeds up training by narrowing down updates to only golden words that need to be predicted (words are organized as a hierarchical tree). All these approaches cannot speedup inference as the golden words are unknown, and a full softmax still needs to be computed for top-K estimation.}}
+Other works speed up softmax inference in training and decoding by reducing the cost of computing each word's probability using some approximation~\cite{svd-softmax, break-softmax-bottleneck,self-normalisation, strategies-training-large-vocabulary-nn}.
+However, the complexity of softmax as a whole is still linear with respect to the size of the vocabulary. 
+We observe that in beam-search-based decoding of many NLP tasks we only need to identify the top-$K$ words that are most likely to occur given a context. Can we figure out a search algorithm that can identify these $K$ words without going over the entire large vocabulary? Our answer is yes. Before we present our approach, we review briefly the finding in biological science that motivates our research.
+
+
+
+
+In spite of the large number of words in a vocabulary, human brain is capable of managing them effectively and navigating the massive mental lexicon very efficiently. How is it possible? How is the vocabulary stored and represented in human brain? One of the theories from biological science indicates that human language has a character of complex network~\cite{small-world-language, topology-of-language-network, language-as-web}, where the intrinsic relational structure, which refers to the fact that words are related to each other and thus form a \emph{small world graph}, provides some hints on how the lexicon is mentally organized.
+To predict the next word given a context, humans never need to examine every word in the vocabulary stored in their brains. Instead, a person can immediately identify a small set of $K$ candidate words that are most semantically related to the context, and then pick the most proper word among the candidates. We believe that if we can represent the vocabulary of a NLM using a similar data structure of \emph{small world graph}, we can significantly improve the decoding efficiency of NLMs because at each decoding step softmax only needs to explicitly compute the probabilities of $K$ words, where $K$ is much smaller than the vocabulary size.
+
+
+We propose a \textbf{F}ast \textbf{G}raph \textbf{D}ecoder (FGD) to approximate the softmax layer of a NLM in the beam search decoding process. First, we construct a \emph{small world graph} representation~\cite{small-world-1967, newman2000models} of a NLM vocabulary. The nodes in the graph are words, each being represented using a continuous vector which is transformed from its word embedding vector in the NLM. The edges in the graph encode the word-word distances in a well-defined metric space. Then, at each decoding step, we identify for a given context (i.e., a partial hypothesis in the beam) the top-$K$ hypotheses and compute their probabilities in the softmax layer of the NLM. 
+We prove that finding the top-$K$ hypotheses in the softmax layer is equivalent to finding the $K$ nearest neighbors using FGD in the small world graph, and the latter can be performed approximately using an efficient graph navigating method~\cite{swg-ann,hnsw}.
+We also prove that the decoding error due to use of the approximated $K$ nearest neighbor search with graph navigation is theoretically bounded. 
+
+
+
+
+
+
+
+
+
+
+We validate the effectiveness of our approach on two NLP tasks, neural machine translation and language modeling. Empirical results show that \SWVG achieves an order of magnitude speedup while attaining the  accuracy, in comparison with existing state-of-the-art approaches.
+
+In the rest of the paper, Section 2 details the softmax implementation and the challenge. Section 3 describes FGD and gives theoretical justifications. Section 4 presents experimental results. Conclusions are drawn in Section 5.
+\section{Motivation and Challenge}
+\label{subsec: background: inference}
+
+
+
+The softmax layer of a NLM is the
+computational bottleneck at the decoding time in many NLP tasks.
+Consider a NLM that uses a two--layer LSTM and a vocabulary size of $|V|$~\cite{rnn-based-language-model, neural-probabilistic-lm-bengio, explore-the-limits-of-lm}. The total number of floating point operations  (FLOPS) per LSTM step is
+$\text{2(layer)} \times (I+D) \times D \times \text{4} \times 2$~\footnote{It times 4 because an LSTM has 3 gates and 1 memory cell, and it times 2 because each weight value causes a multiply--and--add operation.}, where $I$ and $D$ represent the input and hidden dimension, respectively. 
+The number of FLOPS of the softmax layer
+is $D \times |V| \times 2$, which is proportional to $|V|$.
+Assuming that the dimension of the input/hidden layers of the LSTM is 500 and the vocabulary size is 50K, the LSTM part has 8M FLOPS
+whereas the softmax layer has 50M FLOPS.
+The
+softmax layer dominates the computational cost of the NLM, and even more so with a larger vocabulary.
+
+
+This decoding bottleneck limits NLMs' application in 
+many interactive services such as Web search, online recommendation systems and conversational bots, where 
+low latency, often at the scale of milliseconds, is demanded. 
+In addition, unlike model training where we can leverage massive parallelism power of GPUs, decoding needs to run in various clients ranging from PC, mobile, to IoT (Internet of Things), most of which have limited hardware resources and where GPUs are not always available~\cite{fog-and-iot}. 
+Therefore, fast decoding is crucial to broaden the applicability of NLMs.
+\section{Approach}
+\label{sec: design}
+
+We propose \textbf{F}ast \textbf{G}raph \textbf{D}ecoder (FGD) to approximate the softmax layer in NLMs. FGD works in two steps, as illustrated in Figure~\ref{fig:overview}. First, for any given NLM, we construct a small world graph to represent its vocabulary. Second, at each step in beam search decoding, we find for each partial hypothesis in the beam (i.e., context) the top-$K$ words that are most likely to occur, and store the expended hypotheses and their probabilities in the beam. 
+
+FGD is expected to be far more efficient than the full softmax in that 
+\begin{itemize}
+\item when expanding a partial hypothesis we only need to explicitly compute the probabilities of top-$K$ words instead of every word in a vocabulary, and
+\item there is an efficient search method of identifying the top-$K$ words on the small world graph without going over the entire vocabulary. 
+\end{itemize}
+
+
+In what follows, we will present in turn
+\begin{itemize}
+	\item Why do we choose the small world graph representation in FGD? %
+    (Section~\ref{subsec: why-swg})
+    \item How to construct a small world graph to represent the vocabulary of a NLM? %
+(Section~\ref{subsec: small-world-transformation}) %
+    \item How to identify top-$K$ hypotheses for a given context on small world graph? %
+    (Section~\ref{subsec: search-swg}) %
+\end{itemize}
+
+
+
+
+\begin{figure}[h!]
+\centering
+\adjustbox{trim={.001\width} {.005\height} {.01\width} {.005\height},clip}{\includegraphics[width=1.0\linewidth]{figs/overview-6}}
+\vspace{-1em}
+\caption{\textbf{Overview of \SWVG:}  (a) illustrates one decoding step using a NLM with a vocabulary $V$, where given a context vector $h \in \mathds{R}^D$ top-$K$ hypotheses are selected among all possible hypotheses generated by $V$ using softmax. The complexity of the softmax layer is $O(D \times |V|)$.
+(b) shows the transformation from the word embedding vectors of the NLM vocabulary, $x_1, x_2,.., x_{|V|}$, to a small world graph representation which encodes word-word distances in a well-defined metric space.
+This transformation, incurring once offline, is essential for \SWVG to perform fast decoding. (c) shows one step decoding using \SWVG. For a given context vector $h$, \SWVG identifies top-$K$ hypotheses by traversing the small world graph and produces their probabilities. The complexity of the FGD-approximated softmax layer is $O(D \times \log |V|)$.}
+\label{fig:overview}
+\end{figure} 
+\minjia{TODO: Change the section title to a phrase that summarizes the mechanism.}
+\subsection{Why Small World Graphs?}
+\label{subsec: why-swg}
+
+
+
+
+In FGD, finding top-$K$ words for a given context is implemented by finding $K$ nearest neighbors in a vector space.
+The small world graph has been recently introduced to address the problem of nearest neighbor search~\cite{swg-ann, hnsw}.
+Research shows that navigation in small world graph exhibits $O(\log N)$ search complexity
+($N$ represents the number of nodes in the graph), and performs well in high dimensionality~\cite{swg-ann, hnsw, small-world-kleinberg}. 
+
+To get logarithmic nearest neighbor search complexity, the small world graph needs to hold the \emph{small world} properties which we will detail in the following sections, such as great local connectivity (as in a lattice graph) combined with a small graph diameter (as in a random graph)~\cite{small-world-dynamics}, and a well-defined pair-wise \emph{metric} distance among words.
+\subsection{Small World Graph Construction}
+\label{subsec: small-world-transformation}
+
+
+
+
+
+
+Denote $G = (\overline{X}, E)$ as a small world graph with the set $\overline{X}$ as graph nodes and $E$ as the graph edges. Given a NLM vocabulary, which is a set of word embedding vectors $X = [x_1, x_2,..., x_{|V|}], x_i \in \mathds{R}^D$, the construction of its small world graph $G$ takes two steps. 
+
+\begin{enumerate}
+\item Constructing the node set $\overline{X}$: 
+as illustrated in Figure~\ref{fig:overview}(b), for each word embedding vector $x_i$ in $X$, we apply a transformation called Inner Product Preserving Transformation (\NIET) to obtain $\overline{X}$ = [$\overbar{x_1}, \overbar{x_2},..., \overbar{x_{|V|}}], \overbar{x_i} \in \mathds{R}^{D+2}$ that establishes the equivalence of finding top-$K$ maximum subset of inner product in $X$ and searching for top-$K$ nearest neighbors in $\overline{X}$ with a given distance metric $\rho$. (Section~\ref{subsubsec: ippt})
+\item Constructing the edge set $E$:
+Given $\overline{X}$, we impose the set $E$ based on the distance metric $\rho$ to form a small world graph. (Section~\ref{subsubsec: swg-construction})
+\end{enumerate}
+\subsubsection{Constructing $\overline{X}$ via Inner Product Preserving Transformation}
+\label{subsubsec: ippt}
+Using inner product over word embedding vectors to measure word-word distance is 
+deficient 
+because it lacks very basic properties that need to hold for distance (\ie, the inverse of similarity) functions in metric spaces (\eg, Euclidean spaces) -- identity of indiscernibles and triangle inequality~\cite{munkres2018elements}.
+For example, under the Euclidean space, two points are the same iff their distance is 0. The inner product of a point $x$ to itself is $\|x\|^2$, but there can be other points whose inner product to $x$ is smaller than $\|x\|^2$.
+The search process on small world graphs relies on these properties to converge and achieve their efficiency~\cite{swg-ann}. 
+
+
+To create a small world graph with a well-defined metric distance between words,
+we present a new method 
+called Inner Product Preserving Transformation (IPPT) to convert word embedding vectors to higher dimensional vectors. We
+establish the equivalence of finding top-$K$ maximum subset of inner product and searching for top-$K$ nearest neighbor with a distance metric
+in the higher dimension space. 
+We use the notation $\langle \cdot, \cdot \rangle$ for the inner product and $\rho(\cdot, \cdot)$ for the distance in Euclidean space.
+Thus $\rho(\xi, \eta) = \|\xi - \eta\|_2 = \sqrt{\langle \xi-\eta,\xi-\eta \rangle}$. 
+
+In lemma \ref{lemma: transformation}, we show that it is possible to define particular transformation functions for word embedding vectors and the given context vector, respectively, so that the transformation is \emph{inner product preserving}.
+We present the proof of lemma \ref{lemma: transformation} in Appendix~\ref{sec: proof}.
+\begin{lemma}
+\label{lemma: transformation}
+Let $x_i\in\mathds{R}^D$ and $b_i\in\mathds{R}$ be the word embedding vector and bias at position $i$ in the softmax layer, respectively, for $1\leq i\leq |V|$. Choose a constant $U$ such that $U\geq\max_{i\in V}\sqrt{\|x_i\|_2^2 + b_i^2}$. Let $[;]$ represents vector concatenation. Define the transformation function for word embedding vectors $\phi: \{(\xi, \eta)\in\mathds{R}^{D}\times\mathds{R}:\|\xi\|_2^2 + \eta^2\leq U^2\}\longrightarrow \mathds{R}^{D+2}$ as 
+$\phi(x,b) = \left[x;b;\sqrt{U^2-\|x\|_2^2 - b^2}\right]$. Define the transformation of the given context vector $h\in\mathds{R}^D$ as $\overline{h} = [h;1;0]\in\mathds{R}^{D+2}$. These transformations are \emph{inner product preserving} in that for any $i\in V$, we have $\langle h, x_i\rangle + b_i = \langle \overline{h}, \phi(x_i, b_i)\rangle = \frac{1}{2}\left(U^2 + 1 + \|h\|_2^2 - \rho(\overline{h}, \phi(x_i, b_i))^2\right)$.
+\end{lemma}
+
+
+
+The above lemma indicates that the transformation is both "order preserved" and "value preserved". The former means that given a context vector, its top-$K$ closest words identified using inner product in the word embedding space are the same as identified according to the Euclidean distance in the transformed space. The latter means that the ratio of the two distance scores between the context and a word computed in the two spaces respectively is a constant. Lemma \ref{lemma: transformation} implies that given a context, we can find the same top-$K$ hypotheses in either space. In the context of decoding using a NLM, the lemma implies that given a context, finding its top-$K$ words using the softmax layer in the NLM is equivalent to finding its $K$ nearest neighbors in the small world graph constructed from the NLM vocabulary. This is formally stated in Theorem \ref{thm: equivalence}.
+
+
+\begin{defn}[\textbf{Top-$K$ maximum (minimum) subset}]
+Let $V$ be the set of vocabulary, and $1\leq K\leq |V|$. We call $\mathcal K$ a top-$K$ maximum (minimum) subset for a function $f:V\rightarrow\mathds{R}$, if $|\mathcal K|=K$ and $f(v_i)\geq f(v_j)$ ($f(v_i)\leq f(v_j)$) for all $v_i\in \mathcal K$ and $v_j\not\in\mathcal K$.
+\end{defn}
+
+\begin{theorem}
+\label{thm: equivalence}
+Suppose $1\leq K \leq |V|$ and consider a fixed context vector $h$. Let $\mathcal K\subseteq V$ be a top-$K$ maximum subset for $v_i\mapsto\langle h, x_i\rangle + b_i$. Then $\mathcal K$ is also a top-$K$ minimum subset for the Euclidean distance $v_i\mapsto\rho(\overline{h}, \phi(x_i, b_i))$. 
+\end{theorem}
+\subsubsection{Small World Graph Construction}
+\label{subsubsec: swg-construction}
+
+Now, we are ready to present the algorithm for small world graph construction. The algorithm, termed as \SwvgP (P for \underline{P}reprocessing), is presented in Algorithm~\ref{algo: transformation}.
+
+Given a trained NLM with its vocabulary represented as word embedding vectors $X$, \SwvgP first constructs the node set $\overline{X}$ using IPPT as described above (in line 4-9 in Algorithm \ref{algo: transformation}).
+
+
+\begin{algorithm}[h]
+\caption{\hfill Offline preprocessing algorithm \SwvgP}
+\label{algo: transformation}
+  \begin{algorithmic}[1]
+    \State \textbf{Input:} Trained weights of the softmax layer $X$, and  bias vector b. 
+    	\label{lst:transformation:input}
+    \State \textbf{Output:} Small world graph G, and $U_{max}$. 
+    	\label{lst:transformation:output}
+    \State \textbf{Hyperparameter:} Small world graph neighbor degree M.
+    	\label{lst:transformation:hyperparameter}    
+    \ForAll{$i$ \textbf{in} (0..$|X|-1$)}
+    	\label{lst:transformation:for-loop-1} 
+		\State $\tilde X_{:i} \leftarrow[X_{:i} ; b_i] $ 
+    	\label{lst:transformation:embedding-enhancement} 
+        \Comment{Word embedding and bias fusion}
+    \EndFor       
+    \State $U_{max} \leftarrow \max_i\|\tilde X_{:i}\|_2$
+    \ForAll{$i$ \textbf{in} 0..($|\tilde{W}|-1$)}
+		\State $\Delta_{i} \leftarrow \sqrt{{U_{max}}^2 - {\|\tilde X_{:i}\|_2^2}} $ 
+        	\Comment{Calculate the normalizer}
+        \State $\overline X_{:i} \leftarrow[\tilde X_{:i} ; \Delta_{i}] $        		\label{lst:transformation: last-step-of-enhancement}
+    \EndFor   
+    \State $G \leftarrow \CreateSwvg(\overline{X}, M)$
+    	\Comment{Build small world graph}
+    	\label{lst:transformation:createHnswIndex}
+  \end{algorithmic}
+\end{algorithm}
+\minjia{(Optional): TODO: Add complexity analysis to each part of the code.}
+
+Then, \SwvgP 
+forms the final graph using $G = \CreateSwvg(\overline{X}, M)$ by inserting edges among nodes (line~\ref{lst:transformation:createHnswIndex}). 
+We need to ensure that $G$ is constructed in the way that all the small world properties are hold.
+We thus explore existing algorithms that have devoted to constructing a small world graph.
+Among the most accomplished algorithms, %
+HNSW (Hierarchical Navigable Small Worlds) has recently attained outstanding speed-accuracy trade-offs~\cite{hnsw}, and thus employed by us in this study.
+We briefly describe the main ideas and refer readers to Malkov and Yashunin~\cite{hnsw} for more details.
+
+The small world graph is built incrementally by 
+iteratively inserting each word vector $\overline{x_i}$ in $\overline{X}$ as a node in $G$. Each node will generate $M$ (\ie, the neighbor degree) out-going edges. Among those, $M -1$ are \emph{short--range} edges, which connect $\overline{x_i}$ to $M - 1$ nearest neighbors
+according to their pair-wise Euclidean distance to $\overline{x_i}$ (\eg, the edge between $\overline{x_1}$ and $\overline{x_2}$ in Figure~\ref{fig:overview} (b)). The rest is a \emph{long--range} edge that connects $\overline{x_i}$ to a randomly picked node, which does not necessarily connect two closest nodes but may connect other isolated clusters (\eg, the edge between $\overline{x_3}$ and $\overline{x_{|V|}}$ in Figure~\ref{fig:overview} (b)). It is theoretically justified that constructing $G$ by inserting these two types of edges guarantees the graph small world properties~\cite{small-world-dynamics,swg-ann, hnsw} of the resulting $G$. 
+
+The constructed small world graph using all $\overline{x_i}$ becomes the ground layer $L_0$ of $G$.
+$\CreateSwvg$ then creates a hierarchical small world graph by selecting a chain of subsets $V = L_0\supseteq L_1\supseteq\ldots\supseteq L_l$  of nodes as "layers". This is similar to the HNSW~\cite{hnsw}. Each node in $L_{k}$ is randomly selected to $L_{k+1}$ with a fixed probability $1/M$.
+On each layer, the edges are defined so that the overall structure becomes a small world graph, and the number of layers is bounded by $O\left(\log |V|/\log M\right)$~\cite{swg-ann}.
+\subsection{Decoding as Searching Small World Graphs}
+\label{subsec: search-swg}
+
+
+
+ 
+
+
+\SwvgI (I for \underline{I}nference) (Algorithm~\ref{algo: inference}) shows how \SWVG is used for fast decoding (as in Figure~\ref{fig:overview} (c)).
+It first transforms the context vector $h$ to $[h;1;0] \in \mathds{R}^{d + 2}$(line~\ref{lst:inference:query-enhancement}).
+Then, it calls $\SearchSwvg(G, h, K)$ to search in the small world graph to identify the top-$K$ hypotheses
+using the search method from HNSW~\cite{hnsw}, which will be briefly described below.
+
+
+The search of the graph starts from its top layer and uses a greedy search %
+to find the node with the closest distance to $\overline{h}$ as an entry point to descend to the lower layers. The upper layers route $\overline{h}$ to an entry point in the ground layer that is 
+already close to the nearest neighbors to $\overline{h}$. Once reaching the ground layer, $SearchSwvg$ employs prioritized breath-first search: It exams its neighbors and stores all the visited nodes in a priority queue based on their distances to the context vector. The length of the queue is bounded by $efSearch$, a hyperparameter that controls the trade-off between search time and accuracy.
+When the search reaches a termination condition (e.g., the number of distance calculation), $\SearchSwvg$ returns the results of top-$K$ hypotheses and their distances to $\overline{h}$. 
+We transform the distance value
+back to the original inner product space (line~\ref{lst:inference:context-vector-transformation}--~\ref{lst:inference:reverse-transformation}), as described in Section 3.2.1.
+\SwvgI generates the output by computing a softmax distribution over the inner product of the top-$K$ returned results (line~\ref{lst:inference:softmax-2}).
+
+\begin{algorithm}[h!]
+\caption{\hfill Online inference algorithm \SwvgI}
+\label{algo: inference}
+  \begin{algorithmic}[1]
+    \State \textbf{Input:} Context vector $h$, small world graph $G$, and $U_{max}$.
+    	\label{lst:inference:input}
+    \State \textbf{Output:} Probability distribution $P$ over top-$K$ word hypotheses. 
+    	\label{lst:inference:output}
+    \State \textbf{Hyperparameter:} Candidate queue length $efSearch$.
+    	\label{lst:inference:hyperparameter}    
+    \State $\overline{h} \leftarrow[h ; 1 ; 0] $
+    	\Comment{Map context vector from $\mathds{R}^{D}$ to $\mathds{R}^{D+2}$}
+    	\label{lst:inference:query-enhancement}    
+    \State $I^K, D^K \leftarrow \SearchSwvg(G, \overline{h}, K)$
+		\Comment{ Return top-$K$ hypotheses with minimal distance to $\overline{h}$}
+        \label{lst:inference:search}    
+    	\label{lst:inference:context-vector-transformation} 
+    \ForAll{$i$ \textbf{in} 0..($K-1$)}
+    	\State $S[I^K_{:i}] \leftarrow \frac{1}{2}\left({\|\overline{h}\|_2^2} + {{U_{max}}^2} - {{D^K_{:i}}^2}\right)$ 
+        \Comment{ Map Euclidean distance back to inner product}
+        \label{lst:inference:reverse-transformation} 
+    \EndFor
+    \State $P \leftarrow exp(S) / \sum exp(S)$
+    	\Comment{ Compute top-$K$ softmax probability distribution}
+        \label{lst:inference:softmax-2} 
+  \end{algorithmic}
+\end{algorithm}
+
+
+
+
+In practice, setting $K=|V|$ is both slow and unnecessary. An approximated approach with $K<<|V|$ is often much more efficient without sacrificing much accuracy. 
+We provide a theoretically derived error bound of approximating softmax via computing a probability distribution using only top-$K$ distance scores in  Appendix~\ref{sec: error-bound}.
+In Section~\ref{sec: eval}, we will demonstrate empirically the effectiveness of our approach. 
+\minjia{Wenhan, can we have a high level summary on under which condition the error is bounded?}
+\section{Evaluation}
+\label{sec: eval}
+
+
+
+
+
+\paragraph{Summary of main results.} 
+In this section, we present the results of \SWVG on two different tasks: neural machine translation (NMT) and language modeling (LM). 
+\begin{enumerate}
+\item On NMT, \SWVG obtains more than 14X speedup on softmax execution time than full-softmax with close to baseline BLUE score, and obtains 30X speedup at the cost of losing 0.67 BLEU score.
+\item On LM, \SWVG scales with a logarithmic increase of execution time and outperforms full-softmax by an order of magnitude with large vocabulary.
+\end{enumerate}
+
+\paragraph{Setup.} 
+We implement \swgp in Python using numpy\footnote{http://www.numpy.org/}. 
+To construct the small world graph, we employ a state-of-the-art framework NMSLIB~\cite{nmslib, hnsw}.
+The execution time is given as the averaged per-step decoding time in milliseconds, measured on 
+a 64-bit Linux Ubuntu 16.04 server with two Intel Xeon CPU E5-2650 v4 @ 2.20GHz processor with single thread regime so that all algorithms are compared under the same amount of hardware resource.
+\subsection{Neural Machine Translation}
+\label{subsec: eval-nmt}
+
+NMT is a sequence--to--sequence model which contains an RNN encoder and an RNN decoder. The decoder contains an output projection at every step to predict the next word. 
+Decoding time and BLEU score~\cite{bleu} are the two major metrics for this evaluation. The lower the decoding time without sacrificing much BLEU score, the better the result.
+We train a global attention-based~\cite{global-local-attention-nmt} encoder--decoder model with a two-unidirectional-stacked LSTM~\cite{learning-phrase-representations-using-rnn, rnn-machine-translation} using the OpenNMT-py toolkit~\cite{opennmt} on the IWSLT'14 German-English corpus~\cite{iwslt14-cettolo2014report}. We set the LSTM hidden dimension size to 200. The model is optimized with SGD using an initial learning rate of 1.0 and a dropout~\cite{dropout} ratio of 0.3.
+The dataset is tokenized and preprocessed using the OpenNMT data preprocessor 
+with $|V| = 50,000$ frequent words~\cite{on-very-large-target-vocab-for-nmt, global-local-attention-nmt}. 
+BLEU score is computed with the Moses toolkit~\cite{moses}.
+\minjia{Not too much to move to the footnote after the revision. Let's wait to see if space becomes an issue.}
+
+Once the model is trained, we process the trained weights in the softmax layer using \SwvgP offline. It takes three minutes on our server to construct the small world graph. 
+During online processing, the hyperparameter, $efSearch$, decides the length of the candidate queue to track nearest neighbors, which offers the trade-off between the online decoding speed and the BLEU score quality.  We test different $efSearch$ values and identify [20, 200] as a good range.
+
+\paragraph{Decoding time and BLEU score comparison with existing methods.}
+Two approaches are used
+for comparison: 1) a full-softmax approach; 2) a state-of-the-art approach, called SVD-softmax~\cite{svd-softmax}.
+SVD-softmax improves the inference speed by approximating softmax layer using singular vector decomposition (SVD). It includes two steps: it first estimates the probability of each word using a small part of the softmax weight matrix, and then performs a refinement on top-$\overline{V}$ most likely words based on the previous estimated results. It reduces the complexity from $O(|V| \times D)$ to $O(|V| \times \overline{D} + |\overline{V}| \times D)$, where $1 \le \overline{D} < D$. %
+As suggested by~\cite{svd-softmax}, we use two configurations of SVD-softmax: \textit{SVD-a}\footnote{The preview window width $\overline{D}$ is set to 16, and the refinement window width $\overline{V}$ is set to 2500.} and \textit{SVD-b}\footnote{The preview window width $\overline{D}$ is set to 16, and the refinement window width $\overline{V}$ is set to 5000.}.
+
+Figure~\ref{fig:iwslt14-bleu-latency} shows 
+the main results --- \swgp achieves significantly lower execution time than the existing methods with comparable BLEU scores.
+
+\minjia{When describing results in Figure 2, "decoding time" is inaccurate. Decoding includes both "RNN cell" computation and softmax. Figure 2 reports only the execution time of softmax. Perhaps use "execution time of softmax" or just "execution time" as we already mentioned Figure 2 reports the "softmax execution time".}
+Comparing with full softmax, when $efSearch$ is 20, \swgp reduces the execution time from 6.3ms to 0.21ms, achieving 30X speedup at the cost of losing 0.67 BLEU score. By increasing $efSearch$ to 50, \swgp obtains nearly the same BLEU score as the full-softmax baseline, while reducing the execution time from 6.3ms to 0.43ms and achieving more than 14X speedup. 
+
+For SVD-softmax, We also observe that \emph{SVD-b} approaches a BLEU score close to the full-softmax baseline, but it is much slower than \swgp in terms of the execution time ($5.53$ms vs $0.43$ms). \emph{SVD-a} shows slightly better performance than \emph{SVD-b} but with a lower BLEU score. Although the theoretical speedup of \emph{SVD-a} is 5.5X, it gets only 1.3X speedup in practice because top-$\overline{V}$ most likely words selected in the first step appear at discontinuous location on memory, which causes non-negligible memory copy cost to bring them to a continuous space for the second step calculation.
+
+\vspace{-1em}
+\begin{figure}[H]
+\centering 
+\includegraphics[width=0.8\linewidth]{figs/nmt-swv-svd-comp-v3}
+\caption{Execution time of the softmax layer and BLEU score of NMT model with \swgp, SVD-softmax \textbf{(SVD)}, and Full-softmax (\textbf{Full}). [20, 50, 100, 200] are the hyperparameter of $efSearch$ in \SWVG. 
+Execution time is displayed as the height of the bar chart,
+in millisecond (lower is better). BLEU scores are labeled with colored numbers on the top (higher is better).}
+\label{fig:iwslt14-bleu-latency}
+\end{figure} 
+\vspace{-1em}
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\paragraph{Sensitivity of sequence lengths.} 
+Figure~\ref{fig:iwslt14-bleu-len} reports the results with  $efSearch = 100$. FGD is on a par with the full softmax baseline uniformly on different lengths (without statistically significant difference). It demonstrates the robustness of the proposed approach. 
+
+\paragraph{Sensitivity of beam sizes.} 
+We vary the beam size among 1, 2, 5, 10, which are typical settings used by prior work~\cite{learning-phrase-representations-using-rnn, rnn-machine-translation, seq2seq-nips14, google-nmt}. 
+Table~\ref{tbl: bleu-score-with-beam-search} shows that,
+when $efSearch$ is equal or larger than 50, \swgp obtains the BLEU scores close to the full softmax baseline under all beam sizes without statistical significance. 
+
+\vspace{-1em}
+\begin{table}[h!]
+	\newcommand{\colspc}{\hspace*{0.22em}}
+    \small
+    \renewcommand\sfsmaller{}
+  \begin{minipage}[c]{0.44\linewidth}
+  	\small
+    \centering
+      \includegraphics[width=1.03\linewidth]{figs/bleu_len_v3}
+  		\captionof{figure}{BLEU score breakdown by sentence length (setting $efSearch$=100).}
+  		\label{fig:iwslt14-bleu-len}
+  \end{minipage}
+	\hfill  
+  \begin{varwidth}[c][][t]{0.55\linewidth}
+  	\small
+    \centering
+    \begin{tabular}{|@{\colspc}c@{\colspc}|@{\colspc}c@{\colspc}|@{\colspc}c@{\colspc}|@{\colspc}c@{\colspc}|@{\colspc}c@{\colspc}|}
+      \hline
+      \textbf{efSearch}  & \textbf{Beam = 1} & \textbf{Beam = 2} & \textbf{Beam = 5} & \textbf{Beam = 10} \\ \hline\hline
+      20    & 26.69    & 27.65    & 27.81    & 27.62     \\ \hline
+      50    & 27.55    & 28.76    & 29.06    & 28.9      \\ \hline
+      100   & 27.63    & 28.94    & 29.28    & 29.1      \\ \hline
+      200   & 27.53    & 28.99    & 29.28    & 29.22     \\ \hline
+      Full  & 27.36    & 28.91    & 29.45    & 29.34     \\ \hline
+    \end{tabular}
+    \vspace{1em}
+   \caption{BLEU score on NMT task, with various beam sizes.}
+    \label{tbl: bleu-score-with-beam-search}
+  \end{varwidth}%
+\end{table}
+\vspace{-1.5em}
+
+
+
+\paragraph{Internals of \SWVG.} 
+To reveal the internals of \SWVG, we analyze two metrics, \emph{precision@K} (or equivalently \emph{P@K})
+and \emph{dist\_cnt}. 
+\emph{Precision@K} measures the proportion of overlap between retrieved top-$K$ hypotheses and expected top-$K$ hypotheses, based on what top-$K$ on a full-softmax would return.
+$dist\_cnt$ measures the number of distance computation in \SWVG under a given $efSearch$.
+Table~\ref{tbl: recall-iwslt14} reports \emph{precision@K} when $K$ is 1, 2, 5, and 10, which correspond to beam size 1, 2, 5, and 10 respectively, and $dist\_cnt$ with vs. without \swgp. Overall, \swgp  achieves fairly high precision. In particular, gradually increasing $efSearch$ leads to higher precision at the expense of increased number of distance computation. This matches the observation that higher $efSearch$ leads to higher BLEU score (Figure~\ref{fig:iwslt14-bleu-latency}) and also longer execution time (Table~\ref{tbl: bleu-score-with-beam-search}). Further increasing $efSearch$ leads to little extra precision improvement but significantly more distance computation because the precision is getting close to 1, which explains why \SWVG can get close to baseline BLEU score (Table~\ref{tbl: bleu-score-with-beam-search}). 
+We also observe that under the same $efSearch$, further increasing $K$ sometimes leads to slightly worse precision if $efSearch$ is not big enough (\eg, $efSearch$ is 20), as the highest ranked words not visited during the graph search are definitely lost. On the other hand, the computation of distance grows proportional to the increase of $efSearch$. Comparing with the full-softmax, the amount of distance computation is reduced by 10--50 times, which explains the speedup of decoding time (Figure~\ref{fig:iwslt14-bleu-latency}). 
+
+\begin{table}[H]
+	\newcommand{\colspc}{\hspace*{0.27em}}
+    \small
+    \renewcommand\sfsmaller{}
+	\centering
+    \begin{tabular}{|c|c|c|c|c|c|}
+    \hline
+    \textbf{efSearch}    & \textbf{P@1} & \textbf{P@2} & \textbf{P@5} & \textbf{P@10} & \textbf{dist\_cnt (\SWVG / Full)} \\ \hline\hline
+    20  & 0.939        &	0.934	&  0.929	& 0.918         &  981 / 50K   \\ \hline
+    50  & 0.974        &	0.974	&  0.973	& 0.971         &  1922 / 50K  \\ \hline
+    100 & 0.986        &	0.986	&  0.987	& 0.987         &  3310 / 50K  \\ \hline
+    200 & 0.992        &	0.993	&  0.994    & 0.994         &  5785 / 50K  \\ \hline
+    \end{tabular}
+    \vspace{0.5em}
+    \caption{Precision and distance computation results on the NMT model.}
+    \label{tbl: recall-iwslt14}
+\end{table}
+\vspace{-1em}
+
+
+
+\minjia{TODO: (Optional) We can add the graph stats such as diameter and even degree distribution graph (if space permitted or we can put them into the appendix).}
+\subsection{Language Modeling}
+\label{subsec: eval-lm}
+
+This section evaluates the impact of vocabulary size and word embedding dimension on \SWVG using 
+language modeling~\footnote{\url{https://github.com/pytorch/examples/tree/master/word_language_model}} on
+WikiText-2~\cite{wikitext}.
+The model uses a two--layer LSTM\footnote{ The models are trained with stochastic gradient descent (SGD) with an initial learning rate of 20~\cite{sgd}. The batch size is set to 20, and the network is unrolled for 35 timesteps. Dropout is applied to LSTM layers with a dropout ratio of 0.3~\cite{dropout}. Gradient clipping is set to 0.25~\cite{gradient-clipping}.}. 
+
+
+\paragraph{Impact of vocabulary size.} 
+We explore multiple models with different vocabulary size of 10,000 (10K), 20,000 (20K), 40,000 (40K), and 80,000 (80K). The vocabulary is created by 
+tokenizing raw texts via Moses toolkit \cite{moses} and choosing the correspondingly topmost frequent words on the raw WikiText-2 dataset~\cite{wikitext}. Both input and hidden dimension are set to 256.
+
+Table~\ref{tbl:vary-vocabulary-size} shows the impact of search quality by varying vocabulary size from 10K to 80K. With the same $efSearch$, \swgp generally obtains better precision results for smaller vocabulary; With the same vocabulary size, bigger $efSearch$ is better for high precision. With $efSearch$ being 200, \swgp is getting very close to 1. 
+
+\begin{table}[H]
+  \begin{varwidth}[b]{0.4\linewidth}
+  	\newcommand{\colspc}{\hspace*{0.43em}}
+    \newcommand{\smallercolspc}{\hspace*{0.33em}}
+    \small
+    \renewcommand\sfsmaller{}
+    \centering
+      \begin{tabular}{|@{\smallercolspc}c@{\smallercolspc}|@{\smallercolspc}l@{\smallercolspc}|c@{\smallercolspc}|@{\smallercolspc}c@{\smallercolspc}|@{\colspc}c@{\colspc}|@{\colspc}c@{\colspc}|}
+\hline
+\multirow{2}{*}{\textbf{|V|}}        & \multicolumn{1}{l|}{\multirow{2}{*}{\textbf{P@K}}} & \multicolumn{4}{c|}{\textbf{\SWVG (efSearch)}} \\ \cline{3-6} 
+                         & \multicolumn{1}{l|}{}                     & 20      & 50      & 100    & 200    \\ \hline\hline
+\multirow{2}{*}{10K} & P@1                          & 0.870   & 0.938   & 0.989  & 1.000  \\ 
+                         & P@10                          & 0.909   & 0.972   & 0.992  & 0.998  \\ \hline
+\multirow{2}{*}{20K} & P@1                           & 0.845   & 0.932   & 0.975  & 0.995  \\ 
+                         & P@10                          & 0.871   & 0.955   & 0.987  & 0.997  \\ \hline
+\multirow{2}{*}{40K} & P@1                           & 0.808   & 0.912   & 0.936  & 0.980  \\ 
+                         & P@10                          & 0.845   & 0.931   & 0.961  & 0.991  \\ \hline
+\multirow{2}{*}{80K} & P@1                           & 0.832   & 0.933   & 0.966  & 0.982  \\ 
+                         & P@10                          & 0.858   & 0.945   & 0.978  & 0.994  \\ \hline
+\end{tabular}
+      \vspace{0.4em}
+    \caption{Precision of \swgp on WikiText-2 dataset varying vocabulary size.}
+    \label{tbl:vary-vocabulary-size}
+  \end{varwidth}%
+  \hfill
+  \begin{minipage}[b]{0.54\linewidth}
+  	\small
+    \centering
+       \includegraphics[width=0.92\linewidth]{figs/speed_vs_vocab_v5}
+  		\captionof{figure}{Scalability of WikiText-2 language model varying vocabulary size.}
+  		
+	\label{fig:wikitext2-latency}
+  \end{minipage}
+\end{table}
+\vspace{-1em}
+\xiaodl{roll back.}
+
+
+Figure~\ref{fig:wikitext2-latency} shows the decoding time of varying vocabulary sizes on the full softmax baseline and \SWVG (settings $efSearch$=\{50, 200\} for the sake of readability). As expected, the execution time all increases with the increase in vocabulary size. However, compared to the baseline, \swgp provides a shorter execution time consistently. As the vocabulary size increases, the execution time of the baseline increases almost linearly, whereas \swgp's execution time increases much more slowly. This is because the complexity of softmax is $O(D \times |V|)$, which is linear to the size of the vocabulary, whereas the complexity of \swgp is $O(D \times \log{|V|})$, which is logarithmic to $|V|$. 
+Therefore, \SWVG scales much better and the improvement becomes more significant with larger vocabulary sizes. In particular, \swgp is more than an order of magnitude faster than the baseline when the vocabulary size is medium or large. For example, \SWVG achieves more than 30X speedup with $|V| = 80K$ when $efSearch = 50$ (Appendix~\ref{fig:lm-vocab-speedup} includes a speedup graph).
+
+
+
+\paragraph{Sensitivity of word embedding dimension.}  
+We also test various word embedding dimensions. \SWVG gets high precision consistently with an order of magnitude execution time reduction (see Appendix~\ref{sec: word-embedding-dim}).
+
+
+
+
+
+
+
+
+
+
+\minjia{(Optional) TODO: Add PTB results in the appendix or point out that we get similar results on PTB?}
+
+
+
+
+
+\minjia{TODO: (Optional) Add visualization to the constructed small world vocabulary graph. It should demonstrate its low separation and high clustering feature.}
+
+\minjia{Optional tasks: summarization, dialog}
+\section{Conclusion}
+\label{sec: conclusion}
+We propose a novel softmax layer approximation algorithm, called \textbf{F}ast \textbf{G}raph \textbf{D}ecoder (\SWVG), which quickly navigates, for a given context, on a \textit{small world graph} representation of word embeddings to search for a set of $K$ words that are most likely to be the next words according to NLMs. On neural machine translation and neural language modeling, we demonstrate that \SWVG reduces the decoding time by an order of magnitude (e.g., 14X speedup comparing with the full softmax baseline) while attaining similar accuracy on neural machine translation and language modeling tasks. As the further work, we also like to explore how to speed up NLMs training with large vocabularies.
+
+
+\minjia{\sout{TODO: Check the consistency of $O(d \cdot V)$ vs. $O(d \times V)$.}}
+\minjia{\sout{TODO: Check the consistency of $d$ vs. $D$ used for representing the embedding dimension size.}}
+\minjia{TODO: Fix references that have broken format, \eg, missing year, inconsistent abbreviation of conference names, etc.}
+\minjia{\sout{TODO: Fix "top K" vs. "top-K" inconsistency.}}
+\minjia{\sout{TODO: Euclidean distance symbol changes from $d$ to $\rho$ in earlier sections but not later ones.}}
+\xiaodl{\sout{TODO: in Section 3.1"$e_i$" refers projection vector, however in the intro, the projection weight is $W$. It is also inconsistent with the notation in Algorithm 1.}}
+\xiaodl{\sout{TTODO: V denotes vocabulary and |V| denotes its size. There are a number of place misusing V.}}
+\xiaodl{\sout{TODO:We may need to use a different char to represent vertex $V$ in graph, e.g, Greek characters, since it is used for vocabulary.}}
+\minjia{\sout{TODO: Hidden dimension D vs. Embedding dimension D inconsistency.}}
+\minjia{TODO: top-$K$ hypotheses vs. top-$K$ maximum inner product consistency.}
+\minjia{TODO: Decoding vs. Inference. Inference is used in Bayesian inference.}
+\minjia{\sout{TODO: Neural network language model vs. Neural language model.}}
+\minjia{\sout{TODO: Some places have extra space after SWVG. For example, in the caption of Table 3, "Precision of SWVG  on". This is caused by xspace. Double check to fix those. Caused by nested new commands}}
+\minjia{TODO: There should be no space before ~\cite{} as in "inequality ~\cite{munkres2018elements}". \~ already adds a space before the citation.}
+\minjia{\sout{TODO: CreateSwvg and SearchSwvg both have Swvg in it. If we decide to change the name to FGD. Change these names as well. Use Macro.}}
+
+\later{
+\minjia{Discuss why not comparing with GPU, or perhaps should include GPU results?}
+
+}
+
+\notes{
+\paragraph{Should we include results of projected large |V| latency?}
+\minjia{TODO: Do a projected improvement on this very large |V|, e.g., 262K. The results can be added into the appendix. \minjia{It is difficult to compare with the large |V| size without reporting accuracy.}}
+
+\paragraph{Why frame the problem as a decoding problem instead of top-$K$?}
+Our so called top-$K$ softmax at inference is actually the "decoding" step in many NLP generative models. "Decoding" includes inference, softmax, and top-$K$. "Top-$K$ softmax" is ambiguous. Is it "selecting top-K among full distribution" or "normalizing top-K logits"? 
+"Top-$K$ softmax" can be confused as a replacement of conventional softmax, but so far we only show that it works for inference. 
+
+\paragraph{Why do we call the problem "decoding in NNLM" instead of "decoding in generative models"?}
+Generative models have a much larger scope than encoder--decoder model, including Bayesian inference, as well as other models in ML. The following article \url{https://blog.openai.com/generative-models/} gives a good introduction to generative models. In contrast, "using language model during decoding", "language model for beam-search decoding", "decoding with language models" is perfectly acceptable.
+
+\paragraph{Results better than the baseline.} Our experiments also show that with beam size 1 our approach has slightly higher BLEU score than the baseline (e.g., when $efSearch$ is 50, 100, and 200). This is most likely due to the same reason that beam search can help improve the BLEU score. There is a possibility that SWVG might miss to find the actual highest ranked word, but neighboring hypotheses found by \swgp that differ not too much in distance from the best one might lead to an even better final score later on. As a matter of fact, this effect gradually disappears with larger beam sizes. 
+
+\paragraph{Generalization.}
+\wenhanw{The section below now seems to be a bit too far from the main stream of the paper. Plus, it introduces a type of problems that is too board, which does not help readers to understand our logic. Should we remove this, together with the appendix section?
+\minjia{Agreed. Added it because the Euclidean distance seems a bit ad hoc, and our approach does not restrict to Euclidean distance. For example, for very high dimension vectors, cosine similarity might be a better metric to use. Revised the text. Let's ask Yuxiong and Jianfeng about their opinion.}}
+\minjia{From the discussion with Yuxiong and Jianfeng. This piece does not seem to carry significant value to the paper. And I kinda agree with Wenhan that this part is a bit too far away from the main line of the paper and does not fit the design very well. Decided to remove it.}
+\textcolor{red}{\paragraph{Generalization to other metrics.} 
+The aforementioned transformation defines $\rho$ as the Euclidean distance.  
+In general, we can define a matching function for each pair of words and its context vector. We show that the matching function satisfies Lipschitz condition, which
+allows the small word graph to be constructed with any well-defined metric $\rho$
+(\eg, cosine similarity) 
+to solve the top-$K$ maximum inner product problem effectively (See Appendix~\ref{subsec: equivalence} for the proof). }
+
+}
+
+\medskip
+
+\clearpage
+\setcounter{page}{1}
+
+
+
+{\small \bibliographystyle{unsrt}
+\bibliography{reference}} 
+
+\newpage
+
+\appendix
+\section{Proof of Lemma and Theorem}
+\label{sec: proof}
+\begin{proof}[Lemma~\ref{lemma: transformation} proof]
+For the first equation can be proved by expanding the inner product according to the definition of the transformation. Note that $\langle \tilde h, \phi(x_i, b_i)\rangle = \left\langle[h;1;0],\left[x_i;b_i;\sqrt{U^2-\|x_i\|^2 - b_i^2}\right] \right\rangle = \langle h, x_i\rangle + 1\cdot b_i + 0\cdot \sqrt{U^2-\|x_i\|^2 - b_i^2} = \langle h, x_i\rangle + b_i$. 
+The second equation follows from the relation between the inner product and the distance in Euclidean spaces: $\rho(\tilde{h}, \phi(x_i, b_i)^2 = \|\tilde{h} - \phi(x_i, b_i)\|^2 = \|\tilde{h}\|^2 + \|\phi(x_i, b_i)\|^2 - 2\langle\tilde{h}, \phi(x_i, b_i)\rangle = \|h\|^2 + 1 + U^2 - 2\langle\tilde{h}, \phi(x_i, b_i)\rangle$.
+\end{proof}
+
+\begin{proof}[Theorem~\ref{thm: equivalence} proof]
+By Lemma~\ref{lemma: transformation}, the distance $\rho(\tilde{h}, \phi(x_i, b_i))$ depends strictly monotonically decreasingly on $\langle h, x_i\rangle + b_i$. The claim of the theorem then follows straightforwardly upon this fact.
+\end{proof}
+\section{A Bound on Top-$K$ Softmax Approximation}
+\label{sec: error-bound}
+In this section we derive an error bound of top-$K$ highest ranked words approximation on softmax toward a probability distribution.
+Let $V$ be the set of vocabulary. Let $s_i$ ($1\leq i\leq |V|$) be the scores produced using exhaustive search, sorted in decreasing order. Suppose $L$ is a lower bound for $\{s_i\}$, i.e., $L\leq \min s_i$. Typically one chooses $L$ to be a negative number with sufficiently large absolution value. If there is no known lower bound, one may also set $L=-\infty$ and agrees that $\exp(-\infty)=0$. The probability distribution generated by applying softmax on $s_i$ is given by $p_i = \exp(s_i)/\sum_i \exp(s_i)$. Using exhaustive search we are able to compute $p_i$ as exact. However with approximated techniques, we are only able to obtain an approximation $\hat p_i$ of the distribution. In real applications we typically only care about how $\hat p_i$ differs from $p_i$ for the top-$K$ words. The error in such approximations comes from two sources: (1) the accuracy of the approximation to obtain the approximated top-$K$; and (2) the approximation of $\sum_i \exp(s_i)$. In the following theorem we give a quantitative analysis of how large the relative error could be.
+
+\begin{theorem}
+Let $V$, $s_i$, $L$, $p_i$ be as above. Let $\mathcal K\subseteq\{1, \ldots, |V|\}$ be the ground truth top-$K$ indices. Suppose an approximation top-$K$ softmax algorithm gives $\mathcal{K'}\subseteq\{1, \ldots, |V|\}$ as the approximated top-$K$ indices. Let $\hat s_i$ be the approximated score the algorithm assigns to the $i$-th word in $V$, and let $s' = \min_{i\in \mathcal K'} \hat s_i$.  Assume that (i) the algorithm assigns exact scores $\hat s_i = s_i$ to those $i\in\mathcal K'$; and (ii) it assigns a score $\hat s_i$ for $i\not\in\mathcal K'$ such that $L\leq\hat s_i\leq s'$. The approximated probability distribution is given by $\hat p_i := \exp(\hat s_i) /\sum_i \exp(\hat s_i)$. Let $\mathcal K'' = \{i: s_i \geq s'\}$. Then the relative error of probability distribution approximation is bounded by $|\hat p_i - p_i|/p_i\leq\dfrac{\sum_{i\in\mathcal K''\backslash \mathcal K'}\left(\exp(s_i) - \exp(L)\right) + (|V|-|\mathcal K''|)(\exp(s') - \exp(L))}{\sum_{i\in\mathcal K'} \exp(\hat s_i) + (|V|-K)\exp(L)}$ for any $i\in \mathcal K\cap\mathcal K'$.
+\end{theorem}
+\begin{proof}
+First note that $p_i = \dfrac{\exp(s_i)}{\sum_i\exp(s_i)}$ and that $\hat p_i = \dfrac{\exp(\hat s_i)}{\sum_i\exp(\hat s_i)}$. Since  $i\in \mathcal K\cap \mathcal K'$, we have $s_i = \hat s_i$. We then deduce that 
+\begin{equation}
+\dfrac{|\hat p_i - p_i|}{p_i} = \dfrac{\left|\sum_i\exp(s_i) - \sum_i\exp(\hat s_i)\right|}{\sum_i\exp(\hat s_i)}.
+\end{equation}
+We then proceed to bound both the numerator and the denominator.
+
+To find an upper bound for the numerator, first note that 
+\begin{equation}
+\left|\sum_i\exp(s_i) - \sum_i\exp(\hat s_i)\right| \leq \left|\sum_{i\in\mathcal K''}\exp(s_i) - \sum_{i\in\mathcal K''}\exp(\hat s_i)\right| + \left|\sum_{i\not\in\mathcal K''}\exp(s_i) - \sum_{i\not\in\mathcal K''}\exp(\hat s_i)\right|.
+\end{equation}
+For the first summand, first observe that $\mathcal K\subseteq \mathcal K''$ and $\mathcal K'\subseteq \mathcal K''$. Therefore $$\left|\sum_{i\in\mathcal K''}\exp(s_i) - \sum_{i\in\mathcal K''}\exp(\hat s_i)\right| = \left|\sum_{i\in\mathcal K'}\left(\exp(s_i) - \exp(\hat s_i)\right) + \sum_{i\in\mathcal K''\backslash \mathcal K'}\left(\exp(s_i) - \exp(\hat s_i)\right)\right|.$$ The condition (i) implies that the first sum is zero. The second sum is always non-negative since $\exp(s_i)\geq \exp(s')\geq\exp(\hat s_i)$ for $i\in\mathcal K''\backslash \mathcal K'$. Thus $\left|\sum_{i\in\mathcal K''\backslash \mathcal K'}\left(\exp(s_i) - \exp(\hat s_i)\right)\right| = \sum_{i\in\mathcal K''\backslash \mathcal K'}\left(\exp(s_i) - \exp(\hat s_i)\right) \leq \sum_{i\in\mathcal K''\backslash \mathcal K'}\left(\exp(s_i) - \exp(L)\right)$. For the second summand in the right hand side of Equation (2), note that $\left|\sum_{i\not\in\mathcal K''}\exp(s_i) - \sum_{i\not\in\mathcal K''}\exp(\hat s_i)\right|\leq \sum_{i\not\in\mathcal K''}|\exp(s_i) - \exp(\hat s_i)|$. Since both $s_i, \hat s_i\in [L, s']$ for all $i\not\in \mathcal K''$, we have $\sum_{i\not\in\mathcal K''}|\exp(s_i) - \exp(\hat s_i)|\leq \sum_{i\not\in\mathcal K''}\left(\exp(s')-\exp(L)\right) = (|V|-|\mathcal K''|)\left(\exp(s')-\exp(L)\right)$. This shows the upper bound of the numerator.
+
+For the denominator in the right hand side of Equation (1), simply note that $\sum_i\exp(\hat s_i) = \sum_{i\in\mathcal K'}\exp(\hat s_i) + \sum_{i\not\in\mathcal K'}\exp(\hat s_i) \geq \sum_{i\in\mathcal K'}\exp(\hat s_i) + (|V| - K)\exp(L)$. This then concludes the proof of the theorem.
+\end{proof}
+
+It is worthy to point out that the numerator of the above error bound can be rewritten as $\sum_{i\in\mathcal K''\backslash \mathcal K'}(\exp(s_i) - \exp(s')) + (|V| - K)(\exp(s') - \exp(L))$. Intuitively, the theorem states that the accuracy of the softmax probability approximation for the top-$K$ words depends on three quantities: (i) $\sum_{i\in\mathcal K''\backslash\mathcal K'}(\exp(s_i) - \exp(s'))$, which measures how many words are ``missed'' by the approximation of top-$K$ words. (ii) $\exp(s') - \exp(L)$, which measures the distribution of the scores found by the approximation. The smaller (i) and (ii) are (relative to $\sum_{i\in\mathcal K'}\exp(\hat s_i)$, the better the approximation is. 
+
+We also observe that when the precision at $K$ is 1 for the approximation algorithm, then the bound depends only on the sum of exponential scores and the smallest top-$K$ score retrieved by the algorithm. 
+
+\begin{corollary}
+Let the notations be the same as in the above theorem. Assume that the precision at $K$ of the approximation is 1. Further assume that all the scores $s_i$ are distinct. Then the relative error to the approximated softmax probability distribution is bounded above by $|\hat p_i - p_i|/p_i\leq\dfrac{(|V|-K)(\exp(s') - \exp(L))}{\sum_{i\in\mathcal K'} \exp(\hat s_i) + (|V|-K)\exp(L)}$ for any $i\in \mathcal K\cap\mathcal K'$.
+\end{corollary}
+\begin{proof}
+It suffices to show that $\mathcal K'' = \mathcal K'$. Since the precision at $K$ is 1, we have $\mathcal K = \mathcal K'$, which means $s' = \min_{i\in\mathcal K'} \hat s_i = \min_{i\in\mathcal K} s_i$. Now assume $i\in \mathcal K''$, then by definition of $\mathcal K''$, $s_i\geq \min_{j\in\mathcal K} s_j$. Since all scores are distinct, this shows that $s_i$ is amongst the top-$K$, i.e., $s_i\in\mathcal K = \mathcal K'$. Thus $\mathcal K''\subseteq\mathcal K'$. The other direction of inclusion is trivial.
+\end{proof}
+\section{Additional Results}
+\label{sec: additional-results}
+
+\paragraph{Speedup with different vocabulary size.}
+\label{sec: vocab-speedup}
+
+Figure~\ref{fig:lm-vocab-speedup} shows the speedup for \SWVG (with different $efSearch$) over the execution time of full-softmax for vocabulary size 10K, 20K, 40K, and 80K. When $efSearch = 20$, \SWVG achieves more than 65X speedup over the baseline with a vocabulary size 80K. Even with smaller vocabulary size, \SWVG still achieves roughly an order of magnitude speedup. Overall, \SWVG achieves speedup over the baseline consistently and scales well with different $efSearch$ values. 
+
+\paragraph{Sensitivity of word embedding dimension.}
+\label{sec: word-embedding-dim}
+Table~\ref{tbl:vary-hidden-size} reports the precision with varying word vector embedding dimension 128, 256, and 512 on the WikiText-2 language modeling.
+The vocabulary size is set to the default 33,728. In most cases, $efSearch$ being 50 or 100 is sufficient to provide high precision (\eg, > 0.95). Over 0.99 precision can be reached when $efSearch$ is 200. This indicates that \SWVG offers high precision with different word embedding dimensions.
+
+
+
+Figure~\ref{fig:wikitext2-hidden-size-scalability-latency} compares with the execution time of \SWVG and full-softmax, \SWVG achieves an order of magnitude reduction of execution time. 
+
+
+\begin{figure}[H]
+\centering 
+\includegraphics[width=0.65\linewidth]{figs/speed_rate_vs_vocab_v3}
+\caption{Performance of \SWVG, normalized to full-softmax execution time. Higher is better.}
+\label{fig:lm-vocab-speedup}
+\end{figure} 
+
+\begin{table}[H]
+  	\newcommand{\colspc}{\hspace*{0.5em}}
+
+    \small
+    \renewcommand\sfsmaller{}
+    \centering
+    \begin{tabular}{|@{\colspc}c@{\colspc}|@{\colspc}l@{\colspc}|c@{\colspc}|@{\colspc}c@{\colspc}|@{\colspc}c@{\colspc}|@{\colspc}c@{\colspc}|}
+\hline
+\multirow{2}{*}{\textbf{D}} & \multirow{2}{*}{\textbf{P@K}} & \multicolumn{4}{c|}{\textbf{\SWVG (efSearch)}} \\ \cline{3-6} 
+                  &                      & 20      & 50      & 100    & 200    \\ \hline\hline
+\multirow{2}{*}{128} & P@1          & 0.913   & 0.993   & 0.998  & 0.999  \\ 
+                         & P@10         & 0.819   & 0.934   & 0.976  & 0.992  \\ \hline
+\multirow{2}{*}{256} & P@1          & 0.832   & 0.917   & 0.958  & 0.992  \\ 
+                         & P@10         & 0.866   & 0.944   & 0.976  & 0.995  \\ \hline
+\multirow{2}{*}{512} & P@1          & 0.854   & 0.921   & 0.968  & 0.988  \\ 
+                         & P@10         & 0.884   & 0.950   & 0.979  & 0.995  \\ \hline
+\end{tabular}
+    \vspace{1em}
+    \caption{Precision of \swgp on WikiText-2 dataset varying word vector embedding dimension.}
+    \label{tbl:vary-hidden-size}
+\end{table}
+
+\begin{figure}[H]
+  	\small
+    \centering
+   \includegraphics[width=0.65\linewidth]{figs/speed_vs_hid_v3}   
+	\captionof{figure}{Scalability of WikiText-2 language model varying word vector embedding dimension.}
+	\label{fig:wikitext2-hidden-size-scalability-latency}
+\end{figure}

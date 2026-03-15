@@ -1,0 +1,1179 @@
+\section{Introduction}
+\label{sec:intro}
+
+Endowing models with the ability to capture \emph{uncertainty} is of crucial importance in machine learning. Uncertainty can be categorized into two main types: \emph{epistemic} uncertainty and \emph{aleatoric} uncertainty \citep{Kiureghian2009AleatoricOrEpistemic}. Epistemic uncertainty accounts for subjective uncertainty in the model, one that is reducible given sufficient data. By contrast, aleatoric uncertainty captures the stochasticity inherent in the observations and can itself be subdivided into \emph{homoscedastic} and \emph{heteroscedastic} uncertainty. Homoscedastic uncertainty corresponds to noise that is constant across the input space, whereas heteroscedastic uncertainty corresponds to noise that varies with the input.
+
+There are well-established benefits for modeling each type of uncertainty. For instance, capturing epistemic uncertainty enables effective budgeted data collection in active learning \citep{Gal2017DeepBayesianAL}, allows for efficient exploration in reinforcement learning \citep{Osband2016DeepExploration}, and is indispensable in cost-sensitive decision making %
+\citep{Amodei2016ConcreteProblems}. On the other hand, quantifying aleatoric uncertainty enables learning of  dynamics models of stochastic processes (\eg for model-based or offline reinforcement learning) \citep{Chua2018PETS,Yu2020MOPO}, improves performance in semantic segmentation, depth regression and object detection~\citep{Kendall2017WhatUncertainties,Harakeh2021EstimatingObjDetectors}, and allows for risk-sensitive decision making \citep{Dabney2018ImplicitQuantile, VlastelicaBlaesEtal2021:riskaverse}. %
+
+
+
+We examine a common approach for quantifying aleatoric uncertainty in neural network regression.
+By assuming that the regression targets follow a particular distribution, we can use a neural network to predict the parameters of that distribution, typically the input-dependent mean and variance when assuming a heteroscedastic Gaussian distribution.
+Then, the parameters of the network can be learned using maximum likelihood estimation (MLE),
+\ie by minimizing the negative log-likelihood (NLL) criterion using stochastic gradient descent. This simple procedure, which is the de-facto standard~ \citep{Nix1994Estimating,Lakshminarayanan2017SimpleAndScalable,Kendall2017WhatUncertainties,Chua2018PETS}, is known to be subject to overconfident variance estimates.
+Whereas strategies have been proposed to alleviate this specific issue~\citep{Detlefsen2019:reliabletraining,Stirn2020VariationalVariance}, we argue that an equally important issue is that this procedure can additionally lead to \emph{subpar mean fits}.
+In this work, we analyze and propose a simple modification to mitigate this issue.
+
+\paragraph{Summary of contributions}
+
+We demonstrate a pitfall of optimizing the NLL loss for neural network regression, one that hinders the training of accurate mean predictors (see~\fig{fig:sinusoidal_nll_fit} for an illustrative example).
+The primary culprit is the \emph{high dependence of the gradients on the predictive variance}.
+While such dependence is generally known to be responsible for instabilities in joint optimization of mean and variance estimators \citep{Takahashi2018Student-t, Stirn2020VariationalVariance},
+we identify a fresh perspective on how this dependence can further be problematic.
+Namely, we hypothesize that the issue arises due to the NLL loss scaling down the gradient of poorly-predicted data points relative to the well-predicted ones, leading to effectively undersampling the poorly-predicted data points.
+
+We then introduce an \emph{alternative loss formulation}, termed \method, that counteracts this by weighting the contribution of each data point to the overall loss by its $\beta$-exponentiated variance estimate, \emph{where $\beta$ controls the extent of dependency of gradients on predictive variance}.
+This formulation subsumes the standard NLL loss for $\beta=0$ and allows to lessen the dependency of gradients on the variance estimates for $0 < \beta \leq 1$. Interestingly, using $\beta=1$ completely removes such dependency for training the mean estimator, yielding the standard mean squared error (MSE) loss -- but with the additional capacity of uncertainty estimation.
+Finally, we empirically show that our modified loss formulation largely mitigates the issue of poor fits, achieving considerable improvements on a range of domains and tasks while exhibiting more robustness to hyperparameter configurations.
+
+\begin{figure}
+    \begin{center}
+    \includegraphics[width=0.48\textwidth]{figures/sinusoidal_nll_fit.pdf}\hfill%
+    \includegraphics[width=0.48\textwidth]{figures/sinusoidal_training_rmse.pdf}\vspace{-.5em}
+    \caption{Training a probabilistic neural network to fit a simple sinusoidal fails.
+    Left: Learned predictions (orange line) after $10^7$ updates, with the shaded region showing the predicted standard deviation.
+    The target function is given by $y(x)=0.4 \sin(2\pi x) + \xi$, where $\xi$ is Gaussian noise with a standard deviation of $0.01$.
+    Right: Root mean squared error (RMSE) over training, mean and standard deviation over 10 random seeds.
+    For comparison, we plot the training curve when using the mean squared error as the training objective -- achieving an optimal mean fit (dashed line) in $10^5$ updates.
+    This behavior is stable across different optimizers, hyperparameters, and architectures (see~\sec{subsec:app:add_results_synthetic}).
+    }
+    \label{fig:sinusoidal_nll_fit}
+    \end{center}
+\end{figure}
+\section{Preliminaries}
+Let $X, Y$ be two random variables describing the input and target, following the joint distribution $P(X, Y)$.
+We assume that $Y$ is conditionally independent given $X$ and that it follows some probability distribution $P(Y \mid X)$.
+In the following, we use the common assumption that $Y$ is normally distributed given $X$; \ie $P(Y \mid X) = \mathcal{N}(\mu(X), \var(X))$, where $\mu \colon \Real^M \mapsto \Real$ and $\var\colon \Real^M \mapsto \Real^+$ are respectively the true input-dependent mean and variance functions.\footnote{For notational convenience, we focus on univariate regression but point out that the work extends to the multivariate case as well.}
+Equivalently, we can write $Y=\mu(X) + \epsilon(X)$, with $\epsilon(X) \sim \mathcal{N}(0, \sigma^2(X))$; \ie $Y$ is generated from $X$ by $\mu(X)$ plus a zero-mean Gaussian noise with variance $\var(X)$.
+This input-dependent variance quantifies the heteroscedastic uncertainty or input-dependent aleatoric uncertainty.
+
+
+To learn estimates $\muhat(X), \varhat(X)$ of the true mean and variance functions, it is common to use a neural network $f_\theta$ parameterized by $\theta$.
+Here, $\muhat(X)$ and $\varhat(X)$ can be outputs of the final layer~\citep{Nix1994Estimating} or use two completely separate networks~\citep{Detlefsen2019:reliabletraining}. 
+The variance output is hereby constrained to the positive region using a suitable activation function, \eg $\mathrm{softplus}$.
+The optimal parameters $\theta^\ast_\text{NLL}$ can then be found using maximum likelihood estimation (MLE) by minimizing the negative log-likelihood (NLL) criterion $\Lnll$ under the distribution $P(X, Y)$:
+\begin{align}
+\theta^\ast_\text{NLL} &= \argmin_\theta \Lnll(\theta) = \argmin_\theta \Exp_{X,Y} \g[ \frac{1}{2} \log\varhat(X) + \frac{(Y - \muhat(X))^2}{2\varhat(X)} + \mathrm{const}\g]. \label{eqn:nll}
+\end{align}
+In contrast, standard regression minimizes the mean squared error (MSE) $\Lmse$:
+\begin{align}
+\theta^\ast_\text{MSE} &= \argmin_\theta \Lmse(\theta) = \argmin_\theta \Exp_{X,Y} \g[ \frac{(Y - \muhat(X))^2}{2} \g]. \label{eqn:mse}
+\end{align}
+
+In practice, \eqn{eqn:nll} and \eqn{eqn:mse} are optimized using stochastic gradient descent (SGD) with mini-batches of samples drawn from $P(X, Y)$.
+The gradients of $\Lnll$ \wrt (with respect to) $\muhat(X), \varhat(X)$ are given by
+\begin{align*}
+    \refstepcounter{equation}\latexlabel{eqn:nll_grad_mean}
+    \refstepcounter{equation}\latexlabel{eqn:nll_grad_var}
+    \nabla_\muhat \Lnll(\theta) = \Exp_{X,Y} \g[ \frac{\muhat(X) - Y}{\varhat(X)} \g], \quad \nabla_\varhat \Lnll(\theta) = \Exp_{X,Y} \g[ \frac{\varhat(X) - (Y - \muhat(X))^2}{2\big(\varhat(X)\big)^2} \g].
+    \tag{\ref*{eqn:nll_grad_mean}, \ref*{eqn:nll_grad_var}}
+\end{align*}
+\section{Analysis}
+\label{sec:analysis}
+We now return to the example of trying to fit a sinusoidal function from \sec{sec:intro}.
+Recall from \fig{fig:sinusoidal_nll_fit} that using the Gaussian NLL as the objective resulted in a suboptimal fit.
+In contrast, using MSE as the objective the model converged to the optimal mean fit 
+in a reasonable time.
+We now analyze the reasons behind this surprising result.
+
+From \eqn{eqn:nll_grad_mean}, we see that the true mean $\mu(X)$ is the minimizer of the NLL loss.
+It thus becomes clear that a) the solution found in \fig{fig:sinusoidal_nll_fit} is not the optimal one, and b) the NLL objective should, in principle, drive $\muhat(X)$ to the optimal solution $\mu(X)$.
+So, why does the model not converge to the optimal solution? 
+We identify two main culprits for this behavior of the Gaussian NLL objective:
+
+\begin{enumerate}[itemsep=0em]
+ \item Initial flatness of the feature space can create an undercomplex but locally stable mean fit. This fit results from local symmetries and requires a form of symmetry breaking to escape.
+ \item The NLL loss scales the gradient of badly-predicted points down relative to well-predicted points, effectively undersampling those points. This effect worsens as training progresses.
+\end{enumerate}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/schematics_weighting.pdf}\vspace{-0.5em}
+    \caption{Illustration of the pitfall when training with NLL (negative log-likelihood) versus our solution. An initial inhomogeneous feature space granularity (see \sec{subsec:feature_non_linearity}) results early on in different fitting quality.
+    The implicit weighting of the squared error in NLL can be seen as biased data-sampling with $p(x) \propto \frac 1 {\sigma^2(x)}$ (see \eqn{eqn:sampling}). Badly fit parts are increasingly ignored during training.
+    On the right, the effect of our solution (\eqn{eqn:weighted-nll}) on the relative importance of data points is shown.}
+    \label{fig:overview}
+\end{figure}
+These culprits and their effect on training are illustrated in \fig{fig:overview} (left).
+If the network cannot fit a certain region yet because its feature space (spanned by the last hidden layer) is too coarse, 
+it would then perceive a high effective data variance. 
+This leads to down-weighting the data from such regions, fueling a vicious cycle of self-amplifying the increasingly imbalanced weighting.
+In the following, we analyze these effects and their reasons in more detail.
+\subsection{Symmetry and Feature Non-Linearity}
+\label{subsec:feature_non_linearity}
+
+\begin{figure}[tb]
+    \centering
+    \begin{subfigure}[b]{0.31\textwidth}
+        \caption{After \np{1000} updates.}\vspace{-0.5em}
+        \includegraphics[width=\textwidth]{figures/sinusoidal_training_progress_ep100.pdf}
+        \label{subfig:sinusoidal_training_progress_ep100}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.31\textwidth}
+        \caption{After \np{10000} updates.}\vspace{-0.5em}
+        \includegraphics[width=\textwidth]{figures/sinusoidal_training_progress_ep1000.pdf}
+        \label{subfig:sinusoidal_training_progress_ep1000}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.31\textwidth}
+        \caption{After \np{500000} updates.}\vspace{-0.5em}
+        \includegraphics[width=\textwidth]{figures/sinusoidal_training_progress_ep50000.pdf}
+        \label{subfig:sinusoidal_training_progress_ep50000}
+    \end{subfigure}\vspace{-1.5em}
+  \caption{Model fit using the NLL loss at different stages of training shown in orange with $\pm \sigma$ uncertainty band. Black dots mark training data. Fitting the function begins from the left and is visibly slow.}
+  \label{fig:sinusoidal_training_evolution}
+\end{figure}
+
+It is instructive to see how the model evolves during training as shown in 
+\fig{fig:sinusoidal_training_evolution}. %
+The network first learns essentially the best linear fit while adapting the variance to match the residuals. %
+The situation is locally stable.
+That is, due to the symmetries of errors below and above the mean fit, there is no incentive to change the situation.
+Symmetry breaking is required for further progress.
+One form of symmetry breaking comes with the inherent stochasticity of mini-batch sampling in SGD, or the natural asymmetries contained in the dataset due to, \eg, outliers.
+Moreover, we hypothesize that the local non-linearity of the feature space plays an important role in creating the necessary non-linear fit.
+
+Let us consider the non-linearity of the feature space.
+This quantity is not easy to capture. To approximate it for a dataset $\mathcal{D}$, we compute how much the Jacobian $J_{\!f}$ of the features $f(x)$ \wrt the input varies in an L$_2$-ball with radius $r$ around a point $x$, denoted as the Jacobian variance:\footnote{This is a form of approximative second-order derivative computed numerically, which also gives non-zero results for networks with $\relu$ activation (in contrast to, for example, the Hessian).}
+\begin{align}
+  V(x) = \frac{1}{\lvert \mathcal{B}_x \rvert} \sum_{x' \in \mathcal{B}_x} \bigg( J_{\!f}(x') - \frac{1}{\lvert \mathcal{B}_x \rvert} \sum_{x'' \in \mathcal{B}_x} J_{\!f}(x'') \bigg)^2, \quad \mathcal{B}_x = \g\{x'\in \mathcal{D} \colon \lVert x - x' \rVert_2 \leq r\g\}. \label{eqn:jacobian_variance}
+\end{align}
+\Fig{fig:sinusoidal_jacobian_variance} visualizes the Jacobian variance over the input space as a function of the training progress.
+Although initially relatively flat, it becomes more granular in parts of the input space, the parts which are later well fit.
+The region with low Jacobian variance remains stuck in this configuration (see \fig{fig:sinusoidal_nll_fit}).
+This provides evidence that the non-linearity of the feature space is important for success or failure of learning on this dataset.
+However, why does gradient descent not break out of this situation?
+
+\begin{figure}[bthp]
+  \centering
+  \hfill
+  \begin{minipage}[t]{.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/sinusoidal_nll_jac_var_over_time.pdf}\vspace{-1em}%
+    \captionof{figure}{Jacobian variance over training time, using the mean of matrix $V(x)$ (see \eqn{eqn:jacobian_variance}).}
+    \label{fig:sinusoidal_jacobian_variance}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/sinusoidal_nll_sampling_prob_over_time.pdf}\vspace{-1em}%
+    \captionof{figure}{Probability of sampling a data point at input $x$ over training time.}
+    \label{fig:sinusoidal_sampling_prob}
+  \end{minipage}
+  \hfill
+\end{figure}
+\subsection{Inverse-Variance Weighting Effectively Undersamples}
+\label{sec:analysis:sampling}
+
+The answer lies in an imbalanced weighting of data points across the input space.
+Recall that the gradient $\nabla_\muhat \Lnll$ of the NLL \wrt the mean scales the error $\muhat(X) - Y$ by $\frac{1}{\varhat(X)}$ (\eqn{eqn:nll_grad_mean}).
+As symmetry is broken and the true function starts to be fit locally, the variance quickly shrinks in these areas to match the reduced MSE.
+If the variance is well-calibrated, the gradient becomes $\frac{\muhat(X) - Y}{\varhat(X)} \approx \frac{\muhat(X) - Y}{(\muhat(X) - Y)^2} = \frac{1}{\muhat(X) - Y}$.
+Data points with already low error will get their contribution in the batch gradient scaled up relatively to high error data points -- ``rich get richer'' self-amplification.
+Thus, NLL acts contrary to MSE which focuses on high-error samples.
+If the true variance $\var$ on the well-fit regions is much smaller than the errors on the badly-fit regions, or there are much more well-fit than badly-fit points, then  \emph{learning progress is completely hindered} on the badly-fit regions.
+
+Another way to view this is to interpret the different weighting of points as \emph{changing the training distribution $P(X,Y)$ to a modified distribution $\tilde{P}(X, Y)$} in which points with high error have a lower probability of getting sampled.
+This can be shown by defining $\tilde{P}(X, Y) = Z^{-1} \frac{P(X, Y)}{\sigma^2(X)}$, where $Z=\int \frac{P(x, y)}{\sigma^2(x)} \dx{x}\dx{y}$ is a normalizing constant, and recognizing that the gradient of the NLL is proportional to the gradient of the MSE loss in \eqn{eqn:mse} under the modified data distribution $\tilde{P}(X, Y)$:
+\begin{align}
+\nabla_\muhat \Lnll(\theta) &= Z \cdot \E_{X,Y \sim \tilde{P}(X, Y)} \g[ \muhat(X) - Y \g] \propto \nabla_\muhat \E_{X,Y \sim \tilde{P}(X, Y)} \g[ \frac{(Y - \muhat(X))^2}{2} \g] .
+\label{eqn:sampling}
+\end{align}
+In \fig{fig:sinusoidal_sampling_prob}, we plot $\tilde{P}(X, Y)$ over training time for our sinusoidal example.
+It can be seen that the virtual probability of sampling a point from the high-error region drops over time until it is highly unlikely to sample points from this region ($10^{-5}$ as opposed to $10^{-3}$ for uniform sampling).
+We show that this behavior also carries over to a real-world dataset in \sec{subsec:app:sampling-probs-fpp}.
+
+Sometimes, ``inverse-variance weighting'' is seen as a feature of the Gaussian NLL~\citep{Kendall2017WhatUncertainties} which introduces a self-regularizing property by allowing the network to ``ignore'' outlier points with high error.
+This can be desirable if the predicted variance corresponds to data-inherent unpredictability (noise),
+ but it is undesirable if it causes premature convergence and ignorance of hard-to-fit regions, as shown above.
+In our method, we enable control over the extent of self-regularization.
+\section{Method}
+\label{sec:method}
+
+In this section, we develop a solution method to mitigate these issues with NLL training.
+Our approach, which we term \method, allows choosing an arbitrary loss-interpolation between NLL and MSE while keeping calibrated uncertainty estimates.
+\subsection{Variance-Weighting the Gradients of the NLL}
+\label{sec:beta-nll}
+The problem we want to address is the premature convergence of NLL training to highly suboptimal mean fits.
+In \sec{sec:analysis}, we identified the relative down-weighting of badly-fit data points in the NLL loss together with its self-amplifying characteristic as the main culprit.
+Effectively, NLL weights the mean-squared-error per data point with $\frac{1}{\sigma^2}$,
+ which can be interpreted as sampling data points with $P(x) \propto \frac{1}{\sigma^2}$.
+Consequently, we propose modifying this distribution by introducing a parameter $\beta$ allowing to \emph{interpolate} between NLL's and a completely uniform data point importance.
+The resulting sampling distribution is given by $P(x) \propto \frac{\sigma^{2\beta}}{\sigma^2}$
+and illustrated in \fig{fig:overview} (right).
+
+How could this weighting be achieved?
+We simply introduce the variance-weighting term $\sigma^{2\beta}$ to the \Lnll{} loss such that it acts as a factor on the gradient.
+We denote the resulting loss as \method{}:
+\begin{align}
+    \Lwnll &\colonequal \Exp_{X,Y} \g[ \betaweight{X} \left( \frac{1}{2} \log\varhat(X) + \frac{(Y - \muhat(X))^2}{2\hat{\sigma}^2(X)} + \mathrm{const} \right) \g],
+    \label{eqn:weighted-nll}
+\end{align}
+where $\lfloor\cdot \rfloor$ denotes the \emph{stop gradient} operation.
+By stopping the gradient, the variance-weighting term acts as an adaptive, input-dependent learning rate.
+In this way, the gradients of $\Lwnll$ are:
+\begin{align*}
+    \refstepcounter{equation}\latexlabel{eqn:wnll_grad_mean}
+    \refstepcounter{equation}\latexlabel{eqn:wnll_grad_var}
+    \nabla_\muhat \Lwnll(\theta) = \Exp_{X,Y} \g[ \frac{\muhat(X) - Y}{\hat\sigma^{2-2\beta}(X)} \g],\ \ \nabla_\varhat \Lwnll(\theta) = \Exp_{X,Y} \g[ \frac{\varhat(X) - (Y - \muhat(X))^2}{2\hat \sigma^{4-2\beta}(X)} \g].
+    \tag{\ref*{eqn:wnll_grad_mean}, \ref*{eqn:wnll_grad_var}}
+\end{align*}
+
+Naturally, for $\beta=0$, we recover the original NLL loss.
+For $\beta=1$ the gradient \wrt $\mu$ in \eqn{eqn:wnll_grad_mean} is equivalent to the one of MSE.
+However, for the variance, the gradient in \eqn{eqn:wnll_grad_var} is a new quantity with $2\sigma^2$ in the denominator.
+For values $0<\beta<1$, we get different loss interpolations.
+Particularly interesting is the case of $\beta=0.5$, where the data points are weighted with $\frac{1}{\sigma}$ (inverse standard deviation instead of inverse variance).
+In our experiments (\sec{sec:experiments}), we find that $\beta=0.5$ generally achieves the best trade-off between accuracy and log-likelihood.
+A Pytorch implementation of the loss function is provided in \sec{subsec:app:beta-nll-python}.
+
+Note that the new loss \Lwnll{} is not meant for performance evaluation, rather it is designed to result in meaningful gradients. 
+Due to the weighting term, the loss value does not reflect the model's quality.
+The model performance during training should be monitored with the original negative log-likelihood objective and, optionally, with RMSE for testing the quality of the mean fit.
+\subsection{Allocation of Function Approximator Capacity}
+\label{sec:residual-distro}
+
+Even though $\Lmse$, $\Lnll$, and $\Lwnll$ all have the same optima \wrt the mean (and also the variance in the case of $\Lnll$ and $\Lwnll$), 
+optimizing them leads to very different solutions.
+In particular, because these losses weight data points differently, \emph{they assign the capacity of the function approximator differently}.
+Whereas the MSE loss gives the same weighting to all data points, the NLL loss gives high weight to data points with low predicted variance and low weight to those with high variance. \method interpolates between the two.
+The behavior of the NLL loss is appropriate if these variances are caused by true aleatoric uncertainty in the data.
+However, due to the use of function approximation, there is also the case where data points cannot be well predicted (maybe only transiently).
+This would result in high predicted variance, although the ground truth is corrupted by little noise.
+The different loss functions thus vary in how they handle these \emph{difficult data points}.
+
+An example of how the differences between the losses manifest in practice is illustrated in \fig{fig:1dslide-residuals}.
+Here we show the distribution of the residuals for a dynamics prediction dataset containing \emph{easy} and \emph{hard} to model areas.
+The NLL loss essentially ignores a fraction of the data by predicting high uncertainty. 
+By analyzing those data points, we found that they were actually \emph{the most important data points} to model correctly (because they captured non-trivial interactions in the physical world).
+
+How important are the data points with high uncertainty? 
+Are they outliers (\ie do they stem from truly noisy regions), to which we would be willing to allocate less of the function approximator's capacity?
+Or are they just difficult samples that are important to fit correctly?
+The answer is task-dependent and, as such, there is no one-loss-fits-all solution.
+Rather, the modeler should choose which behavior is desired. 
+Our \method loss makes this choice available through the $\beta$ parameter.
+
+
+
+\begin{figure}
+ \centering
+    \begin{subfigure}[b]{0.31\textwidth}
+        \caption{$\Lnll$}\vspace{-0.5em}
+        \includegraphics[width=\textwidth]{figures/histograms/1dslide_hist_nll_errors.pdf}
+        \label{subfig:1dslide_hist_nll_errors}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.31\textwidth}
+        \caption{$\Lmse$}\vspace{-0.5em}
+        \includegraphics[width=\textwidth]{figures/histograms/1dslide_hist_mse_errors.pdf}
+        \label{subfig:1dslide_hist_mse_errors}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.31\textwidth}
+        \caption{$\Lwnll$ with $\beta=0.5$}\vspace{-0.5em}
+        \includegraphics[width=\textwidth]{figures/histograms/1dslide_hist_nll0.5_errors.pdf}
+        \label{subfig:1dslide_hist_beta_nll_errors}
+    \end{subfigure}\vspace{-2em}
+ \caption{Distribution of residual prediction errors depending on the loss function for the \ObjectSlide{} dataset (see \sec{sec:dynmodels}). Dashed lines show predictive RMSE. (a) The NLL loss ($\Lnll$) yields multimodal residuals. There is a long tail of difficult data points that are ignored, while easy ones are fit to high accuracy.
+ (b) The MSE loss ($\Lmse$) results in a log-normal residual distribution.
+ (c) Our \method{} loss ($\Lwnll$) yields highly accurate fits on easy data points without ignoring difficult ones.}
+ \label{fig:1dslide-residuals}
+\end{figure}
+\section{Experiments}
+\label{sec:experiments}
+In our experiments, we ask the following questions and draw the following conclusions:
+
+\begin{enumerate}[leftmargin=1.4cm,topsep=0px,partopsep=0px]
+  \item[\sec{subsec:synth-datasets}:] \emph{Does \method fix the pitfall with NLL's convergence?}\\[0.2em]
+    \textbf{Yes}, 
+    \method converges to good mean and uncertainty estimates across a range of $\beta$ values. 
+  \item[\sec{subsec:real-datasets}:] \emph{Does \method improve over NLL in practical settings? How sensitive to hyperparameters is \method?} We investigate a diverse set of real-world domains: regression on the UCI datasets, dynamics model learning, generative modeling on MNIST and Fashion-MNIST, and depth-map prediction from natural images.\\[0.2em]
+    \textbf{Yes}, \method generally performs better than NLL and is considerably easier to tune.
+  \item[\sec{subsec:baseline-discussion}:] \emph{How does \method compare to other loss functions for distributional regression?} We compare with a range of approaches: learning to match the moments of a Gaussian (termed ``moment matching'' (MM); see \sec{sec:MM}), using a Student's t-distribution instead of a Gaussian~\citep{Detlefsen2019:reliabletraining}, or putting different priors on the variance and using variational inference (xVAMP, xVAMP*, VBEM, VBEM*)~\citep{Stirn2020VariationalVariance}. \\[0.2em]
+    \textbf{It depends.} Different losses make different trade-offs, which we discuss in \sec{subsec:baseline-discussion}.
+\end{enumerate}
+
+
+We refer the reader to \sec{sec:app:datasets} and \sec{sec:app:hyperparams} for a description of datasets and training settings. 
+We evaluate the quality of predictions quantitatively in terms of the root mean squared error (RMSE) and the negative log-likelihood (NLL).
+\subsection{Synthetic Datasets}
+\label{subsec:synth-datasets}
+
+\paragraph{Sinusoidal without heteroscedastic noise}
+We first perform an extended investigation of our illustrative example from \fig{fig:sinusoidal_nll_fit} -- a sine curve with a small additive noise: $y = 0.4 \sin(2\pi x) + \xi$, with $\xi$ being Gaussian noise with standard deviation $\sigma=0.01$.
+One would expect that a network with sufficient capacity can easily learn to fit this function.
+Figure~\ref{fig:results-sine-convergence} inspects this over a range of architectures and learning rates.
+
+\begin{figure}
+ \centering
+ \begin{tabular}{ccc}
+ (a) $\beta=0$ (NLL) & (b) $\beta=0.5$& (c) $\beta=1$ \\
+ \includegraphics[width=.31\textwidth]{figures/heatmaps/sine-grid-RMSE_beta-0.0}&
+ \includegraphics[width=.31\textwidth]{figures/heatmaps/sine-grid-RMSE_beta-0.5}&
+ \includegraphics[width=.31\textwidth]{figures/heatmaps/sine-grid-RMSE_beta-1.0}
+ \end{tabular}\vspace{-1.0em}
+ \caption{Convergence properties analyzed on the sinusoidal regression problem.
+ RMSE after \np{200000} epochs, averaged over 3 independent trials, is displayed by color codes (lighter is better) as a function of learning rate and model architecture (see \sec{sec:app:model-architectures}). 
+ The original NLL ($\beta=0$) does not obtain good RMSE fits for most hyperparameter settings. 
+ \Fig{fig:app:results-sine-convergence:nll} shows results for the NLL metric.
+ }
+ \label{fig:results-sine-convergence}
+\end{figure}
+
+We find that for the standard NLL loss ($\beta=0$), the networks do not converge to a reasonable mean fit. 
+There is a trend that larger networks and learning rates show better results, but when comparing this to \method{} with $\beta=0.5$ we see that the networks are indeed able to fit the function without any issues.
+As expected, the same holds for the mean squared error loss (MSE) and \method{} with $\beta=1$.
+The quality of the fit \wrt NLL is shown in \fig{fig:app:results-sine-convergence:nll}.
+
+\paragraph{Sinusoidal with heteroscedastic noise}
+We sanity-check that \method is still delivering good uncertainty estimates on the illustrative example from \citet{Detlefsen2019:reliabletraining} -- a sine curve with increasing amplitude and noise: $y = x \sin(x) + x\xi_1 +\xi_2 $, with $\xi_1$ and $\xi_2$ being Gaussian noise with standard deviation $\sigma=0.3$.
+\Fig{fig:results-aleatoric-sine} (a-e) displays the predictions of the best models (\wrt NLL validation loss) and (f) compares the predicted uncertainties over 10 independent trials.
+Fitting the mean is achieved with all losses.
+On the training range, \method with $\beta > 0$ learns virtually the same uncertainties as the NLL loss.
+
+\newlength{\picheight}
+\setlength{\picheight}{.128\textwidth}
+\begin{figure}
+ \centering
+ \begin{tabular}{@{}c@{ }c@{ }c@{ }c@{ }c@{ }c@{}}
+ (a) NLL & (b) $\beta=0.25$& (c) $\beta=0.5$& (d) $\beta=1$ & (e) MM &(f) std. dev.\\
+ \includegraphics[height=\picheight]{figures/aleatoric-sine/sine-aleatoric-fit-beta-0.0-crop}&
+ \includegraphics[height=\picheight]{figures/aleatoric-sine/sine-aleatoric-fit-beta-0.25-crop}&
+ \includegraphics[height=\picheight]{figures/aleatoric-sine/sine-aleatoric-fit-beta-0.5-crop}&
+ \includegraphics[height=\picheight]{figures/aleatoric-sine/sine-aleatoric-fit-beta-1.0-crop}&
+ \includegraphics[height=\picheight]{figures/aleatoric-sine/sine-aleatoric-fit-mm-crop}&
+ \includegraphics[height=\picheight]{figures/aleatoric-sine/sine-aleatoric-std-crop}
+ \end{tabular}\vspace{-1.0em}
+ \caption{Fits for the heteroscedastic sine example from \citet{Detlefsen2019:reliabletraining} (a-e).
+ Dotted lines show the ground truth mean and $\pm 2 \sigma$, respectively. (f) The predicted standard deviations (with shaded std. over 10 independent trials) with the same color code. Note that $\beta=0.5$ and $\beta=1$ graphs lie on top of one another.
+ Inside the training regime, all \method{} variants (a-d) yield well-calibrated uncertainty estimates.
+ Moment matching (e) significantly underestimates the variance everywhere.
+ }
+ \label{fig:results-aleatoric-sine}
+\end{figure}
+\subsection{Real-World Datasets}
+\label{subsec:real-datasets}
+\paragraph{UCI Regression Datasets}
+As a standard real-world benchmark in predictive uncertainty estimation, we consider the UCI datasets~\citep{HernandezLobato2015ProbBackprop}.
+\Tab{tab:results-uci-overview} gives an overview comparing different loss variants.
+We refer to \sec{subsec:add-results-uci} for the full results on all 12 datasets.
+The results are encouraging: \method achieves predictive log-likelihoods on par with or better than the NLL loss while clearly improving the predictive accuracy on most datasets.
+
+\begin{table*}[t]
+    \caption{Results for UCI Regression Datasets. We report predictive log-likelihood and RMSE ($\pm$ standard deviation). \emph{Ties} denotes the number of datasets (out of 12) for which the method cannot be statistically distinguished from the best method (see \sec{subsec:add-results-uci}). We compare with Student-t~\citep{Detlefsen2019:reliabletraining} and xVAMP/VBEM~\citep{Stirn2020VariationalVariance}.
+    Section~\ref{subsec:add-results-uci} lists the full results.}
+    \label{tab:results-uci-overview}
+    \vspace{-1em}
+    \begin{center}
+	    \adjustbox{max width=\textwidth}{\begin{tabular}{@{}l@{\hskip.5em}l@{\hskip8px}r@{\hskip6px} *{4}{l@{\hskip6px}}cr@{\hskip6px} *{3}{l@{\hskip6px}}l@{}}
+\toprule{} & {} & \multicolumn{5}{c}{LL $\uparrow$} & {} & \multicolumn{5}{c}{RMSE $\downarrow$} \\
+\cmidrule{3-7} \cmidrule{9-13}
+Loss & $\beta$ &        Ties &          concrete &            energy &             naval &               yacht &              & Ties &         concrete &           energy &                naval &            yacht \\
+\midrule
+\Lwnll & 0              &             3 &  -3.25 $\pm$ 0.31 &  -3.22 $\pm$ 1.41 &  12.46 $\pm$ 1.18 &    -2.86 $\pm$ 5.18 &   &              5 &  6.08 $\pm$ 0.65 &  2.25 $\pm$ 0.34 &  0.0021 $\pm$ 0.0006 &  1.22 $\pm$ 0.47 \\
+\Lwnll & 0.25           &             4 &  -3.31 $\pm$ 0.51 &  -2.82 $\pm$ 0.82 &  13.78 $\pm$ 0.33 &    -1.97 $\pm$ 1.14 &   &              6 &  5.79 $\pm$ 0.74 &  1.81 $\pm$ 0.30 &  0.0012 $\pm$ 0.0004 &  1.73 $\pm$ 1.00 \\
+\Lwnll & 0.5            &             5 &  -3.29 $\pm$ 0.36 &  -2.41 $\pm$ 0.72 &  13.99 $\pm$ 0.40 &    -2.47 $\pm$ 1.68 &   &              7 &  5.61 $\pm$ 0.65 &  1.12 $\pm$ 0.25 &  0.0006 $\pm$ 0.0002 &  2.35 $\pm$ 1.44 \\
+\Lwnll & 0.75           &             5 &  -3.27 $\pm$ 0.34 &  -2.80 $\pm$ 0.59 &  13.63 $\pm$ 0.62 &    -1.87 $\pm$ 0.55 &   &              8 &  5.67 $\pm$ 0.73 &  1.31 $\pm$ 0.45 &  0.0004 $\pm$ 0.0001 &  1.97 $\pm$ 1.03 \\
+\Lwnll & 1.0            &             2 &  -3.23 $\pm$ 0.33 &  -3.37 $\pm$ 0.58 &  13.59 $\pm$ 0.30 &    -2.27 $\pm$ 1.07 &   &              9 &  5.55 $\pm$ 0.77 &  1.54 $\pm$ 0.54 &  0.0004 $\pm$ 0.0000 &  2.08 $\pm$ 1.13 \\
+\Lmm        &           &             0 &  -3.49 $\pm$ 0.38 &  -4.26 $\pm$ 0.50 &  12.73 $\pm$ 0.64 &   -11.2 $\pm$ 31.0  &   &              5 &  6.28 $\pm$ 0.82 &  2.19 $\pm$ 0.28 &  0.0005 $\pm$ 0.0001 &  3.02 $\pm$ 1.38 \\
+\Lmse       &           &           --- &               \multicolumn{1}{c}{---} &       \multicolumn{1}{c}{---} &    \multicolumn{1}{c}{---} &          \multicolumn{1}{c}{---} &   &             12 &  4.96 $\pm$ 0.64 &  0.92 $\pm$ 0.11 &  0.0004 $\pm$ 0.0001 &  0.78 $\pm$ 0.25 \\
+Student-t   &           &            10 &  -3.07 $\pm$ 0.14 &  -2.46 $\pm$ 0.34 &  12.47 $\pm$ 0.48 &    -1.23 $\pm$ 0.55 &   &              5 &  5.82 $\pm$ 0.59 &  2.26 $\pm$ 0.34 &  0.0026 $\pm$ 0.0009 &  1.34 $\pm$ 0.63 \\
+xVAMP       &           &             6 &  -3.06 $\pm$ 0.15 &  -2.47 $\pm$ 0.32 &  12.44 $\pm$ 0.60 &    -0.99 $\pm$ 0.33 &   &              8 &  5.44 $\pm$ 0.64 &  1.87 $\pm$ 0.32 &  0.0023 $\pm$ 0.0004 &  0.99 $\pm$ 0.43 \\
+xVAMP*      &           &             7 &  -3.03 $\pm$ 0.13 &  -2.41 $\pm$ 0.32 &  12.80 $\pm$ 0.55 &    -1.04 $\pm$ 0.47 &   &              8 &  5.35 $\pm$ 0.73 &  2.00 $\pm$ 0.26 &  0.0020 $\pm$ 0.0006 &  1.13 $\pm$ 0.66 \\
+VBEM        &           &             2 &  -3.14 $\pm$ 0.07 &  -4.29 $\pm$ 0.16 &   8.05 $\pm$ 0.13 &    -2.65 $\pm$ 0.10 &   &              9 &  5.21 $\pm$ 0.58 &  1.29 $\pm$ 0.33 &  0.0009 $\pm$ 0.0004 &  1.66 $\pm$ 0.84 \\
+VBEM*       &           &             8 &  -2.99 $\pm$ 0.13 &  -1.91 $\pm$ 0.21 &  13.10 $\pm$ 0.47 &    -0.98 $\pm$ 0.24 &   &              9 &  5.17 $\pm$ 0.59 &  1.08 $\pm$ 0.17 &  0.0015 $\pm$ 0.0005 &  0.65 $\pm$ 0.20 \\
+\bottomrule
+\end{tabular}
+}
+    \end{center}
+\end{table*}
+\vspace*{-0.3em}
+\paragraph{Dynamics models}\label{sec:dynmodels}
+
+As a major application of uncertainty estimation lies in model-based reinforcement learning (RL), we test the different loss functions on two dynamics predictions tasks of varying difficulty, \ObjectSlide, and \FPP.
+In both tasks, the goal is to predict how an object will move from the current state and the agent's action.
+Whereas \ObjectSlide~\citep{Seitzer2021CID} is a simple 1D-environment, \FPP~\citep{Plappert2018MultiGoalRL} is a complex 3D robotic-manipulation environment.
+The models are trained on trajectories collected by RL agents.
+
+For both datasets, we perform a grid search over different hyperparameter configurations (see \sec{sec:app:grid-search}) for a sensitivity analysis to hyperparameters settings, presented in \fig{fig:results-1dslide-fpp-grid}.
+It reveals that NLL is 
+vulnerable to the choice of hyperparameters,
+whereas \method achieves good results over a wide range of configurations.
+The best performing configurations for each loss are then evaluated on a hold-out test set (\tab{tab:results-1dslide-fpp}).
+One can see that the NLL loss results in poor predictive performance and also exhibits quite a high variance across random seeds.
+Our method yields high accuracy and log-likelihood fits for a range of $\beta$ values, with $\beta=0.5$ generally achieving the best trade-off.
+
+\begin{figure}
+    \hspace{7em}(a) \ObjectSlide \hspace{12em}(b) \FPP \\[-1.2em]
+    \begin{center}
+        \includegraphics[width=\textwidth]{figures/histograms/1dslide_fpp_kde.pdf}
+    \end{center}
+    \vspace{-1em}
+  \caption{Sensitivity analysis of loss functions to hyperparameters on the dynamics model learning tasks: \ObjectSlide (a) and \FPP (b).
+  The distributions over validation RMSE and NLL are shown as a function of hyperparameters, based on a grid search over different model configurations (see \sec{sec:app:grid-search}).
+  While the NLL loss is highly sensitive when evaluating RMSE, the \method{} loss shows much less sensitivity and yields good results regardless of the exact configuration.}
+  \label{fig:results-1dslide-fpp-grid}
+\end{figure}
+
+\begin{table*}[t]
+    \caption{Test results for dynamics models, using best configurations found in a grid search. The reported standard deviations are over 5 random seeds.
+    We compare with Student-t~\citep{Detlefsen2019:reliabletraining} and xVAMP/VBEM~\citep{Stirn2020VariationalVariance}.}
+    \label{tab:results-1dslide-fpp}
+    \vspace{-1em}
+    \begin{center}{\scriptsize \begin{tabular}{@{}llccccc@{}}
+\toprule
+              &           & \multicolumn{2}{c}{\textbf{1D-Slide}} & \phantom{}                        & \multicolumn{2}{c}{\textbf{\FPP}}                               \\
+\cmidrule{3-4} \cmidrule{6-7}
+ Loss & $\beta$                       & \multicolumn{1}{c}{RMSE $\downarrow$} & \multicolumn{1}{c}{LL $\uparrow$} &  & \multicolumn{1}{c}{RMSE $\downarrow$} & \multicolumn{1}{c}{LL $\uparrow$} \\
+\midrule
+\Lwnll &$0$    & 0.0192 $\pm$ 0.006                    & 7.97 $\pm$ 3.62                   &  & 0.00163 $\pm$ 0.00008                 & 18.72 $\pm$ 7.32                  \\
+\Lwnll &$0.25$ & 0.0107 $\pm$ 0.004                    & 9.03 $\pm$ 0.47                   &  & 0.00102 $\pm$ 0.00004                 & 24.43 $\pm$ 1.64                  \\
+\Lwnll &$0.5$  & 0.0064 $\pm$ 0.002           & 9.28 $\pm$ 0.75          &  & 0.00096 $\pm$ 0.00002        & 24.68 $\pm$ 0.08         \\
+\Lwnll &$0.75$ & 0.0087 $\pm$ 0.003                    & 6.61 $\pm$ 1.83                   &  & 0.00098 $\pm$ 0.00001                 & 22.77 $\pm$ 0.17                  \\
+\Lwnll &$1.0$  & 0.0074 $\pm$ 0.001                    & 6.58 $\pm$ 0.29                   &  & 0.00102 $\pm$ 0.00001                 & 21.32 $\pm$ 0.07                  \\
+\Lmm   & & 0.0078 $\pm$ 0.001  &  diverges                                                     &  & 0.00104 $\pm$ 0.00003                 & 19.33 $\pm$ 1.31                  \\
+\Lmse  & & 0.0068 $\pm$ 0.001     & --- &  & 0.00103 $\pm$ 0.00000                 & ---                               \\
+Student-t              & &  0.0155 $\pm$ 0.006 &  11.30 $\pm$ 0.03 &               &  0.00117 $\pm$ 0.00001 & 30.44 $\pm$ 0.08  \\
+xVAMP                  & &  0.0118 $\pm$ 0.002 &  10.58 $\pm$ 0.19 &               &  0.00128 $\pm$ 0.00005 & 29.02 $\pm$ 0.12  \\
+xVAMP*                 & &  0.0199 $\pm$ 0.006 &  10.89 $\pm$ 0.10 &               &  0.00128 $\pm$ 0.00001 & 29.19 $\pm$ 0.08  \\
+VBEM                   & &  0.0039 $\pm$ 0.000 &   3.79 $\pm$ 0.00 &               &  0.00104 $\pm$ 0.00003 & 17.39 $\pm$ 0.29  \\
+VBEM*                  & &  0.0280 $\pm$ 0.011 &  10.13 $\pm$ 0.49 &               &  0.00118 $\pm$ 0.00003 & 28.62 $\pm$ 0.15  \\
+\bottomrule
+\end{tabular}}
+    \end{center}
+    \vspace{-1.25em}
+\end{table*}
+
+\vspace*{-0.3em}
+\paragraph{Generative modeling and depth-map prediction}
+For generative modeling, we train variational autoencoders~\citep{Kingma2014VAE} with probabilistic decoders on MNIST and Fashion-MNIST.
+For the task of depth regression, we modify a state-of-the-art method~(AdaBins; \citet{Bhat2021Adabins}) and test it on the NYUv2 dataset~\citep{Silberman2012NYU} with our loss (\fig{fig:app:results-depth-reg-images}).
+\Tab{tab:results-vae-depth} presents selected results for both tasks, yielding similar trends as before.
+We refer to \sec{subsec:app:vae-results} and \sec{subsec:app:depth-reg-results} for more details, including qualitative results.
+
+
+\begin{table*}[t]
+    \caption{Selected results for generative modeling and depth-map prediction. 
+    Left: Training variational autoencoders on MNIST and Fashion-MNIST. 
+    Right: Depth-map prediction on NYUv2.
+    Full results can be found in \tab{tab:app:results-vaes} and \tab{tab:app:results-depth-reg}.}
+    \label{tab:results-vae-depth}
+    \vspace{-1em}
+    \begin{center}{\scriptsize \begin{tabular}{@{}lllllll@{}}
+\toprule{} & &\multicolumn{2}{c}{\textbf{MNIST}} & \phantom{} & \multicolumn{2}{c}{\textbf{Fashion-MNIST}} \\
+\cmidrule{3-4} \cmidrule{6-7}
+Loss & $\beta$ & \multicolumn{1}{c}{RMSE $\downarrow$} &   \multicolumn{1}{c}{LL $\uparrow$} & &      \multicolumn{1}{c}{RMSE $\downarrow$} &   \multicolumn{1}{c}{LL $\uparrow$} \\
+\midrule
+\Lwnll & $0$     &  0.237 $\pm$ 0.002 &   2116 $\pm$ 55 & &     0.170 $\pm$ 0.001 &  1940 $\pm$ 104 \\
+\Lwnll & $0.5$   &  0.151 $\pm$ 0.003 &   2220 $\pm$ 25 & &     0.125 $\pm$ 0.003 &   1639 $\pm$ 52 \\
+\Lwnll & $1.0$   &  0.152 $\pm$ 0.001 &   1706 $\pm$ 30 & &     0.138 $\pm$ 0.002 &   1142 $\pm$ 26 \\
+Student-t  &     &  0.273 $\pm$ 0.002 &  4291 $\pm$ 103 & &     0.182 $\pm$ 0.002 &    2857 $\pm$ 9 \\
+xVAMP*     &     &  0.225 $\pm$ 0.001 &  3062 $\pm$ 215 & &     0.160 $\pm$ 0.002 &  2150 $\pm$ 131 \\
+VBEM*      &     &  0.176 $\pm$ 0.008 &  3213 $\pm$ 238 & &     0.150 $\pm$ 0.003 &   2244 $\pm$ 78 \\
+\bottomrule
+\end{tabular}
+}\hspace{0.5em}{\scriptsize \begin{tabular}{@{}llll@{}}
+\toprule
+\multicolumn{4}{c}{\textbf{NYUv2}} \\
+\cmidrule{1-4}
+Loss & $\beta$ & RMSE $\downarrow$ & LL $\uparrow$ \\
+\midrule
+\Lwnll & $0$                 &   0.3854 &   -4.52 \\
+\Lwnll & $0.5$               &   0.3789 &   -7.50 \\
+\Lwnll & $1.0$               &   0.3845 &   -5.10 \\
+\Lmse  &                     &   0.3776 &   --- \\
+$\mathcal{L}_1$ &            &   0.3850 &   --- \\
+SI Loss                      &    &  0.419 &   --- \\
+\bottomrule
+\end{tabular}
+}
+    \end{center}
+    \vspace{-1.25em}
+\end{table*}
+\subsection{Comparison to Other Loss Functions}
+\label{subsec:baseline-discussion}
+
+The previous sections have demonstrated that our \method loss has clear advantages over the NLL loss. 
+However, the comparison to other loss functions requires a more nuanced discussion.
+First, we also test an alternative loss function based on matching the moments of the Gaussian ($\Lmm$; see \sec{sec:MM}). 
+While this loss results in high accuracy, it is unstable to train and exhibits poor likelihoods.
+
+Second, we test several loss functions based on a Student's t-distribution, including xVAMP and VBEM~\citep{Stirn2020VariationalVariance}.
+These approaches generally achieve better likelihoods than the \method; we conjecture this is because their ability to maintain uncertainty about the variance results in a better fit (in terms of KL divergence) when the variance is wrongly estimated.
+In terms of predictive accuracy, \method outperforms the Student's t-based approaches.
+Exceptions are some of the UCI datasets with limited data (\eg ``concrete'' and ``yacht'') where xVAMP and VBEM are on par or better than \method.
+This is likely because these methods can mitigate overfitting by placing a prior on the variance.
+However, xVAMP and VBEM are also non-trivial to implement and computationally heavy: both need MC samples to evaluate the prior; for xVAMP, training time roughly doubles as evaluating the prior also requires a second forward pass through the network.
+In contrast, \method is simple to implement (see \sec{subsec:app:beta-nll-python}) and introduces no additional computational costs.
+\section{Conclusion}
+We highlight a problem frequently occurring when optimizing probabilistic neural networks using the common NLL loss: training gets stuck in suboptimal function fits.
+With our analysis, we reveal the underlying reason: initially badly-fit regions receive increasingly less weight in the loss which results in premature convergence.
+We propose a simple solution by introducing a family of loss functions called \method{}.
+Effectively, the gradient of the original NLL loss is scaled by the $\beta$-exponentiated per-sample variance.
+This allows for a meaningful interpolation between the NLL and MSE loss functions while providing well-behaved uncertainty estimates. 
+The hyperparameter $\beta$ gives practitioners the choice to control the self-regularization strength of NLL:
+how important should high-noise regions or difficult-to-predict data points be in the fitting process.
+In most cases, $\beta=0.5$ will be a good starting point.
+We think the problem discussed in this paper is primarily why practitioners using the Gaussian distribution in regression or generative modeling tasks often opt for a constant or homoscedastic (global) variance, as opposed to the more general heteroscedastic (data-dependent) variance.
+We hope that our simple solution contributes to changing this situation by improving the usability and performance of modeling data uncertainty with deep neural networks.
+
+\newpage
+\section*{Acknowledgments}
+The authors thank the International Max Planck Research School for Intelligent Systems (IMPRS-IS) for supporting Maximilian Seitzer. 
+Georg Martius is a member of the Machine Learning Cluster of Excellence, EXC number 2064/1 -- Project number 390727645. 
+We acknowledge the financial support from the German Federal Ministry of Education and Research (BMBF) through the Tübingen AI Center (FKZ: 01IS18039B).
+\section*{Reproducibility Statement}
+All settings are described in detail in \sec{sec:app:datasets} and \sec{sec:app:hyperparams}.
+We make full code and data available under \url{https://github.com/martius-lab/beta-nll}.
+
+\bibliography{iclr2022_conference}
+\bibliographystyle{iclr2022_conference}
+
+\newpage
+\appendix
+\vskip.075in\centerline{\Large\sc Appendix}\vspace{0.5ex}
+
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+\renewcommand{\theequation}{S\arabic{equation}}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+\setcounter{equation}{0}
+\section{The Moment Matching Loss}
+\label{sec:MM}
+
+We also investigated an alternative loss function designed to counter the imbalanced weighting of data points by the NLL loss, which we call ``moment matching'' (MM).
+It uses standard squared error losses to estimate the \emph{moments of the target distribution},
+\ie directly estimating the sufficient statistics of the target distribution. 
+In our experiments, we found that this loss function generally fixes the problems with premature convergence when using \Lnll, but it also leads to underestimation of variances and exhibits considerable training instabilities.
+
+To fully describe a Gaussian distribution, only the first two moments $\mu, \sigma^2$ need to be estimated.
+So, why not directly define losses based on the moment estimators?
+Starting from the conditional mean of the targets, $\E \g[Y \mid X\g]$, we can define the squared deviation as a loss and see that the MSE is an upper bound:
+\begin{align}
+    \g(\E \g[Y \mid X\g] - \muhat(X)\g)^2 = \E\g[ (Y - \muhat(X)) \mid X\g]^2 \le \E \g[ (Y - \muhat(X))^2 \mid X \g] \colonequal \Lmm^\muhat\,.\label{eqn:mm-mu}
+\end{align}
+Notice that $\Lmm^\muhat$ is the standard MSE loss. Thus, learning a mean fit $\muhat(x)$ can follow the standard (non-distributional) regression procedures.
+Interestingly, due to the moment matching viewpoint, we can analogously define a loss for fitting the variance (or the second central moment).
+Variance is defined as $\E \g[ (Y - \mu(X))^2 \mid X\g]$. As such, by analogy, we can define the following loss:
+    $\Lmm^\varhat := \E \g[ \g((Y - \muhat(X))^2  - \varhat(X) \g)^2 \mid X\g]$.
+To use the same physical unit as $\Lmm^\muhat$, we reformulate it in terms of the standard deviation as:
+\begin{align}
+    \Lmm^{\hat\sigma} :=  \E \g[ \g( \sqrt{\g(Y - \muhat(X)\g)^2} - \hat{\sigma}(X) \g)^2 \,\, \bigg |\,\, X \g] \,.\label{eqn:mm-sigma}
+\end{align}
+Thus, the moment matching loss can be expressed simply by the sum of the two losses: $\mathcal \Lmm =  \Lmm^\muhat + \Lmm^{\hat\sigma}$.
+We found that using $\Lmm^{\hat\sigma}$ instead of $\Lmm^\varhat$ makes it easier to balance the losses.
+
+Interestingly, our \method subsumes the moment matching loss if we allow for different values of $\beta$ to be used for mean and variance estimation.
+In particular, using \method with $\beta=1$ for the mean and $\beta=2$ for the variance results in the same gradients as using $\frac{1}{2} \Lmm^\muhat + \frac{1}{4} \Lmm^\varhat$ as the loss.
+Note that we did not investigate this connection further, and also did not perform any experiments with different values of $\beta$ for mean and variance.
+\section{Additional Results}
+\label{sec:app:results}
+\subsection{Further Consequences of Inverse-Variance Weighting}
+In \sec{sec:analysis:sampling}, we interpreted the inverse-variance weighting of the NLL as training under a different data distribution $\tilde{P}(X, Y)$ in which points with high error have a low probability of being sampled. 
+A consequence of this is that the distribution $\tilde{P}(X, Y)$ continuously shifts while the model is improving its fit. 
+For datasets where the noise level is low on parts of the input space and the underlying function can be modeled to high accuracy, an interesting phenomenon can be observed: even though the training curve for RMSE looks like it indicates convergence (\ie it flattens out), the model can actually still be adapting with the changing training distribution.
+It is just that the changes happen on data points that already have such low prediction error relative to the average error that further improvements are virtually invisible in the average error.
+The actual training progress can be revealed using a histogram of the prediction errors on a log-scale, in the manner of \fig{fig:1dslide-residuals}.
+Eventually, the training distribution stabilizes when for all data points, either the prediction error reaches the noise level at that point, or the variance can not decrease further at that point because it reaches a manually set lower bound.
+If no lower bound on the variance is set, the distribution may never stabilize, leading to training instabilities when the variance reaches close to zero.
+\subsection{Synthetic Dataset}
+\label{subsec:app:add_results_synthetic}
+In \fig{fig:app:sinusoidal_nll_fit_extra}, we replicate the experiment from \fig{fig:sinusoidal_nll_fit} (training the NLL loss on a sinusoidal for $10^7$ updates) on several more random seeds.
+In order to test the dependence of our reported issue on the optimizer, we repeat the experiment from \fig{fig:sinusoidal_nll_fit} but use different optimizers than Adam with $\beta_1=0.9, \beta_2=0.999$. 
+The results are shown in \fig{fig:app:sinusoidal_nll_fit_optimizers}.
+We find that none of the configurations reaches below an RMSE of $0.1$ (the optimal value corresponds to an RMSE of $0.01$), indicating that the issue is occurring stably across optimization settings.
+In \fig{fig:app:results-sine-convergence:nll}, we provide the results for the NLL metric on the sinusoidal dataset, complementing the results of \fig{fig:results-sine-convergence} (see discussion in \sec{subsec:synth-datasets}).
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.31\textwidth]{figures/sinusoidal_nll_fit_extra_1.pdf}
+    \includegraphics[width=0.31\textwidth]{figures/sinusoidal_nll_fit_extra_2.pdf}
+    \includegraphics[width=0.31\textwidth]{figures/sinusoidal_nll_fit_extra_3.pdf}
+    \caption{Repeating the experiment from \fig{fig:sinusoidal_nll_fit}, \ie training with NLL loss for $10^7$ update steps.
+    The observed behavior is stable across different independent trials.
+    }
+    \label{fig:app:sinusoidal_nll_fit_extra}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/heatmaps/sine-opt-nll-sgd.pdf}
+    \includegraphics[width=0.54\textwidth]{figures/heatmaps/sine-opt-nll-rmsprop-adam.pdf}
+    \caption{Using different optimizers to train on the sinusoidal from \fig{fig:sinusoidal_nll_fit} with the NLL loss.
+    The color code indicates the mean RMSE over 3 independent trials per optimizer setting. 
+    Black indicates that all trials diverged.
+    Training was done for $2 \cdot 10^6$ update steps and used architecture 2 from \tab{tab:sine:architectures}.
+    The observed behavior is stable across optimization settings.
+    }
+    \label{fig:app:sinusoidal_nll_fit_optimizers}
+\end{figure}
+
+\begin{figure}[htbp]
+ \centering
+ \begin{tabular}{ccc}
+ (a) $\beta=0$ (NLL) & (b) $\beta=0.5$ & (c) $\beta=1$\\
+ \includegraphics[width=.3\textwidth]{figures/heatmaps/sine-grid-NLL_beta-0.0}&
+ \includegraphics[width=.3\textwidth]{figures/heatmaps/sine-grid-NLL_beta-0.5}&
+ \includegraphics[width=.3\textwidth]{figures/heatmaps/sine-grid-NLL_beta-1.0}
+ \end{tabular}\vspace{-1.0em}
+ \caption{Convergence properties analyzed on the sinusoidal toy regression problem.
+ Same as \fig{fig:results-sine-convergence} but for the negative log-likelihood (NLL) criterion. Due to the bad mean fit, the original NLL loss ($\beta=0$) is also bad for most hyperparameter settings. With $\beta>0.5$ good fits are obtained for many settings. Also for $\beta=1$, which corresponds to MSE for fitting the mean, good uncertainty predictions are obtained with our \method{} as testified by the low NLL scores.}
+ \label{fig:app:results-sine-convergence:nll}
+\end{figure}
+\subsection{Analysis of Sampling Probabilities on Fetch-PickAndPlace}
+\label{subsec:app:sampling-probs-fpp}
+In \fig{fig:app:results-fpp-sampling-probs}, we show how the analysis from \sec{sec:analysis:sampling} transfers to a real world dataset, namely \FPP. 
+The figure shows how the distribution of effective sampling probability evolves during training (over a fixed set of training points) and compares that against a proxy ``oracle'': the distribution of effective sampling probabilities when using the squared residuals from a model trained with the MSE loss. 
+The mismatch between the two distributions demonstrates that optimizing the NLL loss drastically undersamples in comparison to the reference, effectively never sampling some data points. 
+This further corroborates our analysis in \sec{sec:analysis:sampling}.
+
+\begin{figure}[htbp]
+ \centering
+ \includegraphics[width=.31\textwidth]{figures/histograms/fpp_sampling_prob_ep-1.pdf}%
+ \includegraphics[width=.31\textwidth]{figures/histograms/fpp_sampling_prob_ep0.pdf}%
+ \includegraphics[width=.31\textwidth]{figures/histograms/fpp_sampling_prob_ep10.pdf}\\[0.5em]
+ \includegraphics[width=.31\textwidth]{figures/histograms/fpp_sampling_prob_ep50.pdf}%
+ \includegraphics[width=.31\textwidth]{figures/histograms/fpp_sampling_prob_ep100.pdf}%
+ \includegraphics[width=.31\textwidth]{figures/histograms/fpp_sampling_prob_ep199.pdf}%
+ \caption{Undersampling behavior of $\Lnll$ on \FPP.
+ The plot shows how the distribution of effective sampling probability evolves over training time, taken over \numprint{2000} fixed training points sampled at the initial epoch.
+ The dashed blue histogram shows the distribution of effective sampling probabilities when using the squared residuals from a model trained with MSE loss $\Lmse$.
+ This gives a reference distribution that $\Lnll$ should roughly match, taking into account the relative hardness of prediction on different samples.
+ The $\Lnll$ drastically undersamples compared to the reference (note the log-scale), effectively never sampling some points.
+ }
+ \label{fig:app:results-fpp-sampling-probs}
+\end{figure}
+\subsection{UCI Datasets}
+\label{subsec:add-results-uci}
+In this section, we include results for predictive log-likelihood (\tab{tab:results-uci-ll}) and RMSE (\tab{tab:results-uci-rmse}) for all UCI datasets we evaluated on.
+
+We find that baselines based on the Student's t-distribution (xVAMP and VBEM~\citep{Stirn2020VariationalVariance}) tend to have better predictive log-likelihood than \method, although there is also a dataset where \method performs better (``naval'') or where there is no statistically significant improvement (``housing'', ``kin8m'', ``wine-red'', ``wine-white''). 
+For RMSE, \Lmse unsurprisingly performs best. 
+Our \method is often on par with \Lmse and on par or better than the other baselines, except for ``yacht''.
+At the same time, our method is very simple to implement (see \sec{subsec:app:beta-nll-python}) and computationally lightweight compared to xVAMP and VBEM, which require the costly evaluation of a prior and Monte-Carlo sampling at each training step.
+
+\begin{table*}[htbp]
+    \caption{Results for UCI Regression Datasets. Predictive log-likelihood (higher is better) and standard deviation, together with dataset size, input and output dimensions.
+    Best mean value in bold. 
+    Results that are not statistically distinguishable from the best result are marked with $\dagger$.}
+    \label{tab:results-uci-ll}
+    \vspace{-1em}
+    \begin{center}
+	    \adjustbox{width=\textwidth}{ \begin{tabular}{@{}lllll@{}}
+\toprule{} &                     carbon &                   concrete &                     energy &                    housing \\
+{} & (10721, 5, 3) & (1030, 8, 1) & (768, 8, 2) & (506, 13, 1) \\
+\midrule
+\Lwnll ($\beta = 0$)    &           11.36 $\pm$ 2.11 &           -3.25 $\pm$ 0.31 &           -3.22 $\pm$ 1.41 &           -2.86 $\pm$ 0.50 \\
+\Lwnll ($\beta = 0.25$) &           10.91 $\pm$ 2.42 &           -3.31 $\pm$ 0.51 &           -2.82 $\pm$ 0.82 &           -2.75 $\pm$ 0.42 \\
+\Lwnll ($\beta = 0.5$)  &           10.22 $\pm$ 4.00 &           -3.29 $\pm$ 0.36 &           -2.41 $\pm$ 0.72 &          -2.64 $\pm$ 0.36$^\dagger$ \\
+\Lwnll ($\beta = 0.75$) &           10.82 $\pm$ 1.37 &           -3.27 $\pm$ 0.34 &           -2.80 $\pm$ 0.59 &          -2.72 $\pm$ 0.42$^\dagger$ \\
+\Lwnll ($\beta = 1.0$)  &           3.31 $\pm$ 20.88 &           -3.23 $\pm$ 0.33 &           -3.37 $\pm$ 0.58 &           -2.85 $\pm$ 0.87 \\
+\Lmm                    &            4.72 $\pm$ 5.80 &           -3.49 $\pm$ 0.38 &           -4.26 $\pm$ 0.50 &           -3.42 $\pm$ 1.01 \\
+\Lmse                   &                        --- &                        --- &                        --- &                        --- \\
+Student-t               &  \textbf{15.59 $\pm$ 0.43} &          -3.07 $\pm$ 0.14$^\dagger$ &           -2.46 $\pm$ 0.34 &          -2.47 $\pm$ 0.24$^\dagger$ \\
+xVAMP                   &           13.28 $\pm$ 0.19 &          -3.06 $\pm$ 0.15$^\dagger$ &           -2.47 $\pm$ 0.32 &          -2.43 $\pm$ 0.21$^\dagger$ \\
+xVAMP*                  &           13.17 $\pm$ 0.26 &          -3.03 $\pm$ 0.13$^\dagger$ &           -2.41 $\pm$ 0.32 &          -2.45 $\pm$ 0.22$^\dagger$ \\
+VBEM                    &            5.68 $\pm$ 0.70 &           -3.14 $\pm$ 0.07 &           -4.29 $\pm$ 0.16 &           -2.56 $\pm$ 0.15 \\
+VBEM*                   &           13.23 $\pm$ 0.36 &  \textbf{-2.99 $\pm$ 0.13} &  \textbf{-1.91 $\pm$ 0.21} &  \textbf{-2.42 $\pm$ 0.22} \\
+\midrule{} &                       kin8m &                      naval &                        power &                    protein \\
+{} & (8192, 8, 1) & (11934, 16, 2) & (9568, 4, 1) & (45730, 9, 1) \\
+\midrule
+\Lwnll ($\beta = 0$)    &          1.140 $\pm$ 0.039$^\dagger$ &           12.46 $\pm$ 1.18 &           -2.807 $\pm$ 0.057 &           -2.80 $\pm$ 0.05 \\
+\Lwnll ($\beta = 0.25$) &          1.142 $\pm$ 0.026$^\dagger$ &          13.78 $\pm$ 0.33$^\dagger$ &           -2.801 $\pm$ 0.053 &           -2.79 $\pm$ 0.05 \\
+\Lwnll ($\beta = 0.5$)  &          1.141 $\pm$ 0.046$^\dagger$ &  \textbf{13.99 $\pm$ 0.40} &           -2.805 $\pm$ 0.052 &           -2.78 $\pm$ 0.02 \\
+\Lwnll ($\beta = 0.75$) &          1.137 $\pm$ 0.041$^\dagger$ &          13.63 $\pm$ 0.62$^\dagger$ &           -2.806 $\pm$ 0.053 &           -2.79 $\pm$ 0.02 \\
+\Lwnll ($\beta = 1.0$)  &           1.126 $\pm$ 0.041 &           13.59 $\pm$ 0.30 &           -2.810 $\pm$ 0.051 &           -2.80 $\pm$ 0.03 \\
+\Lmm                    &           0.999 $\pm$ 0.063 &           12.73 $\pm$ 0.64 &           -2.918 $\pm$ 0.092 &           -2.98 $\pm$ 0.06 \\
+\Lmse                   &                         --- &                        --- &                          --- &                        --- \\
+Student-t               &  \textbf{1.155 $\pm$ 0.037} &           12.47 $\pm$ 0.48 &  \textbf{-2.738 $\pm$ 0.026} &  \textbf{-2.56 $\pm$ 0.02} \\
+xVAMP                   &          1.147 $\pm$ 0.037$^\dagger$ &           12.44 $\pm$ 0.60 &           -2.788 $\pm$ 0.032 &           -2.74 $\pm$ 0.03 \\
+xVAMP*                  &          1.147 $\pm$ 0.036$^\dagger$ &           12.80 $\pm$ 0.55 &           -2.785 $\pm$ 0.036 &           -2.71 $\pm$ 0.02 \\
+VBEM                    &           1.019 $\pm$ 0.054 &            8.05 $\pm$ 0.13 &           -2.819 $\pm$ 0.018 &           -2.85 $\pm$ 0.01 \\
+VBEM*                   &          1.138 $\pm$ 0.036$^\dagger$ &           13.10 $\pm$ 0.47 &           -2.783 $\pm$ 0.031 &           -2.73 $\pm$ 0.01 \\
+\midrule{} &          superconductivity &                   wine-red &                   wine-white &                      yacht \\
+{} & (21263, 81, 1) & (1599, 11, 1) & (4898, 11, 1) & (308, 6, 1) \\
+\midrule
+\Lwnll ($\beta = 0$)    &           -3.60 $\pm$ 0.23 &          -1.03 $\pm$ 0.24$^\dagger$ &          -1.059 $\pm$ 0.074$^\dagger$ &           -2.86 $\pm$ 5.18 \\
+\Lwnll ($\beta = 0.25$) &           -3.56 $\pm$ 0.14 &          -0.98 $\pm$ 0.12$^\dagger$ &          -1.041 $\pm$ 0.064$^\dagger$ &           -1.97 $\pm$ 1.14 \\
+\Lwnll ($\beta = 0.5$)  &           -3.60 $\pm$ 0.10 &          -0.99 $\pm$ 0.16$^\dagger$ &          -1.036 $\pm$ 0.065$^\dagger$ &           -2.47 $\pm$ 1.68 \\
+\Lwnll ($\beta = 0.75$) &           -3.72 $\pm$ 0.11 &          -1.02 $\pm$ 0.22$^\dagger$ &          -1.039 $\pm$ 0.060$^\dagger$ &           -1.87 $\pm$ 0.55 \\
+\Lwnll ($\beta = 1.0$)  &           -3.83 $\pm$ 0.09 &          -0.97 $\pm$ 0.10$^\dagger$ &          -1.040 $\pm$ 0.067$^\dagger$ &           -2.27 $\pm$ 1.07 \\
+\Lmm                    &           -4.45 $\pm$ 0.39 &           -1.22 $\pm$ 0.43 &           -1.135 $\pm$ 0.093 &         -11.24 $\pm$ 31.03 \\
+\Lmse                   &                        --- &                        --- &                          --- &                        --- \\
+Student-t               &  \textbf{-3.38 $\pm$ 0.04} &          -0.94 $\pm$ 0.10$^\dagger$ &          -1.034 $\pm$ 0.062$^\dagger$ &          -1.23 $\pm$ 0.55$^\dagger$ \\
+xVAMP                   &           -3.40 $\pm$ 0.03 &          -0.95 $\pm$ 0.06$^\dagger$ &          -1.038 $\pm$ 0.050$^\dagger$ &          -0.99 $\pm$ 0.33$^\dagger$ \\
+xVAMP*                  &          -3.40 $\pm$ 0.04$^\dagger$ &  \textbf{-0.94 $\pm$ 0.06} &          -1.029 $\pm$ 0.048$^\dagger$ &          -1.04 $\pm$ 0.47$^\dagger$ \\
+VBEM                    &           -3.63 $\pm$ 0.09 &          -0.95 $\pm$ 0.07$^\dagger$ &  \textbf{-1.028 $\pm$ 0.048} &           -2.65 $\pm$ 0.10 \\
+VBEM*                   &          -3.40 $\pm$ 0.04$^\dagger$ &          -0.94 $\pm$ 0.07$^\dagger$ &          -1.031 $\pm$ 0.057$^\dagger$ &  \textbf{-0.98 $\pm$ 0.24} \\
+\bottomrule
+\end{tabular}
+}
+    \end{center}
+\end{table*}
+
+\begin{table*}[htbp]
+    \caption{Results for UCI Regression Datasets. RMSE (lower is better) and standard deviation, together with dataset size, input and output dimensions.
+    Best mean value in bold. 
+    Results that are not statistically distinguishable from the best result are marked with $\dagger$.
+    }
+    \label{tab:results-uci-rmse}
+    \vspace{-1em}
+    \begin{center}
+	    \adjustbox{width=\textwidth}{ \begin{tabular}{@{}lllll@{}}
+\toprule{} &                        carbon &                  concrete &                    energy &                   housing \\
+{} & (10721, 5, 3) & (1030, 8, 1) & (768, 8, 2) & (506, 13, 1) \\
+\midrule
+\Lwnll ($\beta = 0$)    &          0.0068 $\pm$ 0.0029$^\dagger$ &           6.08 $\pm$ 0.65 &           2.25 $\pm$ 0.34 &          3.56 $\pm$ 1.07$^\dagger$ \\
+\Lwnll ($\beta = 0.25$) &          0.0069 $\pm$ 0.0028$^\dagger$ &           5.79 $\pm$ 0.74 &           1.81 $\pm$ 0.30 &          3.48 $\pm$ 1.15$^\dagger$ \\
+\Lwnll ($\beta = 0.5$)  &          0.0068 $\pm$ 0.0029$^\dagger$ &           5.61 $\pm$ 0.65 &           1.12 $\pm$ 0.25 &          3.42 $\pm$ 1.04$^\dagger$ \\
+\Lwnll ($\beta = 0.75$) &          0.0069 $\pm$ 0.0028$^\dagger$ &           5.67 $\pm$ 0.73 &           1.31 $\pm$ 0.45 &          3.43 $\pm$ 1.07$^\dagger$ \\
+\Lwnll ($\beta = 1.0$)  &          0.0073 $\pm$ 0.0026$^\dagger$ &          5.55 $\pm$ 0.77$^\dagger$ &           1.54 $\pm$ 0.54 &          3.50 $\pm$ 0.95$^\dagger$ \\
+\Lmm                    &           0.0097 $\pm$ 0.0034 &           6.28 $\pm$ 0.82 &           2.19 $\pm$ 0.28 &           4.02 $\pm$ 1.18 \\
+\Lmse                   &          0.0068 $\pm$ 0.0028$^\dagger$ &  \textbf{4.96 $\pm$ 0.64} &  \textbf{0.92 $\pm$ 0.11} &          3.24 $\pm$ 1.08$^\dagger$ \\
+Student-t               &          0.0067 $\pm$ 0.0029$^\dagger$ &           5.82 $\pm$ 0.59 &           2.26 $\pm$ 0.34 &          3.48 $\pm$ 1.17$^\dagger$ \\
+xVAMP                   &          0.0067 $\pm$ 0.0029$^\dagger$ &          5.44 $\pm$ 0.64$^\dagger$ &           1.87 $\pm$ 0.32 &          3.23 $\pm$ 1.00$^\dagger$ \\
+xVAMP*                  &          0.0067 $\pm$ 0.0029$^\dagger$ &          5.35 $\pm$ 0.73$^\dagger$ &           2.00 $\pm$ 0.26 &          3.38 $\pm$ 1.15$^\dagger$ \\
+VBEM                    &          0.0074 $\pm$ 0.0026$^\dagger$ &          5.21 $\pm$ 0.58$^\dagger$ &           1.29 $\pm$ 0.33 &          3.32 $\pm$ 1.06$^\dagger$ \\
+VBEM*                   &  \textbf{0.0067 $\pm$ 0.0029} &          5.17 $\pm$ 0.59$^\dagger$ &           1.08 $\pm$ 0.17 &  \textbf{3.19 $\pm$ 1.02} \\
+\midrule{} &                       kin8m &                         naval &                     power &                   protein \\
+{} & (8192, 8, 1) & (11934, 16, 2) & (9568, 4, 1) & (45730, 9, 1) \\
+\midrule
+\Lwnll ($\beta = 0$)    &           0.087 $\pm$ 0.004 &           0.0021 $\pm$ 0.0006 &          4.06 $\pm$ 0.18$^\dagger$ &           4.49 $\pm$ 0.11 \\
+\Lwnll ($\beta = 0.25$) &           0.083 $\pm$ 0.003 &           0.0012 $\pm$ 0.0004 &          4.04 $\pm$ 0.18$^\dagger$ &          4.35 $\pm$ 0.05$^\dagger$ \\
+\Lwnll ($\beta = 0.5$)  &          0.082 $\pm$ 0.003$^\dagger$ &           0.0006 $\pm$ 0.0002 &          4.04 $\pm$ 0.17$^\dagger$ &          4.31 $\pm$ 0.02$^\dagger$ \\
+\Lwnll ($\beta = 0.75$) &          0.081 $\pm$ 0.004$^\dagger$ &          0.0004 $\pm$ 0.0001$^\dagger$ &          4.04 $\pm$ 0.15$^\dagger$ &          4.28 $\pm$ 0.02$^\dagger$ \\
+\Lwnll ($\beta = 1.0$)  &          0.081 $\pm$ 0.003$^\dagger$ &  \textbf{0.0004 $\pm$ 0.0000} &          4.06 $\pm$ 0.18$^\dagger$ &          4.31 $\pm$ 0.05$^\dagger$ \\
+\Lmm                    &          0.082 $\pm$ 0.003$^\dagger$ &           0.0005 $\pm$ 0.0001 &          4.07 $\pm$ 0.16$^\dagger$ &          4.32 $\pm$ 0.07$^\dagger$ \\
+\Lmse                   &  \textbf{0.081 $\pm$ 0.003} &          0.0004 $\pm$ 0.0001$^\dagger$ &  \textbf{4.01 $\pm$ 0.19} &  \textbf{4.28 $\pm$ 0.07} \\
+Student-t               &           0.085 $\pm$ 0.005 &           0.0026 $\pm$ 0.0009 &          4.02 $\pm$ 0.16$^\dagger$ &           4.76 $\pm$ 0.24 \\
+xVAMP                   &          0.081 $\pm$ 0.003$^\dagger$ &           0.0023 $\pm$ 0.0004 &          4.03 $\pm$ 0.17$^\dagger$ &          4.38 $\pm$ 0.05$^\dagger$ \\
+xVAMP*                  &          0.082 $\pm$ 0.003$^\dagger$ &           0.0020 $\pm$ 0.0006 &          4.03 $\pm$ 0.18$^\dagger$ &          4.31 $\pm$ 0.02$^\dagger$ \\
+VBEM                    &          0.082 $\pm$ 0.003$^\dagger$ &           0.0009 $\pm$ 0.0004 &          4.09 $\pm$ 0.15$^\dagger$ &          4.31 $\pm$ 0.01$^\dagger$ \\
+VBEM*                   &          0.082 $\pm$ 0.004$^\dagger$ &           0.0015 $\pm$ 0.0005 &          4.02 $\pm$ 0.18$^\dagger$ &          4.35 $\pm$ 0.09$^\dagger$ \\
+\midrule{} &          superconductivity &                    wine-red &                  wine-white &                     yacht \\
+{} & (21263, 81, 1) & (1599, 11, 1) & (4898, 11, 1) & (308, 6, 1) \\
+\midrule
+\Lwnll ($\beta = 0$)    &           13.87 $\pm$ 0.50 &          0.636 $\pm$ 0.038$^\dagger$ &          0.691 $\pm$ 0.032$^\dagger$ &           1.22 $\pm$ 0.47 \\
+\Lwnll ($\beta = 0.25$) &           13.50 $\pm$ 0.49 &          0.638 $\pm$ 0.036$^\dagger$ &          0.687 $\pm$ 0.039$^\dagger$ &           1.73 $\pm$ 1.00 \\
+\Lwnll ($\beta = 0.5$)  &           13.02 $\pm$ 0.47 &          0.635 $\pm$ 0.037$^\dagger$ &          0.685 $\pm$ 0.035$^\dagger$ &           2.35 $\pm$ 1.44 \\
+\Lwnll ($\beta = 0.75$) &           13.20 $\pm$ 0.46 &          0.638 $\pm$ 0.035$^\dagger$ &          0.689 $\pm$ 0.034$^\dagger$ &           1.97 $\pm$ 1.03 \\
+\Lwnll ($\beta = 1.0$)  &           13.42 $\pm$ 0.41 &          0.639 $\pm$ 0.035$^\dagger$ &          0.684 $\pm$ 0.031$^\dagger$ &           2.08 $\pm$ 1.13 \\
+\Lmm                    &           13.68 $\pm$ 0.79 &          0.652 $\pm$ 0.044$^\dagger$ &          0.692 $\pm$ 0.032$^\dagger$ &           3.02 $\pm$ 1.38 \\
+\Lmse                   &  \textbf{12.48 $\pm$ 0.40} &          0.633 $\pm$ 0.036$^\dagger$ &  \textbf{0.684 $\pm$ 0.038} &          0.78 $\pm$ 0.25$^\dagger$ \\
+Student-t               &           13.52 $\pm$ 0.60 &          0.636 $\pm$ 0.038$^\dagger$ &          0.688 $\pm$ 0.036$^\dagger$ &           1.34 $\pm$ 0.63 \\
+xVAMP                   &           13.33 $\pm$ 0.52 &          0.635 $\pm$ 0.035$^\dagger$ &          0.691 $\pm$ 0.032$^\dagger$ &           0.99 $\pm$ 0.43 \\
+xVAMP*                  &           13.42 $\pm$ 0.59 &          0.633 $\pm$ 0.035$^\dagger$ &          0.685 $\pm$ 0.032$^\dagger$ &           1.13 $\pm$ 0.66 \\
+VBEM                    &          12.72 $\pm$ 0.57$^\dagger$ &          0.639 $\pm$ 0.041$^\dagger$ &          0.685 $\pm$ 0.035$^\dagger$ &           1.66 $\pm$ 0.84 \\
+VBEM*                   &           13.15 $\pm$ 0.43 &  \textbf{0.633 $\pm$ 0.040} &          0.686 $\pm$ 0.036$^\dagger$ &  \textbf{0.65 $\pm$ 0.20} \\
+\bottomrule
+\end{tabular}
+}
+    \end{center}
+\end{table*}
+\subsection{Generative Modeling with Variational Autoencoders}
+\label{subsec:app:vae-results}
+
+We test different loss functions on the task of generative modeling using variational autoencoders (VAEs)~\citep{Kingma2014VAE}.
+To this end, we parameterize the decoder distribution $p(x \mid z)$ with $\mathcal{N}\g(\mu(z), \sigma^2(z)\g)$, where the mean $\mu(z)$ and variance $\sigma^2(z)$ are outputs of a neural network. 
+We train the VAE by maximizing the ELBO $\mathbb{E}_{q(z \mid x)}\g[ \log p(x \mid z) \g] - D_\text{KL}\g( q(z \mid x) \mid\mid p(z)\g)$, plugging in different loss functions for $\log p(x \mid z)$.
+Following~\citet{Stirn2020VariationalVariance}, we evaluate the log-posterior predictive likelihood $\log \mathbb{E}_{q(z \mid x)} \g[ p(x \mid z) \g]$.
+We approximate the expectation using a finite mixture of 20 Monte-Carlo samples from $q(z \mid x)$.
+To compute the RMSE, we take the mean of that mixture.
+We compare \method against $\Lmm$, $\Lnll$ with a fixed variance of $1$, Student-t~\citep{Takahashi2018Student-t, Detlefsen2019:reliabletraining}, xVAMP and VBEM~\citep{Stirn2020VariationalVariance}.
+
+We evaluate on MNIST and FashionMNIST.
+\Tab{tab:app:results-vaes} presents quantitative results. 
+VBEM achieves the best reconstruction error at the expense of poor log-likelihood.
+Vice versa, Student-t, xVAMP, xVAMP*, and VBEM* achieve strong log-likelihoods but worse reconstruction errors.
+\method with $\beta > 0$ provides a good compromise between log-likelihood and reconstruction error.
+\Fig{fig:app:results-vaes-images} shows qualitative examples.
+Our \method{} loss with $\beta > 0$ allows to learn good reconstructions and meaningful uncertainties.
+Moreover, images produced by sampling latents from the prior are semantically meaningful, indicating that adding our loss function does not break the disentangling properties of VAEs. 
+Compare that to Student-t, xVAMP(*), and VBEM(*), which do not produce similarly clear images when sampling from the prior.
+
+\begin{table*}[htb]
+    \caption{Results for generative modeling with variational autoencoders on MNIST and Fashion-MNIST.
+    We report RMSE and posterior predictive log-likelihood (LL) with standard deviation over 5 independent trials.}
+    \label{tab:app:results-vaes}
+    \vspace{-1em}
+    \begin{center}{\footnotesize \begin{tabular}{@{}llllll@{}}
+\toprule{} & \multicolumn{2}{c}{\textbf{MNIST}} & \phantom{} & \multicolumn{2}{c}{\textbf{Fashion-MNIST}} \\
+\cmidrule{2-3} \cmidrule{5-6}
+Loss &  \multicolumn{1}{c}{RMSE $\downarrow$} &   \multicolumn{1}{c}{LL $\uparrow$} & &     \multicolumn{1}{c}{RMSE $\downarrow$} &   \multicolumn{1}{c}{LL $\uparrow$} \\
+\midrule
+\Lnll ($\sigma^2 = 1$) &  0.153 $\pm$ 0.002 &    -730 $\pm$ 0  & &     0.143 $\pm$ 0.002 &    -729 $\pm$ 0 \\
+\Lwnll ($\beta = 0$)    &  0.237 $\pm$ 0.002 &   2116 $\pm$ 55 & &     0.170 $\pm$ 0.001 &  1940 $\pm$ 104 \\
+\Lwnll ($\beta = 0.25$) &  0.181 $\pm$ 0.004 &   2511 $\pm$ 88 & &     0.140 $\pm$ 0.002 &   2010 $\pm$ 39 \\
+\Lwnll ($\beta = 0.5$)  &  0.151 $\pm$ 0.003 &   2220 $\pm$ 25 & &    0.125 $\pm$ 0.003 &   1639 $\pm$ 52 \\
+\Lwnll ($\beta = 0.75$) &  0.142 $\pm$ 0.001 &   1954 $\pm$ 50 & &     0.131 $\pm$ 0.001 &   1331 $\pm$ 32 \\
+\Lwnll ($\beta = 1.0$)  &  0.152 $\pm$ 0.001 &   1706 $\pm$ 30 & &     0.138 $\pm$ 0.002 &   1142 $\pm$ 26 \\
+\Lmm                    &  0.260 $\pm$ 0.000 &    385 $\pm$ 11 & &     0.295 $\pm$ 0.000 &    -151 $\pm$ 4 \\
+Student-t               &  0.273 $\pm$ 0.002 &  4291 $\pm$ 103 & &     0.182 $\pm$ 0.002 &    2857 $\pm$ 9 \\
+xVAMP                   &  0.225 $\pm$ 0.002 &  2989 $\pm$ 268 & &     0.161 $\pm$ 0.001 &  2158 $\pm$ 100 \\
+xVAMP*                  &  0.225 $\pm$ 0.001 &  3062 $\pm$ 215 & &     0.160 $\pm$ 0.002 &  2150 $\pm$ 131 \\
+VBEM                    &  0.114 $\pm$ 0.001 &     719 $\pm$ 9 & &     0.108 $\pm$ 0.000 &     660 $\pm$ 2 \\
+VBEM*                   &  0.176 $\pm$ 0.008 &  3213 $\pm$ 238 & &     0.150 $\pm$ 0.003 &   2244 $\pm$ 78 \\
+\bottomrule
+\end{tabular}
+}
+    \end{center}
+\end{table*}
+
+\begin{figure}[tbp]
+ \centering{
+\newlength{\spacing}
+\setlength{\spacing}{1.7em}
+\newcommand{\includegraphicsc}[1]{\includegraphics[align=c,width=0.25\textwidth]{#1}}
+\newcommand{\legend}{\adjustbox{max width=.12\textwidth}{\begin{tabular}{r}
+  mean\\
+  std\\
+  $\sim$posterior\\
+  $\sim \mathcal N(0,1)$  
+\end{tabular}}}
+\newcommand{\legendHead}{\adjustbox{max width=.12\textwidth}{\begin{tabular}{r}
+  \makebox[\widthof{$\sim$posterior}][r]{dataset}\\
+\end{tabular}}}
+\begin{tabular}{@{}rccc@{}}
+\toprule{} &                                                                         \textbf{MNIST} &                                                                         \textbf{Fashion-MNIST} \\
+\midrule
+& \legendHead \includegraphics[align=c,width=0.25\textwidth]{images/vae_mnist_input.png} & \includegraphics[align=c,width=0.25\textwidth]{images/vae_fashion_mnist_input.png} \\[0.25em]
+\Lwnll ($\beta = 0$)    &  \legend
+
+\includegraphicsc{images/vae_mnist_likelihood_0.0.png} &             \includegraphicsc{images/vae_fashion_mnist_likelihood_0.0.png}\\[\spacing]
+\Lwnll ($\beta = 0.25$) & \legend           \includegraphicsc{images/vae_mnist_likelihood_0.25.png} &            \includegraphicsc{images/vae_fashion_mnist_likelihood_0.25.png} \\[\spacing]
+\Lwnll ($\beta = 0.5$)  & \legend             \includegraphicsc{images/vae_mnist_likelihood_0.5.png} &             \includegraphicsc{images/vae_fashion_mnist_likelihood_0.5.png} \\[\spacing]
+\Lwnll ($\beta = 0.75$) & \legend           \includegraphicsc{images/vae_mnist_likelihood_0.75.png} &            \includegraphicsc{images/vae_fashion_mnist_likelihood_0.75.png} \\[\spacing]
+\Lwnll ($\beta = 1.0$)  & \legend            \includegraphicsc{images/vae_mnist_likelihood_1.0.png} &             \includegraphicsc{images/vae_fashion_mnist_likelihood_1.0.png} \\[\spacing]
+\Lnll ($\sigma^2 = 1$) & \legend \includegraphicsc{images/vae_mnist_likelihood_fixed_unit_var.png} &  \includegraphicsc{images/vae_fashion_mnist_likelihood_fixed_unit_var.png} \\[\spacing]
+\Lmm                    & \legend           \includegraphicsc{images/vae_mnist_moment_matching.png} &            \includegraphicsc{images/vae_fashion_mnist_moment_matching.png} \\[\spacing]
+Student-t               & \legend                 \includegraphicsc{images/vae_mnist_student_t.png} &                  \includegraphicsc{images/vae_fashion_mnist_student_t.png} \\[\spacing]
+xVAMP                   & \legend             \includegraphicsc{images/vae_mnist_vari_var_xvamp.png} &             \includegraphicsc{images/vae_fashion_mnist_vari_var_xvamp.png} \\[\spacing]
+xVAMP*                  & \legend        \includegraphicsc{images/vae_mnist_vari_var_xvamp_star.png} &        \includegraphicsc{images/vae_fashion_mnist_vari_var_xvamp_star.png} \\[\spacing]
+VBEM                    & \legend              \includegraphicsc{images/vae_mnist_vari_var_vbem.png} &              \includegraphicsc{images/vae_fashion_mnist_vari_var_vbem.png} \\[\spacing]
+VBEM*                   & \legend        \includegraphicsc{images/vae_mnist_vari_var_vbem_star.png} &         \includegraphicsc{images/vae_fashion_mnist_vari_var_vbem_star.png} \\
+\bottomrule
+\end{tabular}
+}
+ \caption{Generative modeling with variational autoencoders on MNIST and Fashion-MNIST.
+ The overall first row shows inputs from the test set.
+ For each method, we present posterior predictive means (\ie reconstructions), the posterior predictive standard deviations, samples from the posterior predictive distribution, and finally samples using the prior $\mathcal{N}(0, 1)$.
+ $\Lnll (\sigma^2=1)$ refers to Gaussian log-likelihood with a fixed variance of $1$.
+ Values are clipped to the interval $[0, 1]$.
+ Examples are not cherry-picked.
+ }
+ \label{fig:app:results-vaes-images}
+\end{figure}
+\subsection{Depth Regression}
+\label{subsec:app:depth-reg-results}
+
+We evaluate \method on the task of depth regression on the NYUv2 dataset~\citep{Silberman2012NYU}.
+For this purpose, we use a state-of-the-art method for depth regression, AdaBins~\citep{Bhat2021Adabins}, and train it with different loss functions.
+Note that we remove the Mini-ViT Transformer module from the model, thus our results are not directly comparable with those reported by~\citet{Bhat2021Adabins}.
+
+\Tab{tab:app:results-depth-reg} presents quantitative results. 
+\method with $\beta > 0$ achieves better RMSE than the NLL loss.
+\method with $\beta=0.5$ again provides a good trade-off, achieving similar RMSE as $\Lmse$ and performing better on some of the other metrics.
+\Fig{fig:app:results-depth-reg-images} shows qualitative examples.
+Compared to $\Lnll$, the depth maps predicted by \method with $\beta > 0$ are noticeably sharper.
+
+\begin{table*}[htb]
+    \caption{Results for depth regression on the NYUv2 dataset~\citep{Silberman2012NYU}.
+    We adapt a state-of-the-art network for depth regression from AdaBins~\citep{Bhat2021Adabins} and train it with different loss functions.
+    In contrast to AdaBins, our network does not include the Mini-ViT Transformer module and thus our results are not directly comparable with those originally reported.
+    For reference, we also report numbers from other recent literature on this task.
+    Notably, the Gaussian NLL in all variants clearly outperforms the Scale Invariant (SI) loss,
+    despite the latter being
+    a loss function specifically designed for the task of depth regression.
+    We refer the reader to~\citet{Bhat2021Adabins} for a description of the metrics.
+    }
+    \label{tab:app:results-depth-reg}
+    \vspace{-1em}
+    \begin{center}{\footnotesize \begin{tabular}{@{}llllllll@{}}
+\toprule
+Method & $\delta_1$ $\uparrow$ & $\delta_2$ $\uparrow$ & $\delta_3$ $\uparrow$ & REL $\downarrow$ & RMSE $\downarrow$ & $\log_{10}$ $\downarrow$ & LL $\uparrow$ \\
+\midrule
+\Lwnll ($\beta = 0$)                 &                0.8855 &                0.9796 &                0.9959 &           0.1094 &            0.3854 &                   0.0462 & -4.52 \\
+\Lwnll ($\beta = 0.25$)              &                0.8887 &                0.9812 &                0.9956 &           0.1081 &            0.3818 &                   0.0458 & -8.15 \\ 
+\Lwnll ($\beta = 0.5$)               &                0.8885 &                0.9813 &                0.9956 &           0.1093 &            0.3789 &                   0.0458 & -7.50 \\
+\Lwnll ($\beta = 0.75$)              &                0.8902 &                0.9804 &                0.9952 &           0.1095 &            0.3800 &                   0.0462 & -7.35 \\
+\Lwnll ($\beta = 1.0$)               &                0.8872 &                0.9813 &                0.9958 &           0.1088 &            0.3845 &                   0.0467 & -5.10 \\
+\Lmse                                &                0.8890 &                0.9806 &                0.9960 &           0.1086 &            0.3776 &                   0.0461 & --- \\
+$\mathcal{L}_1$                        &                0.8877 &                0.9798 &                0.9955 &           0.1073 &            0.3850 &                   0.0459 & --- \\
+\midrule
+SI Loss~\citep{Bhat2021Adabins}      &                 0.881 &                 0.980 &                 0.996 &            0.111 &             0.419 &                      --- & --- \\
+AdaBins~\citep{Bhat2021Adabins}      &                 0.903 &                 0.984 &                 0.997 &            0.103 &             0.364 &                    0.044 & --- \\
+BTS~\citep{Lee2019FromBT}            &                 0.885 &                 0.978 &                 0.994 &            0.110 &             0.392 &                    0.047 & --- \\
+DAV~\citep{Chen2019StructureAwareRP} &                 0.882 &                 0.980 &                 0.996 &            0.108 &             0.412 &                      --- & --- \\
+\bottomrule
+\end{tabular}
+}
+    \end{center}
+\end{table*}
+
+\begin{figure}[tbp]
+ \centering{
+\newcommand{\scell}[2][c]{%
+\begin{tabular}[#1]{@{}c@{}}#2\end{tabular}}
+\newcommand{\myig}[1]{\includegraphics[height=0.125\textwidth,align=c]{#1}}
+\newcommand{\myigz}[1]{\includegraphics[height=0.125\textwidth,align=c,trim=0 50 400 220,clip]{#1}}
+    
+\begin{tabular}{@{}l@{\hspace{-1em}}r@{\hskip5px} *{4}{c@{\hskip3px}} c@{}}
+\toprule
+&Input                  &                                                   \myig{images/nyu_depth/01_input.png} & 
+\myig{images/nyu_depth/02_input.png} & 
+\myig{images/nyu_depth/04_input.png} &
+\myig{images/nyu_depth/00_input.png} &
+\myigz{images/nyu_depth/00_input.png}\\
+&\scell[r]{Ground\\Truth} & 
+\myig{images/nyu_depth/01_depth.png} & 
+\myig{images/nyu_depth/02_depth.png} & 
+\myig{images/nyu_depth/04_depth.png} &
+\myig{images/nyu_depth/00_depth.png} &
+\myigz{images/nyu_depth/00_depth.png}\\\cmidrule{3-7}
+\multirow{2}{*}{\scell[l]{\null\\[1em]\Lwnll\\($\beta = 0.0$)}} &  pred. &     
+\myig{images/nyu_depth/01_likelihood_0.0_pred.png} & \myig{images/nyu_depth/02_likelihood_0.0_pred.png} & \myig{images/nyu_depth/04_likelihood_0.0_pred.png} & \myig{images/nyu_depth/00_likelihood_0.0_pred.png} & \myigz{images/nyu_depth/00_likelihood_0.0_pred.png}\\
+                                                     & std. & 
+\myig{images/nyu_depth/01_likelihood_0.0_std.png} & \myig{images/nyu_depth/02_likelihood_0.0_std.png} &  \myig{images/nyu_depth/04_likelihood_0.0_std.png} & \myig{images/nyu_depth/00_likelihood_0.0_std.png} & \myigz{images/nyu_depth/00_likelihood_0.0_std.png} \\\cmidrule{3-7}
+\multirow{2}{*}{\scell[l]{\null\\[1em]\Lwnll\\($\beta = 0.5$)}}  & pred. &
+\myig{images/nyu_depth/01_likelihood_0.5_pred.png} & \myig{images/nyu_depth/02_likelihood_0.5_pred.png} & \myig{images/nyu_depth/04_likelihood_0.5_pred.png} & \myig{images/nyu_depth/00_likelihood_0.5_pred.png} & \myigz{images/nyu_depth/00_likelihood_0.5_pred.png} \\
+                                                     & std. & 
+\myig{images/nyu_depth/01_likelihood_0.5_std.png} & \myig{images/nyu_depth/02_likelihood_0.5_std.png} & \myig{images/nyu_depth/04_likelihood_0.5_std.png} & \myig{images/nyu_depth/00_likelihood_0.5_std.png} & \myigz{images/nyu_depth/00_likelihood_0.5_std.png}\\\cmidrule{3-7}
+\multirow{2}{*}{\scell[l]{\null\\[1em]\Lwnll\\($\beta = 0.75$)}}  & pred. &
+\myig{images/nyu_depth/01_likelihood_0.75_pred.png} & \myig{images/nyu_depth/02_likelihood_0.75_pred.png} & \myig{images/nyu_depth/04_likelihood_0.75_pred.png} &
+\myig{images/nyu_depth/00_likelihood_0.75_pred.png} &
+\myigz{images/nyu_depth/00_likelihood_0.75_pred.png}\\
+                                                     & std. & 
+\myig{images/nyu_depth/01_likelihood_0.75_std.png} & \myig{images/nyu_depth/02_likelihood_0.75_std.png} & \myig{images/nyu_depth/04_likelihood_0.75_std.png} & \myig{images/nyu_depth/00_likelihood_0.75_std.png} & \myigz{images/nyu_depth/00_likelihood_0.75_std.png}\\\cmidrule{3-7}
+\multirow{2}{*}{\scell[l]{\null\\[1em]\Lwnll\\($\beta = 1.0$)}}  & pred. &
+\myig{images/nyu_depth/01_likelihood_1.0_pred.png} & \myig{images/nyu_depth/02_likelihood_1.0_pred.png} & \myig{images/nyu_depth/04_likelihood_1.0_pred.png} &
+\myig{images/nyu_depth/00_likelihood_1.0_pred.png} &
+\myigz{images/nyu_depth/00_likelihood_1.0_pred.png}\\
+                                                     & std. & 
+\myig{images/nyu_depth/01_likelihood_1.0_std.png} & \myig{images/nyu_depth/02_likelihood_1.0_std.png} & \myig{images/nyu_depth/04_likelihood_1.0_std.png} & \myig{images/nyu_depth/00_likelihood_1.0_std.png} & \myigz{images/nyu_depth/00_likelihood_1.0_std.png}\\\cmidrule{3-7}
+\scell[r]{\Lmse} & pred. & 
+\myig{images/nyu_depth/01_mse_pred.png} & 
+\myig{images/nyu_depth/02_mse_pred.png} & 
+\myig{images/nyu_depth/04_mse_pred.png} &
+\myig{images/nyu_depth/00_mse_pred.png} &
+\myigz{images/nyu_depth/00_mse_pred.png}\\
+\bottomrule
+\end{tabular}
+}
+ \caption{Example results for depth regression on the NYUv2 dataset~\citep{Silberman2012NYU}.
+ First two rows show input image and ground truth depth map, where black values in the depth map represent missing values.
+ For each method, we present the predicted depth map (pred.), and the aleatoric uncertainty in form of the predicted standard deviation (std.).
+ Results for $\Lwnll$ with $\beta > 0$ are noticeably sharper. The last column shows a magnified view on the previous picture.
+ }
+ \label{fig:app:results-depth-reg-images}
+\end{figure}
+\section{Datasets and Training Settings}
+\label{sec:app:datasets}
+
+\paragraph{Sinusoidal without heteroscedastic noise}
+
+This dataset is created by taking \np{1000} uniformly spaced points on the interval $[0, 12]$ as inputs $x$ and applying the function $y(x)=0.4 \sin(2\pi x) + \xi$ to them to create the targets $y$, where $\xi$ is Gaussian noise with a standard deviation of $0.01$.
+
+\paragraph{Sinusoidal with heteroscedastic noise}
+We use the synthetic data as introduced in \citet{Detlefsen2019:reliabletraining}.
+From the functional form $y = x \sin(x) + x\xi_1 +\xi_2 $, with Gaussian noise with standard deviation $\sigma=0.3$ for $\xi_1$ and $\xi_2$, we sample 500 points uniformly spaced in the interval $[0,10]$.
+The model is an MLP with one hidden layer of 50 units and $\tanh$ activations (as used in
+\citet{Detlefsen2019:reliabletraining} and \citet{Stirn2020VariationalVariance}).
+
+\paragraph{UCI Datasets}
+
+We use the UCI datasets suite commonly used to benchmark uncertainty estimation, stemming from the UCI Machine Learning Repository.\footnote{\url{https://archive.ics.uci.edu}}
+In particular, we use the training-test protocol from~\citep{HernandezLobato2015ProbBackprop,Gal2016Dropout}, and their data splits\footnote{available under~\url{https://github.com/yaringal/DropoutUncertaintyExps}}, except for ``carbon'', ``energy'', ``naval'', ``superconductivity'', and ``wine-white'', where we generate our own random splits.
+
+Inputs and targets are whitened on the training set.
+Metrics are reported in the original scale of the data.
+Each dataset is divided into 20 randomly sampled train-test splits (80\%-20\%).
+For each split, we further randomly divide the training set into 80\% training data and 20\% validation data and search for an optimal learning rate from the set $\{10^{-4}, 3  \cdot 10^{-4}, 7  \cdot 10^{-4}, 10^{-3}, 3 \cdot 10^{-3}, 7 \cdot 10^{-3}\}$ by monitoring log-likelihood on the validation set.
+We train for a maximum of \np{20000} updates, except for the larger ``kin8m'', ``power plant'', ``protein'', and ``naval'' datasets where we train for a maximum of \np{100000} updates.
+We perform early-stopping with a patience of 50 epochs, retrain the model with the best found learning rate on the full training set, and then evaluate on the test split.
+The reported performance and standard deviations are taken as averages over all test splits.
+Note that the performance we report is not comparable with other publications, as performance is known to differ strongly over different data splits.
+Some other works also perform early-stopping on the test set, which distorts the results.
+
+We use a single-layer $\relu$ hidden network with $50$ neurons, except for ``protein'' where we use $100$ neurons.
+The batch size is $256$.
+
+Following~\cite{Stirn2020VariationalVariance}, for each method, we report the number of datasets for which the method is statistically indistinguishable from the respective best method in \tab{tab:results-uci-overview} (\emph{Ties}).
+For this purpose, we performed a two-sided Kolmogorov-Smirnov test with a $p \leq 0.05$ significance level.
+
+\paragraph{\ObjectSlide}
+
+This environment consists of an agent whose task is to slide an object to a target location~\citep{Seitzer2021CID}.
+The continuous state space consists of 4 dimensions: agent and object positions and velocities, and the continuous action space is a one-dimensional movement command.
+The forward prediction task consists of predicting the change in object position in the next state from the current state and action.
+The dataset we use consists of \np{180000} transitions collected using a random policy, which we split into training, validation, and testing sets with \np{60000} transitions each.
+Inputs and targets are whitened on the training set.
+Metrics are reported in the original scale of the data.
+We train for a maximum of \np{5000} epochs with a batch size of $256$, and evaluate the model with the best validation log-likelihood on the test set afterwards.
+
+\paragraph{\FPP}
+
+We use the \FPP environment~\citep{Plappert2018MultiGoalRL} from OpenAI Gym~\citep{Brockman2016OpenAIG} as a challenging real-world scenario.
+The task of the agent is to use a position-controlled 7 DoF robotic arm to lift an object to a target location in space.
+The state space is 25-dimensional and the action space is 4-dimensional.
+As in \ObjectSlide, the prediction task is to predict the 3-dimensional change in object position from the current state and action.
+We use \numprint{840000} transitions collected using the APEX method~\citep{pinneri2021:strong-policies} as our dataset, which we split into 70\% training, 15\% validation, and 15\% testing data.
+Inputs and targets are whitened on the training set.
+Metrics are reported in the original scale of the data.
+We train for a maximum of \np{500} epochs with a batch size of $256$, and evaluate the model with the best validation log-likelihood on the test set afterwards.
+
+\paragraph{NYUv2 Depth Regression}
+
+We use the dataset in the variant provided by~\citet{Lee2019FromBT}.\footnote{available under \url{https://github.com/cogaplex-bts/bts}}
+Training settings and evaluation protocol were taken from \citet{Bhat2021Adabins}.
+We train for 25 epochs using a batch size of 16 and validate the model every 100 updates. 
+We use the model with the best ``REL'' metric on the validation set for testing.
+\section{Hyperparameter Settings and Implementation Details}
+\label{sec:app:hyperparams}
+
+For all experiments, we used the Adam optimizer~\citep{Kingma2015Adam} with standard settings $\beta_1=0.9, \beta_2=0.999$.
+We parameterize the Gaussian distribution using two linear layers on top of shared features produced by an MLP.
+The variance $\varhat(x)$ is constrained to the positive region using the $\mathrm{softplus}(x) = \log (1+ \exp(x))$ activation function.
+We additionally add a small constant of $10^{-8}$ to prevent the variance from collapsing to zero and clamp the maximum variance to \np{1000}.
+
+Some baselines use a Student's t-distribution (Student's t, xVAMP(*), VBEM(*)) as their predictive distribution.
+This distribution results from integrating out the unknown variance of a Gaussian with a learned Gamma prior on the inverse variance \citep{Detlefsen2019:reliabletraining,Stirn2020VariationalVariance}. 
+We parametrize the Gamma distribution in terms of data-dependent alpha and beta parameters, \ie $\alpha(x)$ and $\beta(x)$, which are computed using linear layers on top of the shared features.
+In this case, the MLP has three outputs: mean, alpha, and beta.
+Both alpha and beta are constrained to the positive region using the $\mathrm{softplus}$ activation.
+We add a positive constant of $1.001$ for alpha and $10^{-8} \cdot 0.001$ for beta.
+Alpha is clamped to a maximum value of \np{1000} and beta to $10^{-8} \cdot 999$.
+These values were chosen such that the resulting variance matches the range $(10^{-8}, 1000]$ while ensuring that the degrees-of-freedom parameter $\nu$ of the Student's t is always greater than $2$.
+
+For xVAMP and VBEM, the MLP outputs a fourth term, $\pi(x)$, representing the logits of a categorical distribution that specifies the mixture weights of the prior. 
+We initialize the prior parameters exactly the same as \citet{Stirn2020VariationalVariance}. 
+For these methods, the objective function additionally contains a KL divergence between a Gamma distribution and a mixture-of-Gamma distributions. 
+Following \citet{Stirn2020VariationalVariance}, we approximate this KL divergence using 20 Monte-Carlo samples.
+\subsection{Sinusoidal Regression Problem}
+\label{sec:app:model-architectures}
+
+The sinusoidal fit in \fig{fig:sinusoidal_nll_fit} results from a network of two hidden layers with $128$ neurons per layer and $\tanh$ activations, optimized with a learning rate of $5 \cdot 10^{-4}$ and a batch size of $100$.
+For the experiment in \sec{subsec:synth-datasets}, we scan over learning rates and architectures with different hidden layers and units per layer, as detailed in \tab{tab:sine:architectures}.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Architectures used for the sinusoidal regression task. Fully-connected feed-forward neural networks with $\mathrm{tanh}$ activations.}
+    \begin{tabular}{@{}rccccc@{}}
+    \toprule
+    Architecture \# &           0  & 1  & 2  & 3   & 4\\
+    \midrule
+    \# Hidden Layers&           2  & 2  & 2  & 3   & 3\\
+    \# Units per Layer & 32 & 64 & 128& 128 & 256\\
+    \bottomrule
+    \end{tabular}
+
+    \label{tab:sine:architectures}
+\end{table}
+\subsection{\ObjectSlide and \FPP}
+\label{sec:app:grid-search}
+
+For each tested loss function, we performed a grid search on the \ObjectSlide and \FPP datasets.
+We report the parameters we scanned over in \tab{tab:grid-search-configuration}.
+\tab{tab:fpp-slide-hyperparameters} reports the model configurations with the best validation log-likelihood on the grid search.
+For the results in \tab{tab:results-1dslide-fpp}, we retrained the best model configuration with five different random seeds and evaluated them on the hold-out test set.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Hyperparameter settings for our grid search on the \ObjectSlide and \FPP datasets. We run 96 configurations per loss function.}
+    \begin{tabular}{@{}rc@{}}
+    \toprule
+    Hyperparameter & Set of Values\\
+    \midrule
+    Learning Rate & $\{3 \cdot 10^{-5} , 10^{-4} , 3 \cdot 10^{-4} , \cdot 10^{-3} \}$ \\
+    \# Hidden Layers &  $\{2, 3, 4\}$ \\
+    \# Units per Layer & $\{ 128, 256, 386, 512 \}$ \\
+    Activation & $\{\tanh, \relu \}$ \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:grid-search-configuration}
+\end{table}
+
+\begin{table}[htbp]
+    \centering
+    \caption{Best hyperparameters found by grid search on \ObjectSlide and \FPP datasets, measured by best log-likelihood on the validation set.}
+    \label{tab:fpp-slide-hyperparameters}
+    
+    \begin{subtable}[t]{.5\textwidth}
+        \caption{\ObjectSlide}
+        \begin{tabular}{@{}rlccc@{}}
+        \toprule
+        Method & $\beta$ & LR & Layers & Act. \\
+        \midrule
+        $\Lmse$  & & $10^{-3}$ & $3 \times 128$ & $\relu$ \\
+        $\Lnll$  & & $10^{-3}$ & $3 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $0.25$ & $10^{-3}$ & $3 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $0.5$ & $10^{-3}$ & $3 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $0.75$ & $10^{-3}$ & $3 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $1.0$ & $10^{-3}$ & $3 \times 128$ & $\relu$ \\
+        $\Lmm$   & & $10^{-3}$ & $3 \times 128$ & $\relu$ \\
+        Student-t & & $10^{-3}$ & $2 \times 386$ & $\relu$ \\
+        xVAMP  & & $10^{-4}$ & $4 \times 128$ & $\relu$ \\
+        xVAMP* & & $10^{-4}$ & $3 \times 256$ & $\relu$ \\
+        VBEM   & & $3 \cdot 10^{-4}$ & $2 \times 256$ & $\tanh$ \\
+        VBEM*  & & $10^{-3}$  & $2 \times 386$ & $\relu$ \\
+        \bottomrule
+        \end{tabular}
+    \end{subtable}%
+    \begin{subtable}[t]{.5\textwidth}
+        \caption{\FPP}
+        \begin{tabular}{@{}rlccc@{}}
+        \toprule
+        Method & $\beta$ & LR & Layers & Act. \\
+        \midrule
+        $\Lmse$  & & $10^{-3}$ & $4 \times 128$ & $\relu$ \\
+        $\Lnll$  & & $3 \cdot 10^{-4}$ & $4 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $0.25$ & $3 \cdot 10^{-4}$ & $4 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $0.5$ & $3 \cdot 10^{-4}$ & $4 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $0.75$ & $10^{-3}$ & $4 \times 128$ & $\relu$ \\
+        $\Lwnll$ & $1.0$ & $10^{-3}$ & $4 \times 128$ & $\relu$ \\
+        $\Lmm$   & & $10^{-3}$ & $4 \times 128$ & $\relu$ \\
+        Student-t & & $3 \cdot 10^{-4}$ & $3 \times 256$ & $\relu$ \\
+        xVAMP  & & $10^{-4}$ & $3 \times 386$ & $\relu$ \\
+        xVAMP* & & $10^{-4}$ & $3 \times 386$ & $\relu$ \\
+        VBEM   & & $10^{-3}$ & $3 \times 386$ & $\relu$ \\
+        VBEM*  & & $10^{-4}$  & $3 \times 386$ & $\relu$ \\
+        \bottomrule
+        \end{tabular}
+    \end{subtable}
+\end{table}
+\subsection{Variational Autoencoders}
+We largely follow~\citet{Stirn2020VariationalVariance} for their training settings for the VAE experiment.
+In particular, we use an encoder with three layers of $512, 256, 128$ neurons and a decoder with three layers of $128, 256, 512$ neurons, all with $\relu$ activations.
+The latent space is $10$-dimensional for MNIST and $25$-dimensional for FashionMNIST.
+We train the VAEs for a maximum of \numprint{1000} epochs, using Adam with a learning rate of $0.0003$ and a batch size of $256$.
+Early-stopping with a patience of 50 epochs is performed on the log-likelihood of the validation set.
+The validation set consists of 20\% of the MNIST/FashionMNIST training set.
+\subsection{Depth Regression}
+We use the official implementation of AdaBins~\citep{Bhat2021Adabins},\footnote{\url{https://github.com/shariqfarooq123/AdaBins}} thereby reproducing their exact training settings and evaluation protocol.
+We remove the AdaBins/mini-ViT Transformer from the model. 
+Instead, the feature map output by the U-Net is reduced to two channels using a $1 \times 1$ convolution, where we use the first channel as the mean predictor and the second channel as the variance predictor. 
+In this setting, both mean and variance are constrained to positive numbers by a $\mathrm{softplus}$ activation. 
+On top of that, we add a positive offset to ensure a minimum output value of $10^{-3}$ for the mean (the minimum possible depth value) and $10^{-6}$ for the variance and clamp both mean and variance to a maximum value of $10$.
+\subsection{Implementation of beta-NLL in Pytorch}
+\label{subsec:app:beta-nll-python}
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[language=Python]
+def beta_nll_loss(mean, variance, target, beta):
+    """Compute beta-NLL loss
+    
+    :param mean: Predicted mean of shape B x D
+    :param variance: Predicted variance of shape B x D
+    :param target: Target of shape B x D
+    :param beta: Parameter from range [0, 1] controlling relative 
+        weighting between data points, where `0` corresponds to 
+        high weight on low error points and `1` to an equal weighting.
+    :returns: Loss per batch element of shape B
+    """
+    loss = 0.5 * ((target - mean) ** 2 / variance + variance.log())
+
+    if beta > 0:
+        loss = loss * variance.detach() ** beta
+    
+    return loss.sum(axis=-1)
+\end{lstlisting}
+\end{minipage}

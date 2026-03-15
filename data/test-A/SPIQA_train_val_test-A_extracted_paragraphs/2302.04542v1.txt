@@ -1,0 +1,1155 @@
+\section{Introduction}
+\label{sec:intro}
+Random-feature-based attention \citep[RFA, also known as Performer;][]{choromanski2021rethinking,peng2021rfa} is an established fast approximation to the conventional softmax attention mechanism \citep{bahdanau2014neural,vaswani2017attention}, which successfully scales Transformer models to processing much longer sequences \citep{choromanski2021rethinking}. At its core is the usage of random features \citep[RF;][]{random-features} to linearize the exponential kernel in softmax attention, which reduces the computational cost from quadratic to linear runtime and space complexity. Despite its efficiency, recent studies have pointed out that such approximation suffers from substantial performance degeneration \citep{xiong2021simple,lara}. 
+
+In this work, we generalize the formulation of RFA via control variates \citep{mcbook}, which characterizes the approximation gap between RFA and softmax attention in theory. We first show that RFA can be decomposed from a \emph{global} approximation over the whole sequence into a sum of \emph{local} control variate estimators, each of which is applied to an individual element in the sequence. Under this formulation, RFA is equivalent to employing the same coefficient for all control variate estimators to scale their variance isotropically (\cref{ssec:rfa-and-cv}). Besides, we prove that if we optimize the coefficient of each control variate to minimize the estimation variance individually, RFA estimation becomes exact, that is, softmax attention is recovered with zero bias and zero variance (\cref{ssec:rfa-and-softmax}).
+
+Our key observation is that such formulation reveals a localized perspective of the RFA approximation. Instead of directly seeking a better estimate over the entire sequence, we can break down the problem into smaller problems that aim at improving the approximation for each subsequence (\cref{sec:eva}). The control variate estimator for each subsequence can be tuned separately and combined to yield better estimation, which provably reduces approximation error in the global sense (\cref{ssec:cv-partially-shared}). Nevertheless, one caveat is that as the number of sub-problems increases, the approximation gap will be reduced but at the expense of higher computational complexity. For instance, if we optimize the control variate for every single element, softmax attention would be recovered as desired but with quadratic complexity.
+To attain a good trade-off between approximation quality and efficiency, we develop a new \textbf{E}fficient attention via control \textbf{VA}riates (\textbf{EVA}) that implements this divide-and-conquer strategy efficiently. In \model, the sequence is partitioned into a fixed number of disjoint subsets. For the subset that might bear the highest correlations to the query, we explicitly optimize the control variate for each element, which recovers exact softmax attention probabilities; while for the others, the control variate coefficient is shared locally among all elements within the same subset. The resulting attention mechanism is not only highly effective but also runs with the same computational complexity as RFA (\cref{ssec:practical-eva}). Extensive experiments on both language and vision tasks demonstrate that \model outperforms the state-of-the-art efficient attention methods (\cref{sec:experiments}).
+\section{Background}
+\label{sec:background}
+\subsection{Softmax Attention Mechanism}
+\label{ssec:attention}
+Assume there exist a set of $N$ queries $\{\mbq_n\}_{n=1}^N$ and $M$ key-value pairs $\mbK = [\mbk_1, \dots, \mbk_M]$ and $\mbV = [\mbv_1, \dots, \mbv_M]$, where queries, keys and values are all $d$-dimensional vectors. The softmax attention mechanism \citep{bahdanau2014neural,vaswani2017attention} is defined as an average over the value vectors weighted by the dot-product similarities of the queries and keys. For the $n$-th query, the attention mechanism outputs%
+\begin{equation}
+    \operatorname{SoftmaxAttn}(\mbq_n, \mbK, \mbV) \coloneqq \sum_{m=1}^M \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m'=1}^M \exp\left(\mbq_n^\top \mbk_{m'}\right)} \mbv_m.\label{eqn:softmax-attn}
+\end{equation}
+In the case of self-attention \citep{lin2017structured, vaswani2017attention}, we have $M = N$, which results in quadratic computational complexity since we have to compute the similarity for each query-key pair explicitly.
+\subsection{Random-Feature-based Attention with Self-normalized Importance Sampling}
+\label{ssec:rfa-and-snis}
+Recently, \citet{lara} identifies that softmax attention (\cref{eqn:softmax-attn}) can be written as an expectation over an attention-like aggregating function,%
+\begin{align*}
+\operatorname{SoftmaxAttn}(\mbq_n, \mbK, \mbV) = \sum_{m=1}^M \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m'=1}^M \exp\left(\mbq_n^\top \mbk_{m'}\right)} \mbv_m = \E[\omega \sim p_n(\omega)]{f_{n}(\omega)}, \numberthis\label{eqn:softmax-as-expectation}
+\end{align*}
+where
+\begin{align*}
+f_n(\omega) \coloneqq \frac{\sum_{m=1}^M\xi(\mbq_n, \omega)\xi(\mbk_m, \omega)\mbv_m}{\sum_{m'=1}^M\xi(\mbq_n, \omega)\xi(\mbk_{m'}, \omega)}, \quad p_n(\omega) &\coloneqq \frac{\mathcal{N}(\omega;0,\mathbf{I}) \sum_{m=1}^M\xi(\mbq_n,\omega)^\top  \xi(\mbk_{m}, \omega)}{Z}.\numberthis\label{eqn:ra-p-and-f}
+\end{align*}
+Here $\xi(\cdot,\cdot)$ is the \emph{randomized mapping} defined in such a way that $\exp\left(\mbq_n^\top \mbk_m\right) = \E[\omega \sim \mcN(0,\mathbf{I})]{\xi(\mbq_n, \omega)^\top \xi(\mbk_m, \omega)}$, and $Z = \sum_{m=1}^M \exp\left(\mbq_n^\top\mbk_{m}\right)$ denotes the normalizing constant of distribution $p_n$. Throughout this paper, we consider the positive randomized mapping $\xi(\mbx,\omega) = \exp{\left(\omega^\top \mbx - \frac{1}{2}\norm{\mbx}^2\right)}$ \citep{choromanski2021rethinking} unless otherwise specified.
+
+Random-Feature-based Attention (RFA) methods \citep{choromanski2021rethinking,peng2021rfa} can be interpreted as performing \emph{self-normalized importance sampling} \citep[SNIS;][]{hesterberg1995snis} to approximate \cref{eqn:softmax-as-expectation} \citep{lara}. In SNIS, one draws Monte Carlo samples from some \emph{proposal} distribution $q(\omega)$ instead of the true distribution $p_n(\omega)$ and estimates the target expectation as $\E[\omega \sim p_n(\omega)]{f_{n}(\omega)} = \E[\omega \sim q(\omega)]{\frac{p_n(\omega)}{q(\omega)}f_{n}(\omega)} \approx \frac{\sum_{s=1}^S \frac{p_n(\omega)}{q(\omega)} f_{n}(\omega_s)}{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}}$, where $\omega_1, \dots, \omega_S \sim q(\omega)$. Vanilla RFA amounts to constructing the SNIS estimation with $q(\omega) = \mathcal{N}(\omega;0,\mathbf{I})$. The SNIS representation also turns out equivalent to the more established form of RFA, 
+\begin{equation}
+     \mathsf{RFA}(\mbq_n, \mbK, \mbV) \coloneqq \frac{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)}{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}} = \frac{\sum_{m=1}^M\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m}{\sum_{m'=1}^M\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_{m'}, \mbomega)}, \label{eqn:rfa-snis}
+\end{equation}
+where the \emph{random feature}, denoted by $\mbphi(\mbx,\mbomega) \coloneqq  1/\sqrt{S}[\xi(\mbx,\omega_1), \dots, \xi(\mbx, \omega_S)]^\top$, is proposed to approximate exponential kernels in its original motivation (see \cref{app:sec:rfa} for a detailed review).
+\subsection{Control Variates}
+\label{ssec:cv}
+Control variates aim to reduce the estimation variance of an expectation $\E{g(\mbomega)}$. Assuming our original RFA estimation is $g(\mbomega) \in \R^d$ and there is some \emph{control variate} $h(\mbomega) \in \R$ with a known expectation $\E{h(\mbomega)}$, we can employ the control variate $h(\mbomega)$ with the coefficient $\mbbeta \in \R^d$ as follows,%
+\begin{equation}
+    \widetilde{g}(\mbomega) = g(\mbomega) - \mbbeta h(\mbomega) + \mbbeta \E{h(\mbomega)} 
+    \label{eqn:basic_cv}
+\end{equation}
+Note that the resulting estimator remains unbiased since $\E{\widetilde{g}(\mbomega)} = \E{g(\mbomega)} - \mbbeta\E{h(\mbomega)} + \mbbeta\E{h(\mbomega)} = \E{g(\mbomega)}$. However, the estimation variance can be largely reduced if $g(\cdot)$ and the scaled control variate $\mbbeta h(\mbomega)$ are positively correlated \citep{mcbook}.
+\section{Dissecting RFA with Control Variates}
+\label{sec:main}
+In this section, we first go through the connections among RFA, importance sampling, and control variates, revealing a decomposed formulation of RFA (\cref{ssec:rfa-and-cv}), and then quantify the approximation gap between RFA and softmax attention (\cref{ssec:rfa-and-softmax}) from these connections.
+\subsection{RFA as a Sum of Local Control Variate Estimators}
+\label{ssec:rfa-and-cv}
+As shown in \cref{eqn:rfa-snis}, RFA estimation considers all key-value pairs and produces a \emph{global} approximation over the entire sequence. In contrast, our work develops a \emph{decomposed} representation of RFA based on the recent advances in SNIS \citep{vlassis2021control}, which indicates that an SNIS estimate is asymptotically equivalent to a control variate estimate (the detailed derivations is deferred to \cref{app:ssec:proof-snis-as-cv}). In particular, we have
+\begin{align*}
+    \frac{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)}{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}} 
+    &= \frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s) - \frac{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)}{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}} \left(\frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)} - 1\right) \\
+    &\coloneqq g(\mbomega) - \widehat{\mbbeta}(\mbomega) \left(h(\mbomega) - \E{h(\mbomega)}\right) \coloneqq \widetilde{g}(\mbomega),\numberthis\label{eqn:snis_as_cv}
+\end{align*}
+where $g(\mbomega) \coloneqq \frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)$ is our base estimate, $h(\mbomega) \coloneqq \frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}$ is the control variate with control coefficient $\widehat{\mbbeta}(\mbomega) \coloneqq \left.\left(\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)\right)\middle/\left(\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}\right)\right. = \frac{g(\mbomega)}{h(\mbomega)}$.
+
+
+We now examine the formulation of $g(\cdot)$ and $h(\cdot)$ in the context of RFA. According to \cref{eqn:ra-p-and-f},
+\begin{align*}
+g(\mbomega) &= \frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s) = \sum_{s=1}^S\alpha(\omega_s) \sum_{m=1}^M\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)\mbv_m,  \\
+h(\mbomega) &= \frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)} = \sum_{s=1}^S\alpha(\omega_s)\sum_{m=1}^M\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s),
+\end{align*}
+where $\alpha(\omega_s) \coloneqq \frac{1}{S} \frac{\mathcal{N}(\omega_s;0,\mathbf{I})}{Zq(\omega_s)}$ collects terms that is constant w.r.t. queries, keys, and values. Our key observation is that by changing the order of summations, both $g(\cdot)$ and $h(\cdot)$ can be decomposed as $g(\mbomega) = \sum_{m=1}^M g_m(\mbomega)$ and $h(\mbomega) = \sum_{m=1}^M h_m(\mbomega)$ respectively, where 
+\begin{align*}
+    g_m(\mbomega) &= \sum_{s=1}^S\alpha(\omega_s) \xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)\mbv_m, \qquad h_m(\mbomega) = \sum_{s=1}^S\alpha(\omega_s)\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s).
+\end{align*}
+As a result, we can decompose the entire RFA estimate in \cref{eqn:snis_as_cv} into a summation of $M$ control variate estimates following
+\begin{align*}
+    \widetilde{g}(\mbomega) &= g(\mbomega) - \widehat{\mbbeta}(\mbomega) \left(h(\mbomega) - \E{h(\mbomega)}\right)\\
+    &= \left(\textcolor{keywords}{\sum_{m=1}^M} g_m(\mbomega)\right) - \widehat{\mbbeta}(\mbomega) \left(\left(\textcolor{keywords}{\sum_{m=1}^M} h_m(\mbomega)\right) - \E{\textcolor{keywords}{\sum_{m=1}^M} h_m(\mbomega)}\right)\\
+    &= \textcolor{keywords}{\sum_{m=1}^M} g_m(\mbomega) - \widehat{\mbbeta}(\mbomega) \left(h_m(\mbomega) - \E{h_m(\mbomega)}\right) \coloneqq{\sum_{m=1}^M} \widetilde{g}_m(\mbomega).\numberthis\label{eqn:decompose_rfa}
+\end{align*}
+Here $\widetilde{g}_m(\mbomega) = g_m(\mbomega) - \widehat{\mbbeta}(\mbomega) \left(h_m(\mbomega) - \E{h_m(\mbomega)}\right)$ denotes the corresponding control variate estimator of the $m$-th key-value pair,\footnote{Note that the expectation of individual control variates $h_m(\cdot)$ is still in closed form as $\E{h_m(\mbomega)} = \exp(\mbq_n^\top \mbk_m)/ Z$. The derivation can be found in \cref{app:ssec:expected_h_m}.} and $\widehat{\mbbeta}(\mbomega)$ is the coefficient shared across the entire sequence.
+\subsection{Optimizing Coefficients in RFA Locally Recovers Softmax Attention}
+\label{ssec:rfa-and-softmax}
+Based on the decomposition of RFA in \cref{eqn:decompose_rfa}, we have one local control variate attached to each key-value pair. To see the benefit of such decomposition, we demonstrate that softmax attention is equivalent to associating each control variate with a locally optimized coefficient $\widehat{\mbbeta}_m$ in RFA.
+\begin{proposition}\label{prop:optimal-beta}
+Let $\widetilde{g}_m(\mbomega) = g_m(\mbomega) - {\widehat{\mbbeta}_m} \left(h_m(\mbomega) - \E{h_m(\mbomega)}\right)$. We denote the variance of some estimator $g(\mbomega)$ as $\var{g(\mbomega)} \coloneqq \cov{g(\mbomega)}{g(\mbomega)}$.
+Then the optimal $\widehat{\mbbeta}_m$ that minimizes $\trace{\var{\widetilde{g}_m(\mbomega)}}$ (i.e., the sum variance over all dimensions) is of the form
+\begin{equation}
+    \mbbeta_m^* \coloneqq \arg\min_{\mbbeta} \trace{\var{\widetilde{g}_m(\mbomega)}} = \mbv_m =  \frac{g_m(\mbomega)}{h_m(\mbomega)}.\label{eqn:single-opt-beta}
+\end{equation}
+Furthermore, by letting $\widehat{\mbbeta}_m = \mbbeta_m^*$ for all $m = 1,2,\dots,M$, we have $\trace{\var{\widetilde{g}_m(\mbomega)}} = 0$. As a result, $\trace{\var{\widetilde{g}(\mbomega)}} = 0$ and thus $\mathsf{RFA}(\mbq_n, \mbK, \mbV) = \widetilde{g}(\mbomega) = \mathsf{SoftmaxAttn}(\mbq_n, \mbK, \mbV)$.
+\end{proposition}
+The proof is deferred to \cref{app:ssec:proof-prop-1}. This proposition implies optimizing $\widehat{\mbbeta}_m$ for each key-value pair in the decomposed formulation of RFA recovers the exact softmax attention. 
+It not only characterizes the theoretical gap introduced by RFA but also sheds light on how to improve RFA towards softmax attention from a localized perspective. Furthermore, it delineates the trade-off between estimation quality and computational costs. On the one hand, if we use a distinct $\widehat{\mbbeta}_m$ for each estimator, we could achieve a perfect estimation, albeit at the expense of computing $\exp{\mbq_n^\top \mbk_m}$ for every query-key pair explicitly with quadratic time and space complexity. On the other hand, if a single shared coefficient is employed, it degrades to conventional RFA, where all the control variate estimators can be merged and computed together in linear complexity \citep{choromanski2021rethinking,peng2021rfa,lara}.
+\section{EVA: Efficient Attention via Control Variates}
+\label{sec:eva}
+In this section, we demonstrate that the control variate formulation offers a natural way to improve RFA with a finer-grained treatment over control variates. We describe the improved efficient attention mechanism \model in \cref{ssec:cv-partially-shared} and its practical implementation in \cref{ssec:practical-eva}.
+\subsection{Control Variates with Locally Shared Coefficients}
+\label{ssec:cv-partially-shared}
+We denote $[M] \coloneqq \{1,2,\dots,M\}$ as the set of all key-value indices. Instead of employing the same coefficient for all control variates as in RFA, we propose to partition $[M]$ into $C$ subsets $\mcP_1, \mcP_2, \dots, \mcP_C$ and allocate a \emph{locally} shared $\mbbeta_c$ for each subset $\mcP_c$. 
+For all $\mbbeta_c$ and their optimum $\mbbeta^*_m$ for each token, define the weighted mean squared error (weighted MSE) as $\sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m \norm{\mbbeta_c - \mbbeta_{m}^*}^2$, where $\alpha_m > 0$ and $\sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m = 1$. To see the benefit of partitioning, we demonstrate that there always exists some $\{\mbbeta_c\}_{c=1}^C$ that achieves lower weighted MSE than any globally shared coefficient (see \cref{app:ssec:analysis-of-partitioning} for a formal argument).
+The next question is how to determine $\{\mbbeta_c\}_{c=1}^C$. According to \cref{prop:optimal-beta}, a natural choice is to adapt the optimal coefficients (\cref{eqn:single-opt-beta}) to the case of partitioned subsets.
+We justify this choice by proving that it is also optimal in minimizing the MSE above weighted by the true attention probabilities. 
+\begin{proposition}\label{prop:finer-grain-advantage}
+Suppose $U$ is a set of key-value indices, $\mbbeta^*_m$ is the optimal coefficient for each $m \in U$ as defined in \cref{prop:optimal-beta}, and $\mcP_1, \mcP_2, \dots, \mcP_C$ are an arbitrary partition of $U$, where each subset $\mcP_c$ is associated with a distinct $\mbbeta_c$. We consider the following weighted mean squared error,
+\begin{equation}
+    J(\mbbeta_1, \dots, \mbbeta_C) \coloneqq \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \norm{\mbbeta_c - \mbbeta_{m}^*}^2.\label{eqn:j-distance}
+\end{equation}
+Then for each $c = 1,\dots,C$ we have
+\begin{equation}
+    \mbbeta_c^* \coloneqq \arg\min_{\mbbeta_c} J(\mbbeta_1, \dots, \mbbeta_C) = \frac{\E{\sum_{m \in \mcP_c} g_m(\mbomega)}}{\E{\sum_{m \in \mcP_c} h_m(\mbomega)}}.\label{eqn:partition-opt-beta}
+\end{equation}
+As a consequence, with $\mbbeta_c = \mbbeta_c^*$, the partition scheme must achieve lower weighted mean squared error than any globally shared $\mbbeta$, that is, $J(\mbbeta_1=\mbbeta_1^*, \dots, \mbbeta_C=\mbbeta_C^*) \leq J(\mbbeta_1=\mbbeta, \dots, \mbbeta_C=\mbbeta)$.
+\end{proposition}
+The proof can be found in \cref{app:ssec:proof-prop-2}. Apart from measuring the squared errors for all coefficients, \cref{eqn:j-distance} also governs the significance of each error by its corresponding softmax weights, which attains closer alignment with true softmax attention. Therefore, this proposition implies that it is much easier for the partitioned control variate estimators to obtain coefficients closer to their optimum while faithfully respecting softmax attention. The optimal coefficients $\mbbeta^*_c$ could be estimated via Monte Carlo samples as $\mbbeta^*_c \approx \widehat{\mbbeta}_c(\mbomega) = \left(\sum_{m \in \mcP_c} g_m(\mbomega)\right)/\left(\sum_{m \in \mcP_c} h_m(\mbomega)\right)$, which is a widely adopted strategy in the control variate literature \citep{chong2013var, mcbook}. The resulting estimator for each subset $\mcP_c$ takes the form
+\begin{align*}
+    \sum_{m \in \mcP_c} \left(g_m(\mbomega) - \widehat{\mbbeta}_c(\mbomega) h_m(\mbomega) + \widehat{\mbbeta}_c(\mbomega)\frac{\exp(\mbq_n^\top \mbk_m)}{Z}\right) = \frac{\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)}{Z}\widehat{\mbbeta}_c(\mbomega).\numberthis\label{eqn:g-m-notin-E}
+\end{align*}
+
+\paragraph{Partially Optimized Coefficients.}
+Given the optimality of using a separate coefficient for each key-value pair, we could further improve the estimation by selecting some subset $E \subseteq[M]$ and employ $\widehat{\mbbeta}_m = \widehat{\mbbeta}_m^* = \mbv_m$ for each $m \in E$. Without loss of generality, we assume $E \cap \mcP_c = \varnothing$ for all $c = 1,\dots,C$ and $[M] = \left(\bigcup_{c=1}^{C} \mcP_c\right) \cup E$. According to \cref{prop:optimal-beta}, for each $m \in E$ we have%
+\begin{equation}
+\widetilde{g}_m(\mbomega) = 
+g_m(\mbomega) - \widehat{\mbbeta}_m h_m(\mbomega) + \widehat{\mbbeta}_m \frac{\exp(\mbq_n^\top \mbk_m)}{Z} = \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z}. \label{eqn:g-m-in-E}
+\end{equation}
+We choose $E$ by running an additional sparse attention mechanism (e.g., local window attention \citep{child2019generating} or Reformer \citep{Kitaev2020reformer}), which tend to select tokens that are more relevant to the query in sub-quadratic complexity. Since estimates on these critical tokens are exact, this strategy not only reduces the overall squared error (\cref{eqn:j-distance}), but also produces a more informative context for queries, which often translates into better empirical performance. Combining \cref{eqn:g-m-in-E,eqn:g-m-notin-E} together, we obtain an improved \textbf{E}fficient attention via control \textbf{VA}riates (\textbf{EVA}),
+\begin{align*}
+    \mathsf{EVA}(\mbq_n, \mbK, \mbV) &\coloneqq \widetilde{g}(\mbomega) = \sum_{m \in E} \widetilde{g}_m(\mbomega) + \sum_{m \notin E} \widetilde{g}_m(\mbomega) \\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)}{Z}\mbv_m + 
+    \sum_{c = 1}^C \frac{\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)}{Z}\widehat{\mbbeta}_c(\mbomega).\numberthis\label{eqn:eva}
+\end{align*}
+\paragraph{Comparison with Vanilla RFA.}
+\model and vanilla RFA can be re-written in a similar way (see \cref{app:ssec:proof-rfa-as-correcters} for a detailed derivation),
+\begin{align*}
+    \mathsf{RFA}(\mbq_n, \mbK, \mbV) &= \frac{\sum_{m=1}^M g_m(\mbomega)}{\sum_{m=1}^M h_m(\mbomega)}, \numberthis\label{eqn:rfa-partition-form} \\
+    \mathsf{EVA}(\mbq_n, \mbK, \mbV) &= \sum_{m \in E} \frac{\exp(\mbq_n^\top\mbk_m)}{Z}\frac{g_m(\mbomega)}{h_m(\mbomega)}+ 
+    \sum_{c = 1}^C \frac{\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)}{Z}\frac{\sum_{m \in \mcP_c} g_m(\mbomega)}{\sum_{m \in \mcP_c} h_m(\mbomega)} \numberthis\label{eqn:eva-partition-form}.
+\end{align*}
+Intuitively, we can think of \model as a calibrated version of RFA. Instead of directly computing and aggregating the random feature approximation for all tokens as in RFA (\cref{eqn:rfa-partition-form}), \model (\cref{eqn:eva-partition-form}) first constructs \emph{local} estimation for either a single token ($m \in E$) or a subset (e.g., $\mcP_c$), and then \emph{corrects} these approximations by their corresponding true attention scores (e.g., $\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)$ for $\mcP_c$). These adjusted local estimates are finally aggregated and globally normalized. Thanks to the decomposed representation of RFA, we can realize this divide-and-conquer strategy in a principled manner, which imposes finer-grained control on the whole estimation accuracy and enjoys increased approximation fidelity.
+\subsection{Practical Implementation}
+\label{ssec:practical-eva}
+According to the formulation (\cref{eqn:eva}) of \model, the terms within $E$ could be computed efficiently due to its limited size; however, the partitioning requires computing $\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)$ explicitly for each subset, which again builds up to quadratic computational complexity. As discussed above, $\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)$ serves as a weight to correct the contribution from each subset $\mcP_c$. In this regard, we propose to approximate such control by $\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m) \approx \exp(\mbq_n^\top \widetilde{\mbk}_c)$, where $\widetilde{\mbk}_c$ is an adaptive vector summarizing the information of all keys belonging to $\mcP_c$ (see \cref{app:sec:eva-details} for more details). Such heuristic not only avoids computing the exponential dot product of each query-key pair explicitly, but also induces a fast approximation of the normalizing constant,
+\begin{align*}
+    Z = \sum_{m \in E} \exp(\mbq_n^\top \mbk_m) + \sum_{c=1}^C\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m) \approx \sum_{m \in E} \exp(\mbq_n^\top \mbk_m) + \sum_{c=1}^C\exp(\mbq_n^\top \widetilde{\mbk}_c).
+\end{align*}
+Equipped with these results, our \model estimator (\cref{eqn:eva}) can be reduced as follows,
+\begin{align*}
+    \mathsf{EVA}(\mbq_n, \mbK, \mbV)  
+    &\approx \frac{\sum_{m \in E} \exp(\mbq_n^\top \mbk_m)\mbv_m + \sum_{c = 1}^C\exp(\mbq_n^\top \widetilde{\mbk}_c)\widehat{\mbbeta}_c(\mbomega)}{\sum_{m \in E} \exp(\mbq_n^\top \mbk_m) + \sum_{c = 1}^C \exp(\mbq_n^\top \widetilde{\mbk}_c)}.\numberthis\label{eqn:practical-eva}
+\end{align*}
+
+\paragraph{Parameterization Details.}
+We define $E$ in the same way as a simple block-wise local attention \citep{xiong2021simple}. The input sequence is first chunked into multiple blocks (or 2D windows for images), and each query $\mbq_n$ is associated with a specific $E^n$ that only contains tokens within the same block as the query. For the remaining indices $[M] \setminus E^n$, we evenly split it into $C$ contiguous chunks $\{\mcP_1^n, \dots, \mcP_C^n\}$. Note that we add the superscript $n$ here to denote the dependence on the query position; however, for notational brevity, we omit the notation when there is no ambiguity. The pseudo-code of \model is provided in \cref{alg:eva} of Appendix. More implementation details, including the definition of $\widetilde{\mbk}_c$ and $\widehat{\mbbeta}_c(\mbomega)$ in \cref{eqn:practical-eva}, are deferred to \cref{app:sec:eva-details}.
+
+\vspace{-0.1in}\paragraph{Extension to Autoregressive Modeling.}
+The decoder (or causal) self-attention, where each query can only attend to previous tokens, is the key ingredient in Transformer-based generative modeling \citep{vaswani2017attention,gpt3}. We demonstrate that it is straightforward to extend \model to support such auto-regressive modeling with few modifications. Thanks to the decomposed formulation of \model, we only need to incorporate two triangular mask matrices into the computation, which eliminate the information from future singletons $m \in E$ and entire future subsets $\mcP_c$ respectively. Unlike previous RFA methods, which are slow during training due to their recurrent computation \citep{choromanski2021rethinking,peng2021rfa}, the resulting causal variant remains highly efficient. More details can be found in \cref{app:sec:causal-eva}, including a pseudo-code \cref{alg:causal-eva}.
+
+
+
+
+\begin{table}[t]
+\caption{Classification accuracy on \imagenet in comparison to different RF-based approximations. \textsuperscript{\textdagger}vanilla PVT-v2-b3 \citep{pvtv2} uses a convolutional kernel to downsample key and value vectors, resulting in fewer FLOPs but with significant performance degradation.}
+\label{tb:deit-pvt}
+\centering
+\resizebox{0.9\columnwidth}{!}{    
+\begin{tabular}{l | c c c | c c c | c c c}
+\toprule[.1em]
+\multirow{2}{*}{Model} & \multicolumn{3}{c|}{DeiT-Tiny} & \multicolumn{3}{c}{DeiT-Small} & \multicolumn{3}{c}{PVT-v2-b3}\\
+& \# Param. & FLOPs & {Top-1 Acc.} & \# Param. & FLOPs & {Top-1 Acc.} & \# Param. & FLOPs & {Top-1 Acc.} \\
+\midrule
+Local & 5.7M & 1.1G & 67.10 & 22.0M & 4.3G & 74.06 & 36.0M & 7.2G & 83.34\\
+\midrule
+Performer &  5.7M & 1.2G & 65.92 & 22.0M & 4.4G & 74.29 & 36.0M & 8.2G & 82.40 \\
+LARA &  5.8M & 1.2G & 71.48 &22.2M &4.5G & 79.48 & 39.9M & 7.7G & 83.47 \\
+\model (Ours) & 5.8M & 1.2G & \textbf{73.00} &22.2M & 4.4G & \textbf{80.65} & 36.1M & 7.4G & \textbf{83.71}\\
+\midrule
+Softmax  & 5.7M & 1.3G & \textbf{72.98} &22.0M & 4.6G & 80.36 & 45.2M & 6.9G\textsuperscript{\textdagger} & 83.14\textsuperscript{\textdagger}\\
+\bottomrule[.1em]
+\end{tabular}}  
+\end{table}
+\section{Experimental Results}
+\label{sec:experiments}
+In this section, we evaluate our proposed method on various tasks, including image classification (\cref{ssec:exp:image}), language tasks (\cref{ssec:exp:nlp}), and Long Range Arena benchmark (\cref{app:sec:exp:lra}). Details of experimental protocols and baselines can be found in \cref{app:sec:experiment-details}.
+\subsection{Image Classification}
+\label{ssec:exp:image}
+We explore the ability to learn visual representations for different attention mechanisms in vision transformers \citep[ViTs;][]{dosovitskiy2021vit}. In particular, we replace softmax attention used in ViTs with its efficient variants and evaluate their performance on the \imagenet dataset \citep{deng2009imagenet}, which contains over 1,280K and 50K images of 1,000 classes for training and validation splits, respectively. For the transformer model, we consider both a plain ViT \citep[DeiT;][]{dosovitskiy2020image, touvron21adeit} and a pyramidal ViT \citep[PVT;][]{pvtv2} to test the performance. The former maintains the same sequence length (which is set to 196 by default) across all transformer layers, while the latter processes much longer sequences (up to 3136 tokens) at early layers and progressively reduces the sequence length to form a hierarchical structure. Detailed experimental settings could be found in \cref{app:ssec:image-classification-details}.  
+\vspace{-0.1in}\paragraph{Results.} We first compare the performance of \model against our main baselines on the standard ViT architectures. As shown in \cref{tb:deit-pvt}, \model significantly improves the performance of previous RFA approaches (including Performer \citep{choromanski2021rethinking} and LARA \citep{lara}) and local attention by a large margin, and even outperforms the conventional softmax attention. We then consider a more challenging setting, where the plain architecture DeiT-Tiny is used but the sequence length is scaled up to 784 (denoted as DeiT-Tiny-784). We compare \model against other attention variants in this setting and report the classification results in \cref{tb:deit-patch8}. \model outperforms most previous baselines and remains highly competitive with softmax attention, illustrating its effectiveness.
+
+
+
+\begin{table}[t]
+\begin{minipage}[t]{.49\columnwidth}
+    \centering
+    \captionsetup{type=table}
+    \captionof{table}{Image classification accuracy on \imagenet dataset with DeiT-Tiny-784.}
+    \label{tb:deit-patch8}
+    \resizebox{\columnwidth}{!}{\begin{tabular}{l c c c}
+    \toprule[.1em]
+    \multicolumn{1}{c}{Model} & \# Param. & FLOPs & {Top-1 Acc.} \\
+    \midrule
+    Performer \citep{choromanski2021rethinking} & 5.7M & 4.9G & 67.19 \\
+    Local attention \citep{child2019generating} & 5.7M & 4.4G & 70.62\\
+    Scatterbrain \citep{chen2021scatterbrain} & 5.7M & 5.2G & 73.50 \\
+    Nystr\"omformer \citep{xiong2021nystromformer} &  5.7M & 4.8G & 74.20\\
+    LARA \citep{lara} &  5.8M & 4.6G & 75.02\\
+    Combiner \citep{ren2021combiner} &  5.7M & 4.7G & 75.56\\
+    Long-Short \citep{zhu2021long-short} & 6.1M & 5.0G & 76.41 \\
+    \model (Ours) &  5.8M & 4.6G & 76.67 \\
+    \midrule
+    Softmax & 5.7M & 7.0G & \textbf{77.16}\\
+    \bottomrule[.1em]
+    \end{tabular}}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{.49\columnwidth}
+    \centering
+    \captionsetup{type=table}
+    \captionof{table}{Masked Language Modeling Perplexity on the \book validation dataset.}
+    \label{tb:mlm}
+    \resizebox{0.89\columnwidth}{!}{    
+    \begin{tabular}{l c c c}
+    \toprule[.1em]
+    \multicolumn{1}{c}{Model} & \# Param. & FLOPs & {Perplexity} \\
+    \midrule
+    Performer \citep{choromanski2021rethinking} & 126M & 213G & 8.61 \\
+    Linformer \citep{wang2020linformer} &  129M & 193G & 5.16 \\
+    LARA \citep{lara} &  126M & 194G & 4.39 \\
+    Reformer \citep{Kitaev2020reformer} &  126M & 205G & 4.28 \\
+    Local attention \citep{child2019generating} & 136M & 183G & 4.27\\
+    Combiner \citep{ren2021combiner} &  136M & 187G & 4.12 \\
+    Long-Short \citep{zhu2021long-short} &  142M & 218G & 4.01 \\
+    \midrule
+    \model (Ours) & 136M & 184G & 3.94 \\
+    \model-4096 (Ours) & 136M & 387G & \textbf{3.73}\\
+    \midrule
+    Softmax & 126M & 252G & \textbf{3.74}\\
+    \bottomrule[.1em]
+    \end{tabular}}
+\end{minipage} 
+\end{table}
+
+\begin{table}[t]
+\begin{minipage}[t]{.49\columnwidth}
+    \centering
+    \captionsetup{type=table}
+    \captionof{table}{BLEU scores on the test set of \wmt. \textsuperscript{\textdagger} numbers are taken from \citet{lara}.}
+    \label{tb:wmt14}
+    \resizebox{0.6\columnwidth}{!}{    
+    \begin{tabular}{l | c | c }
+    \toprule[.1em]
+    Model & \# Param. & {BLEU}\\
+    \midrule
+    Performer-128\textsuperscript{\textdagger} & 60.92M & 23.5\\
+    \midrule{LARA-16\textsuperscript{\textdagger}} & 60.96M & 26.4 \\
+    {LARA-32\textsuperscript{\textdagger}} & 60.96M & 26.8 \\
+    {LARA-64\textsuperscript{\textdagger}} & 60.96M & 27.0 \\
+    \midrule
+    \model-16 & 60.96M & 27.2 \\
+    \model-32 & 60.96M & 27.3 \\
+    \model-64 & 60.96M & \textbf{27.5} \\
+    \midrule
+    Softmax   & 60.92M & \textbf{27.5}\\
+    \bottomrule[.1em]
+    \end{tabular}}  
+\end{minipage}
+\hfill
+\begin{minipage}[t]{.49\columnwidth}
+    \centering
+    \captionsetup{type=table}
+    \captionof{table}{Validation (Val.) and Test perplexity (PPL) on \wikitext. 256/480 indicate evaluation context window sizes. \textsuperscript{\textdagger} numbers are due to \citet{kasai2021t2r}.}
+    \label{tb:wikitext103}
+    \centering
+    \resizebox{0.82\columnwidth}{!}{    
+    \begin{tabular}{l | c | c c c c}
+    \toprule
+    \multirow{2}{*}{Model} & \multirow{2}{*}{\# Params.} & \multicolumn{2}{c}{256} & \multicolumn{2}{c}{480} \\
+    & & {Val.} & {Test} & {Val.} & {Test}\\
+    \midrule
+    Softmax\textsuperscript{\textdagger} 
+    & 449M & \textbf{17.9} & \textbf{18.5} &  --  &  --  \\
+    ELU\textsuperscript{\textdagger}     
+    & 449M & 22.0 & 22.8 &  --  &  --  \\
+    RFA\textsuperscript{\textdagger}     
+    & 449M & 20.4 & 21.3 & --   &  --  \\
+    T2R\textsuperscript{\textdagger}     
+    & 450M & 20.1 & 20.8 & --   &  --  \\
+    \model (Ours) 
+    & 450M & \textbf{17.9} & 18.6 & \textbf{17.7} & \textbf{18.3} \\  
+    \midrule
+    Softmax 
+    & 247M & 18.8 & 19.5 & 18.4 & 19.1 \\
+    \model (Ours) 
+    & 247M & 18.8 & 19.4 & 18.5 & 19.1 \\
+    \bottomrule
+    \end{tabular}}
+\end{minipage} 
+\end{table}
+\subsection{Machine Translation and Language Modeling}
+\label{ssec:exp:nlp}
+We further evaluate \model on the natural language domain. Specifically, we consider three tasks: 
+\begin{itemizesquish}
+\item \textbf{Masked language modeling (MLM)} on a pretraining-scale book corpus \book in the Pile dataset suite \citep{books3,gao2020pile}, consisting of over 196,640 published books. 
+\item \textbf{Machine translation (MT)} on \wmt benchmark \citep{bojar2014findings}. 
+\item \textbf{Autoregressive language modeling (Autoregressive LM)} on a large-scale token-level LM benchmark \wikitext \citep{merity2016pointer}. 
+\end{itemizesquish}
+\vspace{-0.1in}\paragraph{Results.} 
+We report \textbf{MLM} validation perplexity in \cref{tb:mlm}, where the sequence length is 2048 by default. 
+\model substantially improves previous methods based on random features (including Performer and LARA) and outperforms the other efficient attention mechanisms. Thanks to the linear complexity of \model, it can be scaled further to much longer sequences. With input sequences of length increased to 4096, \model (denoted as ``\model-4096'') attains lower validation perplexity than exact softmax attention, which demonstrates its capability of scaling to much longer sequences.
+Besides, \textbf{machine translation} results are compared in \cref{tb:wmt14}, where in this task $C=8$ by default and \model-$m$ denotes \model with $|E|\!= \!m$. \model outperforms previous random feature methods by a large margin and achieves translation quality on par with full softmax attention even under the setting of small $|E|$ and $C$. For \textbf{Autoregressive LM} (\cref{tb:wikitext103}), \model achieves the same perplexity as softmax attention with much lower computational complexity. Comparing against various random feature methods reported by previous work \citet{kasai2021t2r}, we observe a significant performance gain brought from \model even under a Transformer with half parameters. When further increasing the transformer model size as the setting in \citet{kasai2021t2r}, EVA still scales as effectively as softmax attention with a comparable perplexity while outperforming previous random feature methods by a larger margin. These results indicate the substantially enlarged capacity of \model to approximate softmax attention.
+
+
+\begin{wraptable}[21]{R}{0.43\columnwidth}
+    \caption{Classification accuracy on \imagenet dataset.}
+    \label{tb:ablation-imagenet}
+    \centering
+    \resizebox{0.42\columnwidth}{!}{    
+    \begin{tabular}{l | c c c c c}
+    \toprule[.1em]{Model} & Mem.(G) & Time(ms/iter) & $|E|$ & $C$ & Top-1 Acc. \\
+    \midrule
+    \midrule
+    Performer
+    & 8.1 & 87 & 0  & 1 & 67.19 \\
+    Local 
+    & 7.8 & 65 & 49 & 0 & 70.62 \\
+    \midrule
+    \multirow{6}{*}{\model}
+    & 8.4  & 77  & 0   & 49  &  74.33 \\
+    & 9.1  & 87  & 49  & 1   &  74.10 \\ 
+    & 9.4  & 89  & 49  & 16  &  75.83 \\ 
+    & 9.9  & 94  & 49  & 49  &  76.67 \\ 
+    & 12.5 & 119 & 49  & 196 &  77.10 \\ 
+    & 11.9 & 108 & 196 & 49  &  77.36 \\ 
+    \midrule
+    Softmax 
+    & 17.7 & 99 & n.a. & n.a. & 77.16 \\
+    \bottomrule[.1em]
+\end{tabular}}  
+    \vspace{0.1in}
+    \caption{MLM validation perplexity on \book. ``--'' indicates fail to converge.}
+    \label{tb:ablation-mlm}
+    \vspace{0.1in}
+    \centering
+    \resizebox{0.42\columnwidth}{!}{    
+    \begin{tabular}{l | c c c c c}
+    \toprule[.1em]
+    \multicolumn{1}{l|}{Model} & Mem.(G) & Time(ms/iter) & $|E|$ & $C$ & Perplexity \\
+    \midrule
+    \midrule
+    Performer-4096
+    & 4.8 & 39 & 0   & 1 & --   \\
+    Local-4096 
+    & 4.4 & 29 & 256 & 0 & 4.34 \\
+    \midrule
+    \multirow{3}{*}{\model-4096}
+    & 5.8 & 40 & 256  & 128  & 3.82 \\ 
+    & 6.4 & 41 & 256  & 256  & 3.73 \\
+    & 6.9 & 47 & 512  & 128  & 3.71 \\ 
+    \midrule
+    Softmax-4096 
+    & 21.2 & 102 & n.a. & n.a. & 3.65 \\
+    \bottomrule[.1em]
+    \end{tabular}}  
+\end{wraptable}
+\subsection{Analysis}
+\label{ssec:experimental-analysis}
+\paragraph{Running Time \& Memory Comparison.}
+We conduct a simulation experiment to evaluate the empirical efficiency of various attention methods, which is measured by the running time per iteration and memory footprint under different sequence lengths. The setup can be found in \cref{app:ssec:time-mem-details}. As illustrated in \Cref{fig:time,fig:mem}, \model only incurs a little computational overhead compared to Performer and local attention and achieves much better running time speed-up than Long-Short \citep{zhu2021long-short}, a strong baseline across various tasks albeit with much longer running time and larger memory consumption. In \cref{fig:loss_vs_time}, we further visualize the speed-up of \model relative to conventional softmax attention by plotting the validation loss curve versus actual elapsed time during training transformers (equivalent to 32 GPU days). It can be seen that \model can achieve a much lower loss after running for the same elapsed time; in contrast, conventional softmax attention needs to run almost $3\times$ longer to match the loss quantity. Overall, our method attains a good trade-off between quality and empirical efficiency.
+
+\begin{figure}[tb]
+\centering
+\begin{subfigure}[b]{0.3\textwidth} 
+  \centering{\includegraphics[width=\textwidth]{figs/memory_vs_attention.pdf}}
+  \caption{Memory consumption.}\label{fig:mem}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.3\textwidth} 
+  \centering{\includegraphics[width=\textwidth]{figs/runtime_vs_attention.pdf}}
+  \caption{Running time.}\label{fig:time}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.3\textwidth} 
+  \centering{\includegraphics[width=\textwidth]{figs/loss_vs_runtime.pdf}}
+  \caption{Training speed-up.}\label{fig:loss_vs_time}
+\end{subfigure}
+\caption{
+\textbf{Left} and \textbf{middle}: empirical memory consumption and running time comparison respectively of different attention mechanisms under various sequence lengths.
+\textbf{Right}: a snapshot of MLM validation loss curve versus actual elapsed time during training.}
+\label{fig:time_mem}
+\vspace{-0.1in}
+\end{figure}
+
+
+
+\vspace{-0.1in}\paragraph{Ablation Study.}
+In this section, we conduct an ablation study on image classification and MLM tasks to investigate the effects of main hyper-parameters in \model (see \cref{app:tb:ablation} for more comprehensive analysis). In particular, we vary $|E|$ and the partition size $C$ and evaluate their performance on both image classification and masked language modeling. As presented in \cref{tb:ablation-imagenet} and \cref{tb:ablation-mlm}, increasing $|E|$ amounts to obtaining exact estimates for more key-value pairs, which greatly improves empirical performance; besides, increasing $C$ would process control variates at a finer scale, also translating into better modeling quality, consistent with our theoretical analysis (\cref{ssec:cv-partially-shared}).
+\section{Related Work}
+\label{sec:related-work}
+\paragraph{Control Variates.} Control variates are a widely used variance reduction technique in reinforcement learning \citep{greensmith2004variance, grathwohl2018backpropagation, vlassis2021control}, stochastic optimization \citep{chong2013var}, variational inference \citep{paisley2012vi, bbvi, geffner2018using, rebar, grathwohl2018backpropagation}, Markov chain Monte Carlo \citep{baker2019control} and many other topics. Our construction with control variates provides a new perspective on designing faster yet more accurate attention approximations.
+
+\vspace{-0.1in}\paragraph{Efficient Attention Mechanisms.}
+A lot of research work has put the focus on reducing the quadratic complexity of conventional softmax attention. A widely used approach is to define a sparse attention pattern so that each query is limited to only attending to a subset of tokens. The sparse pattern could be either learnable \citep{Kitaev2020reformer, vyas2020fast, yi2020sinkhorn, roy2021routing, madaan2022treeformer} or simply fixed \citep{liu2018generating,parmar2018image,child2019generating,beltagy2020longformer,ainslie2020etc,zaheer2020bigbird, liu2021swin, xiong2021simple, pmlr-v162-wang22l, chen2022pixelated, hutchins2022blockrnn}. Another paradigm is to adopt low-rank approximations, including via the Nystr\"om method \citep{xiong2021nystromformer}, down-sampling with learnable projections \citep{wang2020linformer, peng2021abc}, or explicitly compressing sequences \citep{Rae2020Compressive,dai2020funnel, ma2021luna, jaegle2021perceiver}. There are also studies improving both sparse and low-rank methods for better attention matrix approximation \citep{nguyen2021fmmformer, zhu2021long-short, chen2021scatterbrain, ren2021combiner, h-transformer, hua2022flash, mra-attention}. Instead of adopting approximate methods, a recent line of work \citep{rabe2021self, dao2022flashattention} proposes to compute the exact softmax attention in an online manner \citep{milakov2018online} without materializing the full attention matrix. In this way, softmax attention can be computed in linear memory complexity, and the runtime can also be greatly improved by further minimizing memory accesses \citep{dao2022flashattention}.
+
+\vspace{-0.1in}\paragraph{Random-Feature-based Attention.}
+Random-feature-based methods are a popular alternative that uses random features \citep{random-features} to linearize exponential kernels in softmax attention \citep{katharopoulos2020transformers_are_rnns,choromanski2021rethinking,peng2021rfa}. Recent work attempts to improve RFA approximation from several aspects, such as designing more accurate random feature maps \citep{choromanski2022hybrid,likhosherstov2022chefs,chowdhury2022learning}, incorporating relative positional or other task-specific biases \citep{liutkus2021spe,luo2021stable,chen-2021-permuteformer,ripple,zhen2022cosformer,flowformer,qin2022devil}, or leveraging connections to fast weight programmers \citep{peng2021rfa,schlag21a,irie2021going}. Prior work closely related to ours includes \citet{lara}, which reinterprets RFA using self-normalized importance sampling \citep{hesterberg1995snis} and theoretically extends the random feature approximation from individual exponential kernels to the whole softmax attention. Our work further generalizes this result via control variates and characterizes the approximation gap caused by RFA.
+Scatterbrain \citep{chen2021scatterbrain} is also similar to our work in that it also refines RF approximation on critical local regions. However, it is developed based on a different motivation that attempts to approximate the attention matrix with a combination of sparse and low-rank matrices. Interestingly, we find that Scatterbrain can be cast as a special case under our framework; see \cref{app:sec:connections} for a detailed discussion about connections between \model and previous attention mechanisms.
+\section{Conclusion and Limitations}
+\label{sec:conclusion}
+In this work, we develop an efficient attention mechanism \model via control variates. Our framework reveals a localized perspective of RFA approximation, which not only bridges the gap between RFA and exact softmax attention but also attains a good trade-off between modeling quality and efficiency. We evaluate our method on both vision and language tasks and demonstrate substantial improvements over previous baselines.
+There are some limitations of our framework. For instance, the approximation in computing control variate estimation for each partitioned subset is crude and might limit the potential modeling capacity; in addition, we only explore the most straightforward partitioning strategy that evenly splits the sequence into multiple contiguous chunks; while in general, the partition could contain arbitrary subsequences or be adaptive to inputs via clustering methods, which can be guided by task-specific inductive biases. It is interesting to investigate these limitations to unleash the expressiveness of \model further, which we leave for future work.
+\subsubsection*{Acknowledgments}
+We would like to thank the HKU NLP group, the Shark-NLP group, and the anonymous reviewers for their valuable suggestions that greatly helped improve this work. This work is partially supported by the joint research scheme of the National Natural Science Foundation of China (NSFC) and the Research Grants Council (RGC) under grant number N\_HKU714/21.
+
+\bibliography{iclr2023_conference}
+\bibliographystyle{iclr2023_conference}
+
+
+\newpage
+\appendix
+\textbf{\huge Appendix}\vspace{0.05in}
+\etocsettocstyle{}{}
+\etocdepthtag.toc{appendix}
+\etocsettagdepth{main}{none}
+\etocsettagdepth{appendix}{subsection}
+\tableofcontents
+
+\newpage
+\section{A Brief Review of Vanilla Random Feature Attention}
+\label{app:sec:rfa}
+Vanilla random feature attention methods, such as Performer \citep{choromanski2021rethinking,peng2021rfa}, seek to approximate the softmax attention mechanism through \emph{random features} \citep{random-features} $\mbphi(\mbx,\mbomega) \coloneqq  1/\sqrt{S}[\xi(\mbx,\omega_1), \dots, \xi(\mbx, \omega_S)]^\top$. Here, $\omega_1, \dots,\omega_S \sim \mcN(0,\mathbf{I})$, and $\xi(\mbx, \omega)$ is the \emph{randomized mapping} such that
+\begin{equation}
+    \exp\left(\mbq_n^\top \mbk_m\right) = \E[\omega_s \sim \mcN(0,\mathbf{I})]{\xi(\mbq_n, \omega_s)^\top \xi(\mbk_m, \omega_s)}.\label{app:eqn:randomized-mappings}
+\end{equation}
+Therefore, we can draw multiple Monte Carlo samples to estimate the exponential kernel,
+\begin{align*}
+    \exp\left(\mbq_n^\top \mbk_m\right) \approx \frac{1}{S} \sum_{s=1}^S \xi(\mbq_n, \omega_s)^\top \xi(\mbk_m, \omega_s) \coloneqq \mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega),
+\end{align*}
+and then approximate the attention mechanism as
+\begin{equation}
+    \sum_{m=1}^M \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m'=1}^M \exp\left(\mbq_n^\top \mbk_{m'}\right)} \mbv_m \approx \frac{\sum_{m=1}^M\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m}{\sum_{m'=1}^M\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_{m'}, \mbomega)}.\label{app:eqn:vanilla-rfa}
+\end{equation}
+It is recently generalized as a self-normalized importance sampling estimator to approximate softmax attention \citep{lara}, as described in \cref{ssec:rfa-and-snis}. We refer the generalized random feature based approximations as RFA.
+\section{Proofs \& Derivations}
+
+\subsection{An Extended Review of Control Variates}
+\label{app:ssec:cv-background}
+The control variate method takes the following form,
+\begin{equation}
+    \widetilde{g}(\mbomega) = g(\mbomega) - \mbbeta h(\mbomega) + \mbbeta \E{h(\mbomega)},\label{app:eqn:basic_cv}
+\end{equation}
+Given the particular forms of $g(\cdot)$ and $h(\cdot)$, $\mbbeta$ can be optimized to minimize the estimation variance. For notational convenience, we denote the covariance between a scalar and a random vector as $\cov{h(\mbomega)}{g(\mbomega)} \coloneqq \E{\left(h(\mbomega) - \E{h(\mbomega)}\right)\left(g(\mbomega) - \E{g(\mbomega)}\right)}$, and the variance of a random vector as $\var{g(\mbomega)} \coloneqq \cov{g(\mbomega)}{g(\mbomega)}$. In particular, we have
+\begin{align*}
+    \var{\widetilde{g}(\mbomega)} 
+    &= \var{g(\mbomega) - \mbbeta h(\mbomega)} \\
+    &= \var{g(\mbomega)} - 2\cov{\mbbeta h(\mbomega)}{g(\mbomega)} + \var{\mbbeta h(\mbomega)}\\
+    &= \var{g(\mbomega)} - 2\cov{h(\mbomega)}{g(\mbomega)}\mbbeta^\top  + \var{h(\mbomega)}\mbbeta \mbbeta^\top.
+\end{align*}
+We hope an optimal $\mbbeta$ would minimize $\trace{\var{\widetilde{g}(\mbomega)}}$, that is, the sum of estimating variance for each dimension. By differentiating, we obtain
+\begin{align*}
+    \mbbeta^* &= \arg\min_{\mbbeta} \trace{\var{\widetilde{g}(\mbomega)}} = \frac{\cov{h(\mbomega)}{g(\mbomega)}}{\var{h(\mbomega)}}. \numberthis\label{app:eqn:opt_beta}
+\end{align*}
+Since both the covariance and the variance may be intractable to compute, the optimal $\mbbeta^*$ is generally not available in closed form. Nevertheless, with the optimal coefficient, the variance of such control variate estimate would never be larger than the plain estimator $g(\cdot)$.
+\subsection{Derivation of SNIS as Control Variate Estimation}
+\label{app:ssec:proof-snis-as-cv}
+For notational convenience, we denote the importance weight as $W(\omega_s) \coloneqq p_n(\omega_s)/q(\omega_s)$. Then we have
+\begin{align*}
+\widetilde{g}(\mbomega) 
+     &= \frac{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)}{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}} = \frac{\sum_{s=1}^SW(\omega_s)f(\omega_s)}{\sum_{s=1}^SW(\omega_s)} \\
+     &= \frac{\sum_{s=1}^SW(\omega_s)f(\omega_s)}{\sum_{s=1}^SW(\omega_s)} - \frac{1}{S}\sum_{s=1}^SW(\omega_s)f(\omega_s) + \frac{1}{S}\sum_{s=1}^SW(\omega_s)f(\omega_s)\\
+     &= \frac{\sum_{s=1}^SW(\omega_s)f(\omega_s)}{\sum_{s=1}^SW(\omega_s)} - \frac{\sum_{s=1}^SW(\omega_s)}{\sum_{s=1}^SW(\omega_s)}\frac{1}{S}\sum_{s=1}^SW(\omega_s)f(\omega_s) + \frac{1}{S}\sum_{s=1}^SW(\omega_s)f(\omega_s)\\
+     &= \frac{1 - \frac{1}{S}\sum_{s=1}^SW(\omega_s)}{\sum_{s=1}^SW(\omega_s)} \sum_{s=1}^SW(\omega_s)f(\omega_s)+ \frac{1}{S}\sum_{s=1}^SW(\omega_s)f(\omega_s)\\
+     &= \frac{\sum_{s=1}^SW(\omega_s)f(\omega_s)}{\sum_{s=1}^SW(\omega_s)}\left(1 - \frac{1}{S}\sum_{s=1}^SW(\omega_s)\right) + \frac{1}{S}\sum_{s=1}^SW(\omega_s)f(\omega_s)\\
+     &= \frac{1}{S}\sum_{s=1}^SW(\omega_s)f(\omega_s) - \frac{\sum_{s=1}^SW(\omega_s)f(\omega_s)}{\sum_{s=1}^SW(\omega_s)} \left(\frac{1}{S}\sum_{s=1}^SW(\omega_s) - 1\right)\\
+     &= g(\mbomega) - \widehat{\mbbeta}(\mbomega) \left(h(\mbomega) - \E{h(\mbomega)}\right),
+\end{align*}
+Note that the expectation of importance weights equals 1, that is,
+\begin{align*}
+    \E{h(\mbomega)} \!=\! \E{\frac{1}{S}\sum_{s=1}^SW(\omega_s)} \!=\! \E[\omega_1,\dots,\omega_S \sim q(\omega)]{\sum_{s=1}^S\frac{1}{S}\frac{p(\omega_s)}{q(\omega_s)}} = \frac{1}{S} \sum_{s=1}^S \E[\omega_s \sim q(\omega)]{\frac{p(\omega_s)}{q(\omega_s)}} = 1.
+\end{align*}
+Same as SNIS, this estimator is still biased due to the dependence of $\widehat{\mbbeta}(\mbomega)$ on $\mbomega$. However, it would asymptotically become unbiased since $\widehat{\mbbeta}(\mbomega)$ is consistent and converges to a constant $\mbbeta$ w.r.t. $\omega$ given a large number of samples,
+\begin{align*}
+    \widehat{\mbbeta}(\mbomega) = \frac{g(\mbomega)}{h(\mbomega)} \xrightarrow{p} \frac{\E{g(\mbomega)}}{\E{h(\mbomega)}} = \underbrace{\E[p_n(\omega)]{f(\omega)}}_{\text{constant}} \coloneqq \mbbeta.\numberthis\label{app:eqn:snis_limiting_beta}
+\end{align*}
+\subsection{Derivation of the Expectation of Per-term Control Variates}
+\label{app:ssec:expected_h_m}
+According to the definition of randomized mappings, we have
+\begin{align*}
+    \E{h_m(\mbomega)} &= \E[\omega_1, \dots, \omega_S \sim q(\omega)]{\frac{1}{S}\sum_{s=1}^S\frac{\mathcal{N}(\omega_s;0,\mathbf{I})}{Zq(\omega_s)}\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)} \\
+    &= \frac{1}{S}\sum_{s=1}^S \frac{1}{Z} \int \xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)\mathcal{N}(\omega_s;0,\mathbf{I}) d\omega_s \\
+    &= \frac{\exp(\mbq_n^\top \mbk_m)}{Z}.\numberthis\label{app:eqn:expected_h_m}
+\end{align*}
+\subsection{Proof of \cref{prop:optimal-beta}}
+\label{app:ssec:proof-prop-1}
+\begin{proof}
+We start with the formulation of $g(\cdot)$ and $h(\cdot)$,
+\begin{align*}
+    \frac{g_m(\mbomega)}{h_m(\mbomega)} =  \frac{\sum_{s=1}^S\frac{\mathcal{N}(\omega_s;0,\mathbf{I})}{Zq(\omega_s)}\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)\mbv_m}{\sum_{s=1}^S\frac{\mathcal{N}(\omega_s;0,\mathbf{I})}{Zq(\omega_s)}\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)} = \mbv_m.
+\end{align*}
+As a result, we have $g_m(\mbomega) = h_m(\mbomega)\mbv_m$ and $\E{g_m(\mbomega)} = \E{h_m(\mbomega)}\mbv_m$. We now investigate the optimal $\mbbeta_m$ according to \cref{app:eqn:opt_beta},
+\begin{align*}
+    \mbbeta^*_m &= \arg\min_{\mbbeta} \trace{\var{\widetilde{g}_m(\mbomega)}} \\
+    &= \frac{\cov{h_m(\mbomega)}{g_m(\mbomega)}}{\var{h_m(\mbomega)}} \\
+    &= \frac{\E{\left(h(\mbomega) - \E{h(\mbomega)}\right)\left(h(\mbomega) - \E{h(\mbomega)}\right)}\mbv_m}{\E{\left(h(\mbomega) - \E{h(\mbomega)}\right)\left(h(\mbomega) - \E{h(\mbomega)}\right)}} \\
+    &= \mbv_m = \frac{g_m(\mbomega)}{h_m(\mbomega)}.
+\end{align*}
+In terms of the variance, we again use $g_m(\mbomega) = h_m(\mbomega)\mbv_m$ to obtain
+\begin{align*}
+\widetilde{g}_m(\mbomega) 
+&= g_m(\mbomega) - \widehat{\mbbeta}_m \left(h_m(\mbomega) - \E{h_m(\mbomega)}\right) \\
+&= g_m(\mbomega) - \mbv_m h_m(\mbomega) + \mbv_m \E{h_m(\mbomega)} \\
+&= \mbv_m \E{h_m(\mbomega)} \\
+&= \frac{\exp(\mbq_n^\top \mbk_m)}{Z} \mbv_m. \numberthis\label{eqn:exact_estimate}
+\end{align*}
+Since this holds true for every term $m=1,\dots,M$, our estimate becomes exactly softmax attention,
+\begin{align*}
+    \widetilde{g}(\mbomega) = \sum_{m=1}^M \widetilde{g}_m(\mbomega) = \sum_{m=1}^M \frac{\exp(\mbq_n^\top \mbk_m)}{Z} \mbv_m = \sum_{m=1}^M \frac{\exp(\mbq_n^\top \mbk_m)}{\sum_{m'=1}^M \exp(\mbq_n^\top \mbk_m)} \mbv_m.
+\end{align*}
+Since all randomness is eliminated, the estimate is exact with zero bias and variance. That is, $\mathsf{RFA}(\mbq_n, \mbK, \mbV) = \widetilde{g}(\mbomega) = \mathsf{SoftmaxAttn}(\mbq_n, \mbK, \mbV)$.
+\end{proof}
+\subsection{A Formal Analysis of the Advantage of Partitioning}
+\label{app:ssec:analysis-of-partitioning}
+In this section, we demonstrate the advantage of partitioning by showing that there always exists some set $\{\mbbeta_c\}_{c=1}^C$ that achieves lower weighted MSE than any globally shared coefficient, as discussed in \cref{ssec:cv-partially-shared}.
+\begin{lemma}
+Suppose $\mbbeta^*_m$ is the optimal coefficient for each $m \in [M]$ as defined in \cref{prop:optimal-beta}, and $\mcP_1, \mcP_2, \dots, \mcP_C$ are an arbitrary partition of $[M]$, where each subset $\mcP_c$ is associated with a distinct $\mbbeta_c$. We consider the following weighted mean squared error, 
+\begin{equation}
+    J(\mbbeta_1, \dots, \mbbeta_C) \coloneqq \sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m \norm{\mbbeta_c - \mbbeta_{m}^*}^2,\label{app:eqn:general-weighted-mse}
+\end{equation}
+where $\alpha_m > 0$ for each $m \in [M]$ and $\sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m = 1$. Then for any choice of $\{\alpha_m\}_{m=1}^M$ and any globally shared coefficient $\mbbeta$, there exists some $\{\mbbeta^*_c\}_{c=1}^C$ so that
+\begin{align*}
+    J(\mbbeta_1 = \mbbeta, \dots, \mbbeta_C = \mbbeta) \geq J(\mbbeta_1=\mbbeta_1^*, \dots, \mbbeta_C=\mbbeta_C^*).
+\end{align*}
+\end{lemma}
+\begin{proof}
+    Let $\mbbeta^*_c = \frac{\sum_{m \in \mcP_c} \alpha_m \mbbeta^*_m}{\sum_{m \in \mcP_c} \alpha_m}$ for each $c = 1,\dots,C$. Then we have 
+    \begin{align*}
+        \sum_{m \in \mcP_c} \alpha_m \left(\mbbeta^*_c - \mbbeta_{m}^*\right) &= \mbbeta^*_c \left(\sum_{m \in \mcP_c} \alpha_m\right) - \sum_{m \in \mcP_c} \alpha_m \mbbeta_{m}^* \\
+        &= \frac{\sum_{m \in \mcP_c} \alpha_m \mbbeta^*_m}{\sum_{m \in \mcP_c} \alpha_m} \left(\sum_{m \in \mcP_c} \alpha_m\right) - \sum_{m \in \mcP_c} \alpha_m \mbbeta_{m}^* \\
+        &= \sum_{m \in \mcP_c} \alpha_m \mbbeta^*_m - \sum_{m \in \mcP_c} \alpha_m \mbbeta^*_m = 0.\numberthis\label{app:eqn:lemma-helper-1}
+    \end{align*}
+    According to \cref{app:eqn:general-weighted-mse,app:eqn:lemma-helper-1}, for any $\mbbeta$ we have the following inequality,
+    \begin{align*}
+        &J(\mbbeta_1 = \mbbeta, \dots, \mbbeta_C = \mbbeta) \\
+        &= \sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m \norm{\mbbeta - \mbbeta_{m}^*}^2 \\
+        &= \sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m \norm{\mbbeta - \mbbeta^*_c + \mbbeta^*_c - \mbbeta_{m}^*}^2 \\
+        &= \sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m \left(\norm{\mbbeta - \mbbeta^*_c }^2 + 2\left(\mbbeta - \mbbeta^*_c\right)^\top\left(\mbbeta^*_c - \mbbeta_{m}^*\right) + \norm{\mbbeta^*_c - \mbbeta_{m}^*}^2\right)\\
+        &= \sum_{c=1}^C \sum_{m \in \mcP_c} \!\!\alpha_m \norm{\mbbeta - \mbbeta^*_c }^2 + 2\underbrace{\sum_{c=1}^C \sum_{m \in \mcP_c}\!\! \alpha_m \left(\mbbeta - \mbbeta^*_c\right)^\top\left(\mbbeta^*_c - \mbbeta_{m}^*\right)}_{=0} + \sum_{c=1}^C \sum_{m \in \mcP_c} \!\!\alpha_m\norm{\mbbeta^*_c - \mbbeta_{m}^*}^2\\
+        &= \sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m \norm{\mbbeta - \mbbeta^*_c }^2 + \sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m\norm{\mbbeta^*_c - \mbbeta_{m}^*}^2\\
+        &\geq \sum_{c=1}^C \sum_{m \in \mcP_c} \alpha_m\norm{\mbbeta^*_c - \mbbeta_{m}^*}^2 \\
+        &= J(\mbbeta_1=\mbbeta_1^*, \dots, \mbbeta_C=\mbbeta_C^*).
+    \end{align*}
+    As a result, for any choice of $\{\alpha_m\}_{m=1}^M$ and any globally shared coefficient $\mbbeta$, there always exists some $\{\mbbeta_c\}_{c=1}^C$ that achieves lower (or equal) weighted MSE, and a solution can be simply $\mbbeta_c = \frac{\sum_{m \in \mcP_c} \alpha_m \mbbeta^*_m}{\sum_{m \in \mcP_c} \alpha_m}$.
+\end{proof}
+\subsection{Proof of \cref{prop:finer-grain-advantage}}
+\label{app:ssec:proof-prop-2}
+\begin{proof}
+We first consider the case of partitioned indices, where each subset $\mcP_c$ is associated with some specific $\mbbeta_c$.
+To see the global minimum of $J$, we differentiate on both sides and obtain
+\begin{align*}
+    \frac{\partial J(\mbbeta_1, \dots, \mbbeta_C)}{\partial \mbbeta_c} &= \frac{\partial}{\partial \mbbeta_c} \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \norm{\mbbeta_c - \mbbeta_{m}^*}^2\\
+    &= \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} 2\left(\mbbeta_c - \mbbeta_{m}^*\right).
+\end{align*}
+By setting the partial derivative to zero, we obtain
+\begin{align*}
+    \mbbeta_c^* &= \frac{\sum_{m \in \mcP_c} \exp\left(\mbq_n^\top \mbk_m\right)\mbbeta_{m}^*}{\sum_{m \in \mcP_c} \exp\left(\mbq_n^\top \mbk_m\right)}= \frac{\sum_{m \in \mcP_c} \exp\left(\mbq_n^\top \mbk_m\right)\mbv_{m}}{\sum_{m \in \mcP_c} \exp\left(\mbq_n^\top \mbk_m\right)}\\
+    &= \frac{\sum_{m \in \mcP_c} \E{g_m(\mbomega)}}{\sum_{m \in \mcP_c} \E{ h_m(\mbomega)}} = \frac{\E{\sum_{m \in \mcP_c} g_m(\mbomega)}}{\E{\sum_{m \in \mcP_c} h_m(\mbomega)}}.
+\end{align*}
+As a consequence, with $\mbbeta_c = \mbbeta_c^*$, the partition scheme must achieve lower weighted mean squared error than any globally shared $\widehat{\mbbeta}$, that is, $J(\mbbeta_1=\mbbeta_1^*, \dots, \mbbeta_C=\mbbeta_C^*) \leq J(\mbbeta_1=\widehat{\mbbeta}, \dots, \mbbeta_C=\widehat{\mbbeta})$.
+
+In fact, with $\mbbeta_c = \mbbeta_c^*$, the partition scheme usually enjoys much lower error than adopting a globally shared coefficient. To see the error reduction of using the partitioned strategy, we first have
+\begin{align*}
+    &J(\mbbeta_1=\widehat{\mbbeta}, \dots, \mbbeta_C=\widehat{\mbbeta}) \\
+    &= \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \norm{\widehat{\mbbeta} - \mbbeta_{m}^*}^2\\
+    &= \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \norm{\widehat{\mbbeta} - \mbbeta_c + \mbbeta_c - \mbbeta_{m}^*}^2\\
+    &= \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \norm{\widehat{\mbbeta} - \mbbeta_c + \mbbeta_c - \mbbeta_{m}^*}^2\\
+    &= \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \left(
+    \norm{\widehat{\mbbeta} - \mbbeta_c}^2 + \left(\widehat{\mbbeta} - \mbbeta_c\right)^\top\left(\mbbeta_c - \mbbeta_{m}^*\right) + \norm{\mbbeta_c - \mbbeta_{m}^*}^2\right).
+\end{align*}
+Since
+\begin{align*}
+&\sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \left(\widehat{\mbbeta} - \mbbeta_c\right)^\top\left(\mbbeta_c - \mbbeta_{m}^*\right) \\
+&= \sum_{c=1}^C \left(\widehat{\mbbeta} - \mbbeta_c\right)^\top  \sum_{m \in \mcP_c}\frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \left(\mbbeta_c - \mbbeta_{m}^*\right) \\
+&= \sum_{c=1}^C \left(\widehat{\mbbeta} - \mbbeta_c\right)^\top  \sum_{m \in \mcP_c}\frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \left(\frac{\sum_{m \in \mcP_c} \exp\left(\mbq_n^\top \mbk_m\right)\mbv_{m}}{\sum_{m \in \mcP_c} \exp\left(\mbq_n^\top \mbk_m\right)} - \mbbeta_{m}^*\right) \\
+&= \sum_{c=1}^C \left(\widehat{\mbbeta} - \mbbeta_c\right)^\top  \frac{\sum_{m \in \mcP_c} \exp\left(\mbq_n^\top \mbk_m\right)\left(\mbv_{m} - \mbbeta_{m}^*\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \\
+&= 0,
+\end{align*}
+plugging this result back we obtain
+\begin{align*}
+    &J(\mbbeta_1=\widehat{\mbbeta}, \dots, \mbbeta_C=\widehat{\mbbeta}) \\
+    &= \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \left(
+    \norm{\widehat{\mbbeta} - \mbbeta_c}^2 + \left(\widehat{\mbbeta} - \mbbeta_c\right)^\top\left(\mbbeta_c - \mbbeta_{m}^*\right) + \norm{\mbbeta_c - \mbbeta_{m}^*}^2\right)\\
+    &= \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \left(
+    \norm{\widehat{\mbbeta} - \mbbeta_c}^2 + \norm{\mbbeta_c - \mbbeta_{m}^*}^2\right)\\
+    &= \underbrace{\sum_{c=1}^C \frac{\sum_{m \in \mcP_c}\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)}
+    \norm{\widehat{\mbbeta} - \mbbeta_c}^2}_{\geq 0} + \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \norm{\mbbeta_c - \mbbeta_{m}^*}^2\\
+    &\geq \sum_{c=1}^C \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in U} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \norm{\mbbeta_c - \mbbeta_{m}^*}^2.
+\end{align*}
+The last inequality holds since the first term is always non-negative. Note that the first term computes the squared error between $\widehat{\mbbeta}$ and each ${\mbbeta}_c$, weighted by the sum of attention scores over the corresponding subset. As a result, it is usually positive and the error reduction is significant if each ${\mbbeta}_c$ deviates from $\widehat{\mbbeta}$ a lot. However, although the optimal coefficient in the partitioning always leads to lower error to the optimal individual coefficient, note that it does not necessarily yield lower estimation variance.
+\end{proof}
+\subsection{Derivation of \cref{eqn:rfa-partition-form,eqn:eva-partition-form}}
+\label{app:ssec:proof-rfa-as-correcters}
+According to the definition of $g_m(\cdot)$ and $h_m(\cdot)$ in \cref{ssec:rfa-and-cv}, for the vanilla RFA (\cref{eqn:rfa-snis}) we have
+\begin{align*}
+    \mathsf{RFA}(\mbq_n, \mbK, \mbV) 
+    &= \frac{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)}{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}} = \frac{g(\mbomega)}{ h(\mbomega)} = \frac{\sum_{m=1}^M g_m(\mbomega)}{\sum_{m=1}^M h_m(\mbomega)}.
+\end{align*}
+Besides, since $\mbv_m = g_m(\mbomega)/h_m(\mbomega)$ and $\widehat{\mbbeta}_c(\mbomega) = \left(\sum_{m \in \mcP_c} g_m(\mbomega)\right)/\left(\sum_{m \in \mcP_c} h_m(\mbomega)\right)$, we can re-write \model as
+\begin{align*}
+    \mathsf{EVA}(\mbq_n, \mbK, \mbV) &\coloneqq \widetilde{g}(\mbomega) \\
+    &= \sum_{m \in E} \widetilde{g}_m(\mbomega) + \sum_{m \notin E} \widetilde{g}_m(\mbomega) \\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)}{Z}\mbv_m + 
+        \sum_{c = 1}^C \frac{\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)}{Z}\widehat{\mbbeta}_c(\mbomega)\\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top\mbk_m)}{Z}\frac{g_m(\mbomega)}{h_m(\mbomega)}+ 
+    \sum_{c = 1}^C \frac{\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)}{Z}\frac{\sum_{m \in \mcP_c} g_m(\mbomega)}{\sum_{m \in \mcP_c} h_m(\mbomega)}.
+\end{align*}
+\section{More Implementation Details for EVA}
+\label{app:sec:eva-details}
+In this section, we provide more details of \model. We also conduct a comprehensive ablation study to test the effect of different components in our implementation and report the results in \cref{app:tb:ablation}. The pseudo-code for \model is listed in \cref{alg:eva}.
+
+
+\begin{table}[t]
+\caption{Classification results on \imagenet dataset under different hyper-parameter configurations of \model. By default, we set $|E| = 49$ and $C = 49$ across all variants below.}
+\label{app:tb:ablation}
+\centering
+\resizebox{0.9\columnwidth}{!}{    
+\begin{tabular}{l | l | c}
+\toprule[.1em]
+\multicolumn{1}{c|}{Component} & \multicolumn{1}{c|}{Specification} & Top-1 Acc. \\
+\midrule
+\multirow{2}{*}{Partition Scheme of $\{\mcP_1, \dots,\mcP_C\}$} 
+& partition over $[M] \setminus E$ & 76.53 \\
+& partition over $[M] $ & 76.39 \\
+\midrule
+\multirow{2}{*}{Parameterization of $\sigma(\cdot)$} 
+& $\sigma(\cdot) = \operatorname{LN}(\operatorname{Linear}(\cdot))$  & 76.67 \\
+& $\sigma(\cdot) = \operatorname{Identity}(\cdot)$  & 75.95 \\
+\midrule
+\multirow{2}{*}{Number of Groups ($C = 1$)}
+& Number of Samples = 1 & 74.10 \\
+& Number of Samples = 49 & 76.39 \\
+\midrule
+\multirow{2}{*}{Number of Groups ($C = 49$)}
+& Number of Samples = 1 & 76.67 \\
+& Number of Samples = 49 & 76.75 \\
+\midrule
+\multirow{4}{*}{Proposal Parameterization $q_c(\omega) \coloneqq \mathcal{N}(\omega; \mbmu_c, \mathbf{I})$} 
+& $\mbmu_c = \widetilde{\mbq}_c + \widetilde{\mbk}_c$ & 76.67 \\
+& $\mbmu_c = \widetilde{\mbq}_c$ & 76.77 \\
+& $\mbmu_c = \boldsymbol{0}$ & 76.24 \\
+& $\mbmu_c = \operatorname{Trainable\,parameters}$ & 76.39 \\
+\midrule
+\multicolumn{2}{c|}{Softmax} &  77.16 \\
+\bottomrule[.1em]
+\end{tabular}}  
+\end{table}
+
+\paragraph{Approximating $\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m)$ and Parameterizing $\widetilde{\mbk}_c$.}
+In our implementation, we approximate the sum of exponentials as
+$\sum_{m \in \mcP_c}\exp(\mbq_n^\top \mbk_m) \approx \exp(\mbq_n^\top \widetilde{\mbk}_c)$. Here we provide an informal justification for this approximation.
+
+Our main motivation for such approximation is based on the simple intuition that the sum of exponentials grows as fast as the maximum exponential value, as reflected by the following inequality,
+\begin{align*}
+    \max_{m \in \mcP_c} \exp(\mbq_n^\top \mbk_m) \leq \sum_{m \in \mcP_c} \exp(\mbq_n^\top \mbk_m) \leq |\mcP_c| \max_{m \in \mcP_c} \exp(\mbq_n^\top \mbk_m).
+\end{align*}
+This means we can approximate the sum of exponentials by first computing the group representative $\widetilde{\mbk}_c \coloneqq \argmax_{\mbk_m \in \{\mbk_m | m \in \mcP_c\}} \exp(\mbq_n^\top \mbk_m)$, evaluating the corresponding exponential $\exp(\mbq_n^\top \widetilde{\mbk}_c)$ and then multiplying it by some scalar. Since computing the argmax operation still needs to compare each exponential dot-product, it will still incur quadratic computational costs. To circumvent this, we adopt a heuristic strategy that computes a learnable group representation, which attempts to compensate for the approximation error while only evaluating one exponential dot product.
+
+
+Through preliminary experiments, we try various choices to compute the representative vector of each subset, such as max and average pooling; however, we found these strategies produce almost equally good performance. As a result, we adopt the average pooling by default due to its simplicity. To be specific, we implement it as 
+\begin{equation}
+    \widetilde{\mbk}_c = \sigma\left(\frac{1}{|\mcP_c|}\sum_{m \in \mcP_c} \mbk_m\right),\label{app:eqn:tilde-k}
+\end{equation}
+where $\sigma(\cdot)$ is a trainable linear projection with the same hidden dimension size as inputs, followed by a layer normalization operation \citep{ba2016layer} to stabilize training. We leave further improving the approximation, such as deriving tighter error bounds or using more expressive pooling methods \citep{zaheer2017deep, ou2022learning} as future work.
+
+
+\paragraph{Parameterizing $\widehat{\mbbeta}_c(\mbomega)$.}
+As discussed in \cref{ssec:cv-partially-shared}, we have
+\begin{align*}
+\widehat{\mbbeta}_c(\mbomega) &= \frac{\sum_{m \in \mcP_c} g_m(\mbomega)}{\sum_{m \in \mcP_c} h_m(\mbomega)} = \frac{\sum_{s=1}^S\frac{\mathcal{N}(\omega_s;0,\mathbf{I})}{Zq(\omega_s)}\sum_{m \in \mcP_c}\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)\mbv_m}{\sum_{s=1}^S\frac{\mathcal{N}(\omega_s;0,\mathbf{I})}{Zq(\omega_s)}\sum_{m \in \mcP_c}\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)}.
+\end{align*}
+Compared to the SNIS formulation of vanilla RFA \cref{eqn:rfa-snis}, we can express it as
+\begin{align*}
+    \mathsf{RFA}(\mbq_n, \mbK, \mbV) = \frac{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s)}{\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}} = \frac{\sum_{m=1}^M g_m(\mbomega)}{\sum_{m=1}^M h_m(\mbomega)}.
+\end{align*}
+We can think of each coefficient $\widehat{\mbbeta}_c(\mbomega)$ as computing the output of a localized RFA for each group $\mcP_c$. From this perspective, we can recast each coefficient $\widehat{\mbbeta}_c(\mbomega)$ as an SNIS estimator as well, which tries to estimate
+\begin{align*}
+\E[\omega \sim p_c(\omega)]{f_{c}(\omega)} = \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top \mbk_m\right)}{\sum_{m' \in \mcP_c} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \mbv_m  \numberthis\label{app:eqn:beta-as-snis}
+\end{align*}
+where
+\begin{align*}
+f_c(\omega) &\coloneqq \frac{\sum_{m \in \mcP_c}\xi(\mbq_n, \omega)\xi(\mbk_m, \omega)\mbv_m}{\sum_{m' \in \mcP_c}\xi(\mbq_n, \omega)\xi(\mbk_{m'}, \omega)},\\
+p_c(\omega) &\coloneqq \frac{\mathcal{N}(\omega;0,\mathbf{I}) \sum_{m \in \mcP_c}\xi(\mbq_n,\omega)^\top  \xi(\mbk_{m}, \omega)}{\sum_{m' \in \mcP_c} \exp\left(\mbq_n^\top\mbk_{m'}\right)} \\
+&= \sum_{m \in \mcP_c} \frac{\exp\left(\mbq_n^\top\mbk_{m}\right)}{\sum_{m' \in \mcP_c} \exp\left(\mbq_n^\top\mbk_{m'}\right)} \mathcal{N}(\omega; \mbq_n + \mbk_m, \mathbf{I}).
+\end{align*}
+This interpretation indicates that a good proposal distribution $q_c(\omega)$ should be specific to each subset $\mcP_c$. To get close to the true distribution $p_c(\omega)$ while keeping efficient computation, \citet{lara} suggests parameterizing the proposal distribution as 
+\begin{align*}
+    q_c(\omega) \coloneqq \mathcal{N}(\omega; \mu_c, \mathbf{I}) = \mathcal{N}(\omega; \widetilde{\mbq}_c + \widetilde{\mbk}_c, \mathbf{I}),\numberthis\label{app:eqn:proposal-distribution}
+\end{align*}
+where $\widetilde{\mbq}_c$ is calculated similarly to \cref{app:eqn:tilde-k}. We refer readers to \citet{lara} for more discussions about the parameterization choice of proposal distributions. We conduct further ablation studies to test the effect of proposal parameterizations in our proposed model, as shown in \cref{app:tb:ablation}. In particular, we found our model is robust to different parameterization approaches.
+
+
+The essence in making the algorithm memory-efficient is to use only \emph{one} sample in calculating $\widehat{\mbbeta}_c(\mbomega)$. In this case, we have
+\begin{align*}
+\widehat{\mbbeta}_c(\mbomega) &= \frac{\sum_{m \in \mcP_c} g_m(\mbomega)}{\sum_{m \in \mcP_c} h_m(\mbomega)} \\
+&= \frac{\frac{\mathcal{N}(\omega^c;0,\mathbf{I})}{Zq_c(\omega^c)}\sum_{m \in \mcP_c}\xi(\mbq_n, \omega^c)\xi(\mbk_m, \omega^c)\mbv_m}{\frac{\mathcal{N}(\omega^c;0,\mathbf{I})}{Zq_c(\omega^c)}\sum_{m \in \mcP_c}\xi(\mbq_n, \omega^c)\xi(\mbk_m, \omega^c)}\\
+&= \frac{\frac{\mathcal{N}(\omega^c;0,\mathbf{I})}{Zq_c(\omega^c)}\xi(\mbq_n, \omega^c)\sum_{m \in \mcP_c}\xi(\mbk_m, \omega^c)\mbv_m}{\frac{\mathcal{N}(\omega^c;0,\mathbf{I})}{Zq_c(\omega^c)}\xi(\mbq_n, \omega^c)\sum_{m \in \mcP_c}\xi(\mbk_m, \omega^c)}\\
+&= \frac{\sum_{m \in \mcP_c}\xi(\mbk_m, \omega^c)\mbv_m}{\sum_{m \in \mcP_c}\xi(\mbk_m, \omega^c)}, \quad\quad w^c \sim q_c(\omega).
+\end{align*}
+Since this degenerated formulation eliminates the dependence on individual queries $\mbq_n$, we could pre-compute $\widehat{\mbbeta}_c(\mbomega)$ for each $\mcP_c$, and then re-uses them for each query, which takes up $\mathcal{O}(Cd)$ memory. If multiple samples are used instead, the influence of queries needs to be explicitly taken into account and thus we need to compute a distinct $\widehat{\mbbeta}_c(\mbomega)$ for each query, leading to $\mathcal{O}(NCd)$ memory usage, which incurs a significant compute overhead.  
+
+On the other hand, if we set $C = 1$, that is, using a shared $\widehat{\mbbeta}_c(\mbomega)$ over all $m \notin E$, our approach does not suffer from this issue, since the memory usage is at most $\mathcal{O}(Nd)$. To investigate the effect of using larger $C$ or increasing the number of samples, we conduct an ablative analysis as in \cref{app:tb:ablation}, and find that 1) when $C = 1$, the performance degrades a lot when using one sample, which can be largely improved by adopting more samples; while when $C > 1$, our partitioning strategy dominates and increasing the number of samples only improves performance marginally. This also validates the effectiveness of adopting a finer-grained treatment over control variates.
+
+\paragraph{Partitioning Strategy.}
+\model significantly improves random feature approximation by trying to locally estimate each subset of tokens, which is a much easier task than approximating the whole sequence as in previous RFA methods. To achieve this, \model partitions the whole token sequence into multiple subsets according to the current query position $n$, which is denoted by $\{E^n, \mcP_1^n, \mcP_2^n, \dots, \mcP_C^n\}_{n=1}^N$.\footnote{Here we add the superscript $n$ to reflect the dependence on query position $n$.} For elements in subset $E^n$, we optimize the control variate coefficient to give an exact estimate for each single token $m \in E^n$. In addition, we impose T5-style relative positional encoding \citep{raffel2020t5} over elements in $E^n$. While for some other subset $\mcP_c$, we employ the shared coefficient to approximate all tokens belonging to $\mcP_c$.
+We assume all $E^1, \dots, E^N$ are of the same cardinality $K$, and $|\mcP_c^n|$ is the same for any $c = 1,\dots,C$ and $n = 1,\dots,N$.
+
+The partition strategy $\{E^n, \mcP_1^n, \mcP_2^n, \dots, \mcP_C^n\}_{n=1}^N$ is decided based on a simple criterion: 
+\begin{itemizesquish}
+    \item for $E^n$, it contains $K$ local neighbors with respect to each query $n$. To further simplify implementation and reduce memory usage, we chunk the whole sequence into contiguous blocks of size $K$, and all adjacent queries belonging to the same block will share this block as the subset $E^n$;
+    \item as for $\mcP_1^n, \mcP_2^n, \dots, \mcP_C^n$, we follow a similar treatment by splitting the complement $[M] \setminus E^n$ into $C$ contiguous chunks of the same size. For ease of implementation, we simply partition the whole index set $[M]$ into multiple groups instead of $[M] \setminus E^n$, which circumvents the overload for explicitly performing set difference operations in practical implementation. Although this leads to extra approximation error, this amounts to putting more attention weights on tokens belonging to the subset $E$ and we found this approximation does not lead to performance degradation (\cref{app:tb:ablation}). 
+\end{itemizesquish}
+
+\begin{algorithm}[t]
+\caption{Pseudo-code for \model}
+\label{alg:eva}
+\begin{algorithmic}
+\State \textbf{Input:} the randomized mapping $\xi(\cdot,\cdot)$, queries $\mbQ \coloneqq \{\mbq_n\}_{n=1}^N$, keys $\mbK \coloneqq \{\mbk_m\}_{m=1}^M$, values $\mbV \coloneqq \{\mbv_m\}_{m=1}^M$ and partitions of the sequence $\{E^n, \mcP_1^n, \mcP_2^n, \dots, \mcP_C^n\}_{n=1}^N$;
+\State \textbf{Output:} attention output $\mbY \coloneqq \{\mby_n\}_{n=1}^N$;
+\State
+\For{$c = 1, 2, \dots, C$}
+\State Compute $\widetilde{\mbk}_c$ according to \cref{app:eqn:tilde-k};
+\State
+\State Compute $q_c(\omega)$ according to \cref{app:eqn:proposal-distribution};
+\State Sample $\omega_c \sim q_c(\omega)$; \Comment{During inference, simply set $\omega_c = \E[q_c(\omega)]{\omega}$}
+\State Compute $\widehat{\mbbeta}_c(\mbomega) = \sum_{m \in \mcP_c^n} \frac{\xi(\mbk_{m},\omega_c)}{\sum_{m \in \mcP_c^n} \xi(\mbk_{m},\omega_c)}\mbv_{m}$;
+\EndFor
+\For{$n = 1, 2, \dots, N$}
+\State Compute $\mathcal{S} = \sum_{m \in E^n} \exp\left(\mbq_n^\top \mbk_m\right) \mbv_m$; \Comment{Compute attention scores in the selected subset $E$}
+\State Compute $\mathcal{R} = \sum_{c = 1}^C \exp\left(\mbq_n^\top \widetilde{\mbk}_c\right) \widehat{\mbbeta}_c(\mbomega)$; \Comment{Compute approx. expected control variates}
+\State Compute $Z = \sum_{m \in E^n} \exp\left(\mbq_n^\top \mbk_m\right) + \sum_{c = 1}^C \exp\left(\mbq_n^\top \widetilde{\mbk}_c\right)$;
+\State Compute $\mby_{n} = \left(\mathcal{S} + \mathcal{R}\right)/Z$;
+\EndFor
+\State{\bfseries Return} $\mbY \coloneqq[\mby_1, \dots, \mby_N]$.
+\end{algorithmic}
+\end{algorithm}
+\section{A Causal Variant of EVA}
+\label{app:sec:causal-eva}
+In this section, we describe the causal variant of \model, where each query can only attend to historical tokens. Thanks to the partitioning scheme, all future information with respect to the current query token can be masked conveniently. Following the formulation of \model, we partition the whole sequence into $C + 1$ subsets $\{E^n, \mcP_1^n, \mcP_2^n, \dots, \mcP_C^n\}$ with respect to each query $\mbq_n$. To fulfill the causal requirement, we design two different types of masking matrices to deal with both $E^n$ and $\{\mcP_c^n\}_{c=1}^C$ respectively.
+\begin{itemizesquish}
+    \item For $E^n$, we adopt a single lower-triangular matrix with shape $K \times K$ (recall that each set $E^n$ is of size $K$) to mask future tokens locally, similar to the case of standard decoder softmax attention. Future tokens that do not belong to $E^n$ are handled by masking functions for $\{\mcP_c^n\}_{c=1}^C$, as described below.
+    \item For $\{\mcP_c^n\}_{c=1}^C$, we make use of the fact $n \in E^n$. Since any $\mcP_c^n$ and $E^n$ are disjoint, we only need to mask all subsets $\mcP_c^n$ that appear after $E^n$. This amounts to first allocating a lower-triangular matrix with shape $C \times C$, and then conducting future masking at a subset level.
+\end{itemizesquish}
+The pseudo-code for the causal variant of \model is listed in \cref{alg:causal-eva}. 
+
+\begin{algorithm}[t]
+\caption{Pseudo-code for Causal \model}
+\label{alg:causal-eva}
+\begin{algorithmic}
+\State \textbf{Input:} the randomized mapping $\xi(\cdot,\cdot)$, queries $\mbQ \coloneqq \{\mbq_n\}_{n=1}^N$, keys $\mbK \coloneqq \{\mbk_m\}_{m=1}^M$, values $\mbV \coloneqq \{\mbv_m\}_{m=1}^M$, and partitions of the sequence $\{E^n, \mcP_1^n, \mcP_2^n, \dots, \mcP_C^n\}_{n=1}^N$;
+\State \textbf{Output:} attention output $\mbY \coloneqq \{\mby_n\}_{n=1}^N$;
+\State
+\For{$c = 1, 2, \dots, C$}
+\State Compute $\widetilde{\mbk}_c$ according to \cref{app:eqn:tilde-k};
+\State
+\State Compute $q_c(\omega)$ according to \cref{app:eqn:proposal-distribution};
+\State Sample $\omega_c \sim q_c(\omega)$; \Comment{During inference, simply set $\omega_c = \E[q_c(\omega)]{\omega}$}
+\State Compute $\widehat{\mbbeta}_c(\mbomega) = \sum_{m \in \mcP_c^n} \frac{\xi(\mbk_{m},\omega_c)}{\sum_{m \in \mcP_c^n} \xi(\mbk_{m},\omega_c)}\mbv_{m}$;
+\EndFor
+\State \textcolor{keywords}{Let $K \gets |E^N|$;} \Comment{we assume all $E^n$ are the same in size}
+\State \textcolor{keywords}{Initialize $\mbM^E \in \{0,1\}^{K \times K}$ such that $\mbM^E_{i,j} = \indicator_{i \leq j}$;} \Comment{Intra-$E$ masking matrix}
+\State \textcolor{keywords}{Initialize $\mbM^{\mcP} \in \{0,1\}^{C \times C}$ such that $\mbM^{\mcP}_{c,t} = \indicator_{c \leq t}$;} \Comment{Inter-$\mcP$ masking matrix}
+\For{$n = 1, 2, \dots, N$}
+\State \textcolor{keywords}{Find index $t$ such that $\mcP_t^n$ is the most recent chunk on the left of $E$;}
+\State \textcolor{keywords}{Let $b^n \gets \min_i \{i : i\in E^n\}$;} \Comment{The least position within $E^n$; used for shifting token indices.}
+\State
+\State \(\triangleright\) The same masking matrix $\mbM^E$ can be reused across $n$ via shifting token positions by $b^n$.
+\State Compute $\mathcal{S} = \sum_{m \in E^n} \textcolor{keywords}{\mbM^E_{m-b^n,n-b^n}}\exp\left(\mbq_n^\top \mbk_m\right) \mbv_m$;
+\State Compute $\mathcal{R} = \sum_{c = 1}^C \textcolor{keywords}{\mbM^{\mcP}_{c,t}}\exp\left(\mbq_n^\top \widetilde{\mbk}_c\right)  \widehat{\mbbeta}_c(\mbomega)$; 
+\State Compute $Z = \sum_{m \in E^n} \textcolor{keywords}{\mbM^E_{m-b^n,n-b^n}}\exp\left(\mbq_n^\top \mbk_m\right) + \sum_{c = 1}^C \textcolor{keywords}{\mbM^{\mcP}_{c,t}}\exp\left(\mbq_n^\top \widetilde{\mbk}_c\right)$;
+\State Compute $\mby_{n} = \left(\mathcal{S} + \mathcal{R}\right)/Z$;
+\EndFor
+\State{\bfseries Return} $\mbY \coloneqq[\mby_1, \dots, \mby_N]$.
+\end{algorithmic}
+\end{algorithm}
+\section{Experimental Details}
+\label{app:sec:experiment-details}
+All of our experiments are conducted with at most 16 NVIDIA V100 GPUs.
+\subsection{Efficient Attention Baselines}
+We compare our proposed attention mechanism \model against various baselines:
+\begin{itemizesquish}
+    \item Performer \citep{choromanski2021rethinking}, which uses the plain random features to approximate softmax attention;
+    \item LARA \citep{lara}, an advanced RF approximation that makes use of multiple adaptive proposals to construct the SNIS estimator;
+    \item Linformer \citep{wang2020linformer}, a low-rank approximation that uses a learnable matrix to project the key-value sequence into a shorter one;
+    \item Nystr\"omformer \citep{xiong2021nystromformer}, a low-rank approximation that adopts the Nystr\"om method to approximate softmax attention map with a sub-sampled matrix;
+    \item Local attention \citep{child2019generating}, a simple sparse approximation that splits the whole sequence into multiple blocks and only allows the query to attend to tokens within the same block; 
+    \item Reformer \citep{Kitaev2020reformer}, a sparse approximation where hash functions are used to adaptively distribute sequence tokens into multiple buckets, and each token can only attend to tokens within the same bucket;
+    \item Scatterbrain \citep{chen2021scatterbrain}, an approach that combines Performer and sparse attention. The details can be found in \cref{app:sec:connections}. Here we implement the sparse module as a simple local attention to ensure a fair comparison;
+    \item Combiner \citep{ren2021combiner}, a probabilistic approach that constructs a structured factorization over the softmax probability distribution via a sparse mechanism. Combiner allows both direct and indirect calculations of conditional probabilities, where the direct probability is implemented as the sparse mechanism while the indirect probability is implemented through a local abstraction over a group of tokens. Similarly, we implement the sparse mechanism as a simple local attention, which corresponds to the Combiner-Fixed variant \citep{ren2021combiner};
+    \item Transformer-LS, or Long-Short \citep{zhu2021long-short}, which is proposed to model long-term and short-term dependencies  via low-rank structures and local attention respectively. The low-rank structure is defined as an input-dependent weight matrix that compresses the sequence into a shorter one; while the local attention is defined similarly as above.
+\end{itemizesquish}
+
+Note that for all mechanisms that involve a local attention, we split the sequence into \emph{non-overlapping} blocks (or 2D windows in terms of images) and each query can only attend to tokens within the same block. We also use the relative positional embedding \citep{t5,liu2021swin} within the local attention computation. Unlike Transformer-LS \citep{zhu2021long-short} that allows each query to attend to multiple blocks, we do not use this extension as we find greatly increases memory consumption, although it does improve the model performance.
+\subsection{Image Classification}
+\label{app:ssec:image-classification-details}
+Through the experiments on image classification, we consider four different vision transformer (ViT) architectures: 
+\begin{itemizesquish}
+    \item DeiT-Tiny \citep{touvron21adeit}, which maintains the sequence length as 196 across all transformer layers. For the particular tiny variant, the number of transformer layers is set to 12, the embedding dimension is set to 196 and the number of heads is 3;
+    \item DeiT-Small \citep{touvron21adeit}, which scales the embedding dimension and number of attention heads in DeiT-Tiny up to 384 and 6, respectively;
+    \item DeiT-Tiny-784, where the architecture is the same as DeiT-Tiny but the patch size in the tokenization step is decreased from 16 to 8. This effectively increases the sequence length from 196 to 784, which we found consistently improves predictive accuracy at the cost of significantly increased time and memory consumption. Under this setting, we also see clearer differences among these attention variants and it helps better evaluate the ability of different attention models to learn visual representations;
+    \item PVT-v2-B3 \citep{pvtv2}, a pyramidal transformer architecture that processes much longer 
+    token sequences at early layers and progressively reduces the sequence length to form a hierarchical structure. It patchifies input images into 3136 ($56 \times 56$) tokens, and then processes the sequence through 4 stages. Each stage contains several transformer layers and a down-sampling operation, which reduces the sequence length by a factor of 4 and increases the embedding dimension by $2\times$. Due to the prohibitively long sequences initially, PVT applies an additional down-sampling module on input sequences to obtain key and value vectors, which are then passed through a normal softmax attention mechanism. To evaluate different RF approximations, we remove the down-sampling operation and directly operate on the original sequence length, which results in much fewer model parameters than vanilla PVT-v2-B3. We refer readers to \citet{pvtv2} for detailed architecture configurations.
+\end{itemizesquish}
+
+For training, we do not use the [CLS] token for classification \citep{touvron21adeit}; instead, we pool over the output of the last transformer layer to extract features and feed them into the classifier head. We followed the same protocol to train all model variants. Closely following DeiT \citet{touvron21adeit}, we employ the AdamW \citep{adamw} optimizer to train models for 300 epochs, where the number of warm-up epochs is 10, the learning rate is 0.001 with cosine learning rate decay \citep{cos-lr}, and batch size is set to 1024. The adopted augmentation and regularization are the same as DeiT, except that we remove repeated augmentation \citep{repeat-augment} in DeiT models as it often slows down convergence, as also observed in previous studies \citep{xiao2021early}.\footnote{we retain the repeated augmentation technique in training PVT to be consistent with the original training protocol in \citet{pvtv2}.} The specific configurations of each attention mechanism on DeiT-Tiny-784 are listed in \cref{app:tb:attention-spec-vit}. The hyper-parameter setup for each attention variant follows previous practices \citep{pvt,pvtv2,lara} closely to ensure a similar computational cost.
+
+
+\begin{table}[t]
+	\caption{Our hyper-parameter configuration for different attention mechanisms on DeiT-Tiny-784.}
+	\label{app:tb:attention-spec-vit}
+	\centering
+	\resizebox{0.8\columnwidth}{!}{    
+		\begin{tabular}{l | l | c}
+			\toprule[.1em]{Attention} & \multicolumn{2}{c}{Hyper-parameter configuration on image classification} \\
+    		\midrule
+    		\midrule
+    		Local attention & Window size & 49\\
+    		\midrule
+    		\multirow{2}{*}{Scatterbrain \citep{Kitaev2020reformer}}  
+    		& umber of random feature samples & 96 \\
+    		& Local attention window size & 49\\
+    		\midrule
+    		\multirow{1}{*}{Nystr\"omformer \citep{xiong2021nystromformer}}  
+    		& Number of landmarks & 49 \\
+    		\midrule
+    		\multirow{2}{*}{Performer \citep{choromanski2021rethinking}}  
+    		& Number of random feature samples & 128 \\
+    		& Type of random feature       & Positive\\
+    		\midrule
+    		\multirow{3}{*}{Combiner \citep{ren2021combiner}}  
+    		& Mode & Fixed \\
+    		& Span size & 49\\
+    		& Conditional distribution parameterization & DeepSets-Max\\
+    		\midrule
+    		\multirow{2}{*}{Transformer-LS \citep{zhu2021long-short}}  
+    		& Dynamic projection dimension & 16\\
+    		& Local window size & 49\\
+    		\midrule
+    		\multirow{2}{*}{\model (Ours)}  
+    		& Number of partitioned groups ($C$) & 49 \\
+    		& Size of $E$ & 49 \\
+    		\midrule
+			\bottomrule[.1em]
+	\end{tabular}}  
+\end{table}
+
+
+\paragraph{Comparison to State-of-the-Art Model Architectures.}
+We also compare our model against recent state-of-the-art (SOTA) model architectures with similar parameter sizes on \imagenet benchmark. As reported in \cref{app:tb:imagenet-sota}, we observe that PVT-v2 \citep{pvtv2} with \model greatly improves the predictive accuracy and performs competitively with recent SOTA architectures while using fewer parameters and FLOPs.
+
+\begin{table}[t]
+	\caption{Results on \imagenet dataset compared with SOTA model architectures.}
+	\label{app:tb:imagenet-sota}
+	\centering
+	\resizebox{0.7\columnwidth}{!}{    
+		\begin{tabular}{l | c | c | c}
+			\toprule[.1em]
+			Model & \# Param. & FLOPs & {Top-1 Acc.}\\
+    		\midrule
+    		\midrule
+            PVT-v1-M \citep{pvt} & 44M & 6.7G & 81.2\\
+            RegNetY-8G \citep{regnet} & 39M & 8.0G & 81.7\\
+            CvT-21 \citep{cvt} & 32M & 7.1G & 82.5\\
+            SOFT-M \citep{lu2021soft} & 45M & 7.2G & 82.9\\
+            RegNetY-16G \citep{regnet} & 84M & 16.0G & 82.9 \\
+            UniFormer-S \citep{li2022uniformer} & 22M & 3.6G & 82.9 \\
+            Swin-S \citep{liu2021swin} & 50M & 8.7G & 83.0\\
+            Swin-B \citep{liu2021swin} & 88M & 15.4G & 83.3 \\
+            RegionViT-M \citep{regionvit} & 42M & 7.9G & 83.4\\
+            ViL-M \citep{vil} & 40M & 9.1G & 83.5\\
+            Focal-S \citep{focal} & 51M & 9.1G & 83.5\\
+            PVT-v2-b3 + LARA \citep{lara} & 40M & 7.7G & 83.6\\
+            MaxViT-T \citep{tu2022maxvit} & 31M & 5.6G &  83.6 \\
+            UniFormer-B \citep{li2022uniformer} & 50M & 8.3G & 83.9 \\
+            \midrule
+            PVT-v2-b3 \citep{pvtv2} & 45M & 6.9G & 83.1\\
+            PVT-v2-b3 + \model & 36M & 7.4G & 83.7\\
+			\bottomrule[.1em]
+	\end{tabular}}  
+\end{table}
+\subsection{Machine Translation and Language Modeling}
+\label{app:ssec:nlp-details}
+Our implementation for all language tasks is based on FairSeq toolkit \citep{ott-etal-2019-fairseq}. To compare different methods, we report BLEU scores on the test set as the main metric for MT and perplexity for both Autoregressive LM and MLM tasks. For the hyper-parameters $|E|$ and $C$ in \model, we set $|E| = 2C$ by default, as we find that this choice attains a good trade-off between performance and computational costs across various tasks; while for $C$, it is determined based on previous practice for each task. Here we provide the detailed experimental protocol for each task.
+
+
+\paragraph{Masked Language Modeling.}
+Following the standard pretraining practice as in RoBERTa \citep{liu2019roberta}, in MLM, we aim to reconstruct a subset of tokens in the input sequence that are randomly masked out, which is the core element of BERT-style natural language pretraining \citep{devlin-etal-2019-bert}. This setting allows us to investigate the generalization ability of our model on larger model sizes and much more data. The task performance is measured with validation perplexity, which reflects how well the model fits the pretraining corpus and also exhibits good correlations with downstream task metrics. For the used corpus \book, we randomly select 100 books without replacement for the validation split, similar to the setup in C4 dataset \citep{t5}. For the model, we use the RoBERTa-base architecture \citep{liu2019roberta}, where all the layer normalization operations \citep{ba2016layer} are placed before attention and FFN blocks (i.e., we adopt the pre-norm architecture), which leads to much more stable training for efficient attention mechanisms. We replace all softmax attention with \model to test its effectiveness. The training setting and attention-specific parameters, which follow previous studies \citep{xiong2021simple} to ensure a similar computational cost, can be found in \cref{app:tb:mlm-hp} and \cref{app:tb:attention-spec-mlm} respectively. 
+\begin{table}[t]
+	\caption{Our hyper-parameter configuration for Masked Language Modeling (MLM).}
+	\label{app:tb:mlm-hp}
+	\centering
+	\resizebox{0.5\columnwidth}{!}{    
+		\begin{tabular}{l | c}
+			\toprule[.1em]{Hyper-parameter} & {MLM} \\
+    		\midrule
+    		Number of transformer encoder layers & 12\\
+    		Hidden size & 768 \\
+    		hidden size in FFN & 3072 \\
+    		Number of attention heads & 12 \\
+    		Batch size & 256 \\
+    		Sequence length & $\{2048, 4096\}$ \\
+    		Number of training steps & 200K \\
+    		Number of warm-up steps & 5K \\
+    		Weight decay rate & 0.01 \\
+    		Peak Learning Rate & 1e-4 \\
+    		Learning rate decay & Linear \\
+    		Optimizer & Adam \\
+    		Adam $\epsilon$ & 1e-6 \\
+    		Adam $(\beta_1, \beta_2)$ & (0.9, 0.98) \\
+    		Gradient Clipping & 0.0 \\
+    		Dropout & 0.1 \\
+    		Attention dropout (if applicable) & 0.0 \\
+			\bottomrule[.1em]
+	\end{tabular}}  
+\end{table}
+
+\begin{table}[t]
+	\caption{Our hyper-parameter configuration for different attention mechanisms on MLM task. * We used the exact positive random feature map \citep{choromanski2021rethinking} in our preliminary experiments. However, it failed to converge and exhibited substantial training instability. Therefore, we replace the positive random feature with a simple ReLU kernel function for MLM experiments, which yields better training performance.}
+	\label{app:tb:attention-spec-mlm}
+	\centering
+	\resizebox{0.8\columnwidth}{!}{    
+		\begin{tabular}{l | l | c}
+			\toprule[.1em]{Attention} & \multicolumn{2}{c}{Hyper-parameter configuration on MLM} \\
+    		\midrule
+    		\midrule
+    		Local attention & Window size & 256\\
+    		\midrule
+    		Linformer \citep{wang2020linformer} & Projected dimension & 256 \\
+    		\midrule
+    		\multirow{2}{*}{Reformer \citep{Kitaev2020reformer}}  
+    		& Number of hashes & 4 \\
+    		& Chunk size       & 64 \\
+    		\midrule
+    		\multirow{2}{*}{Performer \citep{choromanski2021rethinking}}  
+    		& Number of random feature samples & 256 \\
+    		& Type of random feature       & ReLU\textsuperscript{*} \\
+    		\midrule
+    		\multirow{1}{*}{LARA \citep{lara}}  
+    		& Number of landmarks & 256 \\
+    		\midrule
+    		\multirow{3}{*}{Combiner \citep{ren2021combiner}}  
+    		& Mode & Fixed \\
+    		& Span size & 256\\
+    		& Conditional distribution parameterization & DeepSets-Max\\
+    		\midrule
+    		\multirow{2}{*}{Transformer-LS \citep{zhu2021long-short}}  
+    		& Dynamic projection dimension & 128\\
+    		& Local window size & 256\\
+    		\midrule
+    		\multirow{2}{*}{\model (Ours)}  
+    		& Number of partitioned groups ($C$) & 128 \\
+    		& Size of $E$ & 256 \\
+    		\midrule
+			\bottomrule[.1em]
+	\end{tabular}}  
+\end{table}
+
+\paragraph{Machine Translation.}
+We follow \citet{ott-etal-2018-scaling} to process \wmt dataset, resulting in around 4.5M/3K/3K English-German sentence pairs for training/validation/testing splits, respectively, and a shared vocabulary is obtained between the source and target language of around 32K BPE types. The architecture and training specifics closely follow \citet{vaswani2017attention}, as listed in \cref{app:tb:mt-hp}. We follow the previous protocol \citet{lara} by replacing all encoder self-attention blocks in the encoder-decoder Transformer with \model. For \model, we find it beneficial to introduce an overlapping variant of $E$, where we allow $E$ to be overlapped with each other. Following previous practice in the context of local attention \citep{xiong2021simple}, $E$ not only contains all elements within the designated chunk but also additionally includes half the tokens in its \emph{neighboring} chunks. As a result, \model-$32$ corresponds to $|E|=32$ with a contiguous chunk size of 16. 
+During inference, we follow the same setup as \citet{lara} and average the last 10 model checkpoints to obtain the final model parameters. We apply beam search with size 4, length penalty 0.6, and compound split post-processing. Since the input sequences in \wmt benchmark are much shorter than the other tasks considered in this paper (with an average sequence length of around 25 tokens), we start with $C = 8$, $|E| = 16$ and gradually increase $|E|$ to test the translation performance, similar to the setup in \citet{ma2021luna, lara}. Note that increasing $C$ also leads to better translation quality, although we found the performance gain is slightly less effective than that of increasing $|E|$ (c.f. \cref{tb:ablation-imagenet,tb:ablation-mlm}).
+\begin{table}[t]
+	\caption{Our hyper-parameter configuration for machine translation.}
+	\label{app:tb:mt-hp}
+	\centering
+	\resizebox{0.6\columnwidth}{!}{    
+		\begin{tabular}{l | c}
+			\toprule[.1em]{Hyper-parameter} & {Machine Translation} \\
+    		\midrule
+    		Number of transformer encoder layers & 6\\
+                Number of transformer decoder layers & 6\\
+    		Hidden size & 512 \\
+    		hidden size in FFN & 2048 \\
+    		Number of attention heads & 8 \\
+    	    Maximum number of tokens in a batch & 32768 \\
+    		Number of training steps & 300K \\
+    		Number of warm-up steps & 6K \\
+    		Weight decay rate & 0.0 \\
+    		Peak Learning Rate & 0.0007 \\
+                Label Smoothing & 0.1 \\
+    		Learning rate decay & Inverse square root \\
+    		Optimizer & Adam \\
+    		Adam $\epsilon$ & 1e-6 \\
+    		Adam $(\beta_1, \beta_2)$ & (0.9, 0.98) \\
+    		Gradient Clipping & 5.0 \\
+    		Dropout & 0.1 \\
+    		Attention dropout (if applicable) & 0.1 \\
+			\bottomrule[.1em]
+	\end{tabular}}  
+\end{table}
+
+\paragraph{Autoregressive Language Modeling.}
+We consider \wikitext benchmark in this task, which consists of around 103M/218K/246K tokens for training/validation/testing splits, respectively. 
+We adopt the vanilla transformer decoder architecture \citep{vaswani2017attention}, replace all decoder self-attention modules in the Transformer with the causal \model mechanism, and evaluate \model under two different setups: 1) a standard 16-layer Transformer LM (with model sizes of around $247$M) as in \citet{baevski2018adaptive}, and 2) a larger 32-layer Transformer LM (with model sizes of around $450$M) as in \citet{kasai2021t2r}. We follow their hyper-parameter settings to train all models, where the corresponding configurations are listed in \cref{app:tb:autoregressive-lm-hp}. \footnote{The setup in \citet{baevski2018adaptive} can be found in the corresponding Fairseq training script: \url{https://github.com/pytorch/fairseq/blob/master/examples/language_model/README.adaptive_inputs.md}.} The vocabulary size is 267,744 with adaptive input embeddings \citep{baevski2018adaptive}.
+During training, we set the sequence length to 512 and evaluate the validation/test PPL with various context window sizes in $\{256, 480\}$, aligning with previous work \citep{baevski2018adaptive, kasai2021t2r}. For other random feature baselines, unfortunately, we failed to fully replicate their results as reported in \citet{kasai2021t2r}, where RFA in our implementation achieved a test perplexity of 29.0 even under a 449M Transformer model. For \model, we set $|E| = 128$ and $C = 64$ by default for both 16-layer and 32-layer settings, ensuring similar computational cost to previous work that also evaluates random feature methods (typically with 128 or 256 random-feature dimension size) on \wikitext language modeling task \citep{schlag21a,kasai2021t2r}.
+
+\begin{table}[t]
+	\caption{Our hyper-parameter configuration for autoregressive language modeling.}
+	\label{app:tb:autoregressive-lm-hp}
+	\centering
+	\resizebox{0.9\columnwidth}{!}{    
+		\begin{tabular}{l | c | c}
+			\toprule[.1em]{Hyper-parameter} & {LM in \citet{baevski2018adaptive}} & {LM in \citet{kasai2021t2r}} \\
+    		\midrule
+                Number of transformer decoder layers & 16 & 32 \\
+    		Hidden size & 1024 & 1024\\
+    		hidden size in FFN & 4096 & 4096\\
+    		Number of attention heads & 8 & 8\\
+    	    Number of tokens in a batch & 65536 & 65536\\
+    		Number of training steps & 286K & 286K\\
+    		Number of warm-up steps & 16K & 16K\\
+                Weight decay rate & 0.0 & 0.0 \\
+    		Peak Learning Rate & 1.0 & 1.0\\
+    		Learning rate decay & cosine & cosine\\
+    		Optimizer & nag & nag\\
+    		Gradient Clipping & 0.1 & 0.1\\
+    		Dropout & 0.3 & 0.3\\
+                LayerDrop & -- & 0.2\\
+    		Attention dropout & 0.1 & 0.1\\
+			\bottomrule[.1em]
+	\end{tabular}}  
+\end{table}
+\subsection{Experimental Settings of Efficiency Comparison}
+\label{app:ssec:time-mem-details}
+For the simulation experiment conducted in \cref{ssec:experimental-analysis}, we adopt the same transformer architecture across all attention variants. In particular, it uses 8 transformer layers, 192 embedding dimensions, and 2 attention heads so that longer sequences can fit into our devices. The batch size is set to 64 across 8 V100 GPUs, and the statistics are computed by averaging the results of 30 runs. Besides, in our ablation study, the efficiency metrics reported in \cref{tb:ablation-imagenet} and \cref{tb:ablation-mlm} are evaluated under the same setup used during training.
+
+\paragraph{Remark on Modeling Short Sequences.}
+Unfortunately, similar to most previous efficient attention baselines, \model also runs slower than softmax attention under shorter sequences (e.g., length of 128 or 256), but it soon catches up in running speed, and the reduction of memory consumption is still significant. Besides, in short-sequence settings (such as the case of DeiT-Tiny/Small with sequences of 196 tokens), \model often performs on par with or better than conventional softmax attention (see \cref{tb:deit-pvt}), whereas most previous attention variants usually perform much worse. This implies \model can achieve a better trade-off between efficiency and quality: for short sequences, \model is possible to achieve stronger performance competitive with softmax attention (despite in longer running time); while for long sequences, \model can be run much faster with less memory.
+
+\paragraph{Comparison to Memory-efficient Attention Mechanisms.}
+In this section, we conduct an empirical efficiency comparison between efficient approximate attention methods and FlashAttention, one of the memory-efficient attention mechanisms \citep{rabe2021self,dao2022flashattention} with optimized memory accesses. FlashAttention computes the exact softmax attention in an online manner without materializing the full attention matrix, achieving linear memory complexity with respect to sequence lengths; besides, both runtime and memory usage are further improved by minimizing IO accesses. We benchmark different attention modules on one NVIDIA GeForce RTX 3090 GPU, where we measure the memory usage and runtime of running a single attention block, consisting of 8 attention heads with 512 embedding dimension size, for both a forward and backward pass. As shown in \cref{app:fig:additional_time_mem}, we observe that FlashAttention achieves significant memory usage reduction for softmax attention approximation and even consumes much less memory than all considered approximate baselines under all sequence lengths. In terms of runtime, we notice that FlashAttention runs faster than most attention baselines under sequence lengths less than 2048 despite scaling quadratically, but \model, along with other more efficient approximate variants, begin to catch up at longer sequence lengths. This implies that the quadratic computational costs of softmax attention still bottleneck its runtime performance, aligning with one of the main findings in \citet{dao2022flashattention}. According to this empirical study, we observe that FlashAttention offers a general and effective technique to speed up softmax attention; since many approximate variants (including \model) exhibit a similar formulation to softmax attention (e.g., \cref{eqn:practical-eva}), we expect they can also benefit from the optimized online softmax calculation technique and memory accesses of FlashAttention \citep{dao2022flashattention}.
+
+\begin{figure}[tb]
+\centering
+\begin{subfigure}[b]{0.48\textwidth} 
+  \centering{\includegraphics[width=\textwidth]{figs/supp_memory_vs_attention.pdf}}
+  \caption{Memory consumption.}\label{app:fig:additional_mem}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth} 
+  \centering{\includegraphics[width=\textwidth]{figs/supp_runtime_vs_attention.pdf}}
+  \caption{Running time.}\label{app:fig:additional_time}
+\end{subfigure}
+\caption{
+\textbf{Left} and \textbf{right}: Additional empirical memory consumption and running time comparison for different attention mechanisms under various sequence lengths.}
+\label{app:fig:additional_time_mem}
+\vspace{-0.1in}
+\end{figure}
+\section{Experiments on Long Range Arena}
+\label{app:sec:exp:lra}
+Long Range Arena \citep[LRA;][]{tay2021long} is a lightweight benchmark that assesses the ability of efficient attention methods to model long sequences in diverse domains. We follow the same hyper-parameter setup as \citet{xiong2021nystromformer} to re-evaluate all attention baselines and report the comparison in \cref{tb:lra}. We observe that \model largely improves previous RFA methods such as Performer \citep{choromanski2021rethinking} and LARA \citep{lara}, and performs competitively with full softmax attention. Notably, \model even achieves better average results over all tasks, with higher accuracy on Image and Pathfinder benchmarks, suggesting its capability of capturing long-term dependencies. For \lra benchmark, we set all attention-specific hyper-parameters to 128 (e.g., the number of landmarks in Nystr\"omformer \citep{xiong2021nystromformer} and LARA \citep{lara}, the window size in local attention and Combiner \citep{ren2021combiner}, etc.). We set $|E| = 128$ and $C = 64$ by default for \model without any further tuning and find this setup works well.
+
+\begin{table}[t]
+	\caption{Classification accuracy (\%) on \lra benchmark with different efficient attention mechanisms.}
+	\label{tb:lra}
+	\centering
+	\resizebox{0.7\columnwidth}{!}{    
+		\begin{tabular}{lcccccc}
+            \toprule[.1em] 
+            Model & ListOps & Text & Retrieval & Image & Pathfinder & Avg. \\
+            \midrule 
+            Softmax         & \textbf{38.66} & 64.91 & 80.70 & 40.61 & 68.29 & 58.63 \\
+            Linformer       & 38.21 & 53.91 & 77.66 & 39.40 & 66.44 & 55.12 \\
+            Performer       & 29.84 & \textbf{65.30} & 77.70 & 38.29 & 66.39 & 55.50 \\
+            Reformer        & 27.12 & 63.90 & 78.08 & 42.40 & 51.90 & 52.69 \\
+            Scatterbrain    & 38.21 & 64.04 & 77.83 & 42.51 & 60.62 & 56.64 \\
+            Combiner        & 38.26 & 63.98 & 81.47 & 42.80 & 55.94 & 56.49 \\
+            LARA            & 37.10 & 64.62 & 80.82 & 38.99 & 68.96 & 58.10 \\
+            Nystr\"omformer & 38.46 & \textbf{65.28} & 80.44 & 39.71 & 68.98 & 58.57 \\
+            Local           & 38.46 & 63.70 & 80.71 & 42.25 & 68.46 & 58.72 \\
+            Long-short      & 38.56 & 63.46 & \textbf{81.73} & 40.54 & \textbf{71.28} & 59.11 \\
+            \midrule
+            \model          & \textbf{38.61} & 64.31 & 80.21 & \textbf{43.24} & 70.90 & \textbf{59.45} \\
+            \bottomrule[.1em]
+\end{tabular}}  
+\end{table}
+\section{Connections to Other Attention Mechanisms}
+\label{app:sec:connections}
+\subsection{RFA, Softmax Attention, and EVA}
+As mentioned in our main text, one of the main contributions of this work is to develop a more general framework that bridges RFA and conventional softmax attention. To see how \model (\cref{eqn:eva}) achieves this goal formally, note that if either $|E| = M$ or $C = M$, \model would be equivalent to standard softmax attention; while if we set $|E| = 0$ and $C = 1$, \model would recover vanilla RFA.
+\subsection{Connections to LARA}
+Notably, \model and LARA \citep{lara} are two efficient attention mechanisms that are both built upon the self-normalized importance sampling (SNIS) formulation of RFAs. LARA \citep{lara} puts the main focus on the proposal distribution used in SNIS and tries to design importance sampling proposals that are closer to the true underlying distribution. The proposed usage of multiple proposals further improves the estimation quality of SNIS and achieves strong empirical performance while still keeping linear complexity.
+
+In contrast to LARA, in this work we do not focus on the design choice of proposals used in importance sampling but aim to generalize the SNIS formulation further via control variates. As demonstrated in \cref{ssec:rfa-and-softmax}, our theory clearly delineates how the gap between such SNIS estimation and softmax attention can be closed by manipulating control variates. Since LARA and RFA are both SNIS estimators (their main difference lies in the choice of proposal distributions), our generalization also applies to LARA. To summarize, compared with LARA, \model is a more general framework and improves conventional RFA from an orthogonal perspective.
+\subsection{Connections to Clustered Attention}
+Clustered attention \citep{vyas2020fast} is an efficient attention mechanism that first clusters the set of queries into multiple groups, computes the mean centroid of each group, and then performs attention between query centroids and original key-value pairs. This framework is fast and effective and enjoys well-bounded approximation error.
+
+Clustered attention and \model share some similarities in two aspects. First, both of them adopt the partitioning technique to reduce the computational complexity while remaining effective; and secondly, both observe that the efficient attention mechanism can be improved by refining the approximation over specific elements. For instance, clustered attention can be improved \citep{vyas2020fast} by selecting top-$k$ key-value pairs that are most relevant to each centroid and then refining the approximation by recomputing attention weights over these keys using original queries; while \model notices that we can directly employ the optimal control variate coefficient for a subset of key-value pairs ($m \in E$) while still remaining efficient, which yields a more accurate approximation. 
+
+Nevertheless, our main technical contribution is to develop a control variate formulation in the context of RFA and demonstrate that how RFA can be further improved locally. On the other hand, while clustered attention \citep{vyas2020fast} clusters queries, \model partitions key-value pairs. This property makes \model more amenable to the case of autoregressive language modeling since we do not impose clustering structures over the query set, and thus the causal relation among queries can be well maintained.
+\subsection{Connections to Combiner}
+Combiner \citep{ren2021combiner} is a recently proposed attention mechanism that also partitions the sequence into chunks combined with local attention. The key difference between \model and Combiner is the motivation, where Combiner introduces a structured factorization over the attention probability distribution, while our approach is built from the control variate perspective.
+\subsection{Connections to Scatterbrain}
+In this section, we show that Scatterbrain \citep{chen2021scatterbrain} can be cast as a special case of our framework \model, although they are proposed based on quite different motivations. 
+\paragraph{A Brief Review of Scatterbrain.}
+Scatterbrain \citep{chen2021scatterbrain} notes that sparse attention and RFA can approximate sharp and flat regions of the softmax attention matrix well, respectively. Based on this insight, Scatterbrain is proposed to first compute a Performer approximation to softmax attention and then cancel out the approximation error on critical regions via a sparse mechanism.
+
+Specifically, Scatterbrain \citep{chen2021scatterbrain} defines a sparse matrix $\mbS \in \R^{N \times M}$) so that for each $(n,m) \in \mbS$ that indexes a non-zero entry. For notational simplicity, we also denote $\operatorname{Supp}(\mbS) = \{(i,j) |S_{ij} \neq 0\}$ and $\operatorname{Supp}_n(\mbS) = \{m |S_{nm} \neq 0\}$. With random features $\mbphi(\cdot,\cdot)$ defined in \cref{app:sec:rfa}, we let 
+\begin{align*}
+    S_{nm} = \exp\left(\mbq_n^\top \mbk_m\right) - \mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega).
+\end{align*}
+We then add it back to the approximate output:
+\begin{align*}
+    y'_{n} &= \sum_{m=1}^M\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m + \mbS\mbV \\
+    &= \sum_{m=1}^M\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m + \sum_{m' \in \operatorname{Supp}_n(\mbS)} S_{nm'}\mbv_{m'} \\
+    &= \sum_{m \notin \operatorname{Supp}_n(\mbS)} \mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m + \sum_{m' \in \operatorname{Supp}_n(\mbS)} \exp\left(\mbq_n^\top \mbk_{m'}\right)\mbv_{m'}.\numberthis\label{app:eqn:scatterbrain:1}
+\end{align*}
+The sparse mechanism can be thought of as modeling the error due to RFA and eliminating it on the support of $\mbS$. After the correction step, Scatterbrain further adds a post-hoc normalization step to obtain a normalized attention output:
+\begin{align*}
+    y_{n} &= \frac{\sum_{m \notin \operatorname{Supp}_n(\mbS)} \mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m + \sum_{m' \in \operatorname{Supp}_n(\mbS)} \exp\left(\mbq_n^\top \mbk_{m'}\right)\mbv_{m'}}{\sum_{m \notin \operatorname{Supp}_n(\mbS)} \mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega) + \sum_{m' \in \operatorname{Supp}_n(\mbS)} \exp\left(\mbq_n^\top \mbk_{m'}\right)}.\numberthis\label{app:eqn:normalized_scatterbrain}
+\end{align*}
+Intuitively, Scatterbrain \citep{chen2021scatterbrain} produces accurate approximation in the support of the sparse matrix and remains the random feature approximation outside the support. 
+
+
+\paragraph{Scatterbrain is a Special Case of EVA.}
+For notational convenience, we denote $E \coloneqq \operatorname{Supp}_n(\mbS)$. According to \cref{prop:optimal-beta}, suppose we employ optimal coefficients $\widehat{\mbbeta}_m$ for all entries in $\operatorname{Supp}_n(\mbS)$, and use the same coefficient $\widehat{\mbbeta}$ for all the remaining entries (in other words, we let $C = 1$ and the whole index set is only partitioned into two subsets $\{E, [M] \setminus E\}$). Then we have
+\begin{align*}
+\widetilde{g}_m(\mbomega) = 
+\begin{cases}
+g_m(\mbomega) - \widehat{\mbbeta}_m h_m(\mbomega) + \widehat{\mbbeta}_m \frac{\exp(\mbq_n^\top \mbk_m)}{Z} = \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z}, &\text{ if } m \in E,\\
+g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega) + \widehat{\mbbeta} \frac{\exp(\mbq_n^\top \mbk_m)}{Z}, &\text{ if } m \notin E.
+\end{cases}
+\end{align*}
+And the resulting estimator overall becomes
+\begin{align*}
+    \widetilde{g}(\mbomega) 
+    &= \sum_{m=1}^M \widetilde{g}_m(\mbomega)\\
+    &= \sum_{m \in E} \widetilde{g}_m(\mbomega) + \sum_{m \notin E} \widetilde{g}_m(\mbomega)\\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} + \sum_{m \notin E} \left(g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega) + \widehat{\mbbeta}\frac{\exp(\mbq_n^\top \mbk_m)}{Z}\right)\\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} + \sum_{m \notin E} \left(g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega)\right) + \widehat{\mbbeta}\sum_{m \notin E}\frac{\exp(\mbq_n^\top \mbk_m)}{Z}\\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} + \sum_{m \notin E} \left(g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega)\right) + \widehat{\mbbeta}\left(1 - \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)}{Z}\right).
+\end{align*}
+Scatterbrain \citep{chen2021scatterbrain} can be a special case of this estimation algorithm if we set the proposal distribution to $q(\omega) = \mathcal{N}(\omega;0,\mathbf{I})$, and estimate the normalizing constant as follows.
+\begin{align*}
+    Z &= \E[\omega \sim q(\omega)]{\frac{\mathcal{N}(\omega;0,\mathbf{I}) \left(\sum_{m \in E}\xi(\mbq_n,\omega)^\top  \xi(\mbk_{m}, \omega) + \sum_{m \notin E}\xi(\mbq_n,\omega)^\top  \xi(\mbk_{m}, \omega)\right)}{q(\omega)}} \\
+    &= \sum_{m \in E} \exp(\mbq_n^\top \mbk_m) + \E[\omega \sim q(\omega)]{\frac{\mathcal{N}(\omega;0,\mathbf{I}) \sum_{m \notin E}\xi(\mbq_n,\omega)^\top  \xi(\mbk_{m}, \omega)}{q(\omega)}}\\
+    &\approx \sum_{m \in E} \exp(\mbq_n^\top \mbk_m) +  \frac{1}{S}\sum_{s=1}^S \frac{\mathcal{N}(\omega;0,\mathbf{I}) \sum_{m \notin E}\xi(\mbq_n,\omega)^\top  \xi(\mbk_{m}, \omega)}{q(\omega_s)}\\
+    &= \sum_{m \in E} \exp(\mbq_n^\top \mbk_m) +  \frac{1}{S}\sum_{s=1}^S \sum_{m \notin E}\xi(\mbq_n,\omega)^\top  \xi(\mbk_{m}, \omega)\\
+    &= \sum_{m \in E} \exp(\mbq_n^\top \mbk_m) +  \sum_{m \notin E}\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\\ 
+    &\coloneqq \sum_{m \in E} \exp(\mbq_n^\top \mbk_m) +  \sum_{m \notin E}\widetilde{h}_m(\mbomega),
+\end{align*}
+where we define $\widetilde{h}_m(\mbomega) = Zh_m(\mbomega)$, as in this case
+\begin{align*}
+g(\mbomega) &= \frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)}f(\omega_s) = \frac{1}{S}\sum_{s=1}^S\frac{1}{Z}\sum_{m=1}^M\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)\mbv_m,  \\
+h(\mbomega) &= \frac{1}{S}\sum_{s=1}^S\frac{p_n(\omega_s)}{q(\omega_s)} = \frac{1}{S}\sum_{s=1}^S\frac{1}{Z}\sum_{m=1}^M\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s).
+\end{align*}
+With these specifications, we obtain
+\begin{align*}
+    \widetilde{g}(\mbomega) 
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} + \sum_{m \notin E} \left(g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega)\right) + \widehat{\mbbeta}\left(1 - \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)}{Z}\right)\\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} + \sum_{m \notin E} \left(g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega)\right) +  \widehat{\mbbeta}\frac{Z - \sum_{m \in E} \exp(\mbq_n^\top \mbk_m)}{Z}\\
+    &\approx \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} + \sum_{m \notin E} \left(g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega)\right) +  \widehat{\mbbeta}\frac{\sum_{m \notin E}\widetilde{h}_m(\mbomega)}{Z}\\
+    &= \sum_{m \in E} \frac{\exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} + \sum_{m \notin E} \left(g_m(\mbomega) - \widehat{\mbbeta} h_m(\mbomega)\right) +  \widehat{\mbbeta}\sum_{m \notin E}{h}_m(\mbomega)\\
+    &= \frac{\sum_{m \in E} \exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} +  \sum_{m \notin E}g_m(\mbomega)\\
+    &= \frac{\sum_{m \in E} \exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} +  \sum_{m \notin E}\frac{\frac{1}{S}\sum_{s=1}^S\xi(\mbq_n, \omega_s)\xi(\mbk_m, \omega_s)\mbv_m}{Z}\\ 
+    &= \frac{\sum_{m \in E} \exp(\mbq_n^\top \mbk_m)\mbv_m}{Z} +  \sum_{m \notin E}\frac{\mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m}{Z}\\ 
+    &\approx \frac{\sum_{m \notin E} \mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega)\mbv_m + \sum_{m' \in E} \exp\left(\mbq_n^\top \mbk_{m'}\right)\mbv_{m'}}{\sum_{m \notin E} \mbphi(\mbq_n, \mbomega)^\top \mbphi(\mbk_m, \mbomega) + \sum_{m' \in E} \exp\left(\mbq_n^\top \mbk_{m'}\right)} \numberthis\label{eqn:scatterbrain}
+\end{align*}
+which is equivalent to Scatterbrain (\cref{app:eqn:normalized_scatterbrain}). Note that this equivalence would hold irrespective of the choice of shared coefficients $\widehat{\mbbeta}$, which possibly indicates that the formulation of Scatterbrain limits the potential benefit of optimizing control variates under our framework.

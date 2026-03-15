@@ -342,8 +342,9 @@ def main():
                         help="Max examples per (figure_type, scenario) cell for smoke test")
     args = parser.parse_args()
 
-    results_path = "data/eval/figure_type_analysis/figure_type_results.json"
-    output_dir = Path("data/eval/figure_type_analysis")
+    # results_path = "data/eval/figure_type_analysis/figure_type_results.json"
+    results_path = "data/eval/qwen3_30b/figure_type_analysis/figure_type_results.json"
+    output_dir = Path("data/eval/qwen3_30b/figure_type_analysis")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     output_path = str(output_dir / "feedback_by_figure_type.md")

@@ -1,0 +1,613 @@
+\section{Introduction}
+Gaussian process (GP, \cite{Rasmussen+Williams:2006}) models provide a plug \& play interpretable approach to probabilistic modelling, and would perhaps be more widely applied if not for their associated computational complexity: na\"ive implementations of GPs require the construction and decomposition of a kernel matrix at cost $\bigO(n^3)$, where $n$ is the number of data. In this work, we consider GP time series (\ie\ GPs with one input dimension). In this case, construction of the kernel matrix can be avoided by exploiting the (approximate) Markov structure of the process and re-writing the model as a linear Gaussian state space model, which can then be solved using Kalman filtering (see, \eg, \cite{Sarkka:2013}). The Kalman filter costs $\bigO(m^3n)$, where $m$ is the dimension of the state space. We propose the Infinite-Horizon GP approximation (IHGP), which reduces the cost to $\bigO(m^2n)$. 
+
+As $m$ grows with the number of kernel components in the GP prior, this cost saving can be significant for many GP models where $m$ can reach hundreds. For example, the automatic statistician \cite{Duvenaud+Lloyd+Grosse+Tenenbaum+Ghahramani:2013} searches for kernels (on 1D datasets) using sums and products of kernels. The summing of two kernels results in the concatenation of the state space (sum of the $m$s) and a product of kernels results in the Kronecker sum of their statespaces (product of $m$s). This quickly results in very high state dimensions; we show results with a similarly constructed kernel in our experiments.
+
+We are concerned with real-time processing of long (or streaming) time-series with short and long length-scale components, and non-Gaussian noise/likelihood and potential non-stationary structure. We show how the IHGP can be applied in the streaming setting, including efficient estimation of the marginal likelihood and associated gradients, enabling on-line learning of hyper (kernel) parameters. We demonstrate this by applying our approach to a streaming dataset of two million points, as well as providing an implementation of the method on an iPhone, allowing on-line learning of a GP model of the phone's acceleration. 
+
+For data where a Gaussian noise assumption may not be appropriate, many approaches have been proposed for approximation (see, \eg, \cite{Nickisch+Rasmussen:2008} for an overview). Here we show how to combine Assumed Density Filtering (ADF, a.k.a.\ single-sweep Expectation Propagation, EP \cite{Minka:2001,Csato+Opper:2002,Heskes+Zoeter:2002}) with the IHGP. We are motivated by the application to Log-Gaussian Cox Processes (LGCP, \cite{Moller+Syversveen+Waagepetersen:1998}). Usually the LGCP model uses binning to avoid a doubly-intractable model; in this case it is desirable to have more bins in order to capture short-lengthscale effects, leading to more time points. Additionally, the desire to capture long-and-short-term effects means that the state space dimension $m$ can be large. We show that our approach is effective on standard benchmarks (coal-mining disasters) as well as a much larger dataset (airline accidents).
+
+The structure of the paper is as follows. Sec.~\ref{sec:background} covers the necessary background and notation related to GPs and state space solutions. Sec.~\ref{sec:inf-hor}  leverages the idea of steady-state filtering to derive IHGP. Sec.~\ref{sec:experiments} illustrates the approach on several problems, and the supplementary material contains additional examples and a nomenclature for easier reading. Code implementations in \textsc{Matlab}/C++/Objective-C and video examples of real-time operation are available at \url{https://github.com/AaltoML/IHGP}.
+
+\begin{figure}[!t]
+  \centering\scriptsize
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},clip=true,scale only axis,axis on top,clip marker paths,legend style={row sep=0pt},legend columns=-1,xlabel near ticks}
+  \setlength{\figurewidth}{.4\textwidth}
+  \setlength{\figureheight}{.6\figurewidth}
+
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/sinc-example.tex}
+
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/sinc-lik.tex}
+
+  \end{subfigure}  
+
+  \caption{(Left)~GP regression with $n=100$ observations and a Mat\'ern covariance function. The IHGP is close to exact far from boundaries, where the constant marginal variance assumption shows. (Right)~Hyperparameters $\vtheta = (\sigma_\mathrm{n}^2, \sigma^2, \ell)$ optimised independently for both models.}
+  \label{fig:sinc}
+
+\end{figure}
+\section{Background}
+\label{sec:background}
+We are concerned with GP models \cite{Rasmussen+Williams:2006} admitting the form:
+  $f(t) \sim \mathrm{GP}(\mu(t), \kappa(t,t'))$ and  $\vy \mid \vf\sim\prod_{i=1}^{n} p(y_{i} \mid f(t_{i}))$,
+where the data $\mathcal{D} = \{(t_i, y_i)\}_{i=1}^n$ are input--output pairs, $\mu(t)$ the mean function, and $\kappa(t,t')$ the covariance function of the GP prior. The likelihood factorizes over the observations. This family covers many standard modelling problems, including regression and classification tasks. Without loss of generality, we present the methodology for zero-mean ($\mu(t):=0$) GP priors. We approximate posteriors of the form (see \cite{Rasmussen+Nickisch:2010} for an overview):
+\begin{equation}\label{eq:posterior}
+  q(\vf \mid \mathcal{D}) = \mathrm{N}(\vf \mid \MK\valpha, (\MK^{-1}+\MW)^{-1}),
+\end{equation}
+where $K_{i,j} = \kappa(t_i,t_j)$ is the prior covariance matrix, $\valpha \in \R^n$, and the (likelihood precision) matrix is diagonal, $\MW=\mathrm{diag}(\vw)$. Elements of $\vw\in\R^n$ are non negative for log-concave likelihoods. The predictive mean and marginal variance for a test input $t_*$ is $\mu_{\mathrm{f},*} = \vk_*\T \valpha$ and $\sigma^2_{\mathrm{f},*} = k_{**} - \vk_*\T ( \MK + \MW^{-1} )^{-1} \vk_*$.
+A probabilistic way of learning the hyperparameters $\vtheta$ of the covariance function (such as magnitude and scale) and the likelihood model (such as noise scale) is by maximizing the (log) marginal likelihood function $p(\vy \mid \vtheta)$ \cite{Rasmussen+Williams:2006}.
+
+Numerous methods have been proposed for dealing with the prohibitive computational complexity of the matrix inverse in dealing with the latent function in Eq.~\eqref{eq:posterior}. While general-purpose methods such as inducing input \cite{Quinonero-Candela+Rasmussen:2005,Titsias:2009,Snelson+Ghahramani:2006,Bui+Yan+Turner:2017}, basis function projection \cite{Lazaro-Gredilla+Quinonero-Candela+Rasmussen+Figueiras-Vidal:2010,Hensman+Durrande+Solin:2018,Solin+Sarkka:2014-hilbert}, interpolation approaches \cite{Wilson+Nickisch:2015-ICML}, or stochastic approximations \cite{Hensman+Fusi+Lawrence:2013,Krauth+Bonilla+Cutajar+Filippone:2017} do not pose restrictions to the input dimensionality, they scale poorly in long time-series models by still needing to fill the extending domain (see discussion in \cite{Bui+Turner:2014}). For certain problems tree-structured approximations \cite{Bui+Turner:2014} or band-structured matrices can be leveraged. However, \cite{Reece+Roberts:2010,Hartikainen+Sarkka:2010,Sarkka+Solin+Hartikainen:2013,Nickish+Solin+Grigorievskiy:2018} have shown that for one-dimensional GPs with high-order Markovian structure, an {\em optimal} representation (without approximations) is rewriting the GP in terms of a state space model and solving inference in {\em linear} time by sequential Kalman filtering methods. We will therefore focus on building upon the state space methodology.
+\subsection{State space GPs}
+In one-dimensional GPs (time-series) the data points feature the special property of having a natural ordering. If the GP prior itself admits a Markovian structure, the GP model can be reformulated as a state space model. Recent work has focused on showing how many widely used covariance function can be either exactly (\eg, the half-integer Mat\'ern class, polynomial, noise, constant) or approximately (\eg, the squared-exponential/RBF, rational quadratic, periodic, \etc) converted into state space models.
+In continuous time, a simple dynamical system able to represent these covariance functions is given by the following linear time-invariant stochastic differential equation (see \cite{Sarkka+Solin:inpress}):
+\begin{equation}\label{eq:sde}
+  \dot{\vf}(t)=\MF\,\vf(t)+\ML\,\vw(t), \quad y_{i} \sim p(y_{i} \mid \vh\T\,\vf(t_{i})),
+\end{equation}
+where $\vw(t)$ is an $s$-dimensional white noise process, and $\MF\in\R^{m\times m}$, $\ML\in\R^{m\times s}$, $\vh\in\R^{m\times 1}$ are the feedback, noise effect, and measurement matrices, respectively. The driving process $\vw(t)\in\mathbb{R}^{s}$ is a multivariate white noise process with spectral density matrix $\MQ_{c}\in\mathbb{R}^{s\times s}$. The initial state is distributed according to $\vf_{0}\sim\mathrm{N}(\mathbf{0},\MP_{0})$. For discrete input values $t_i$, this translates into
+\begin{equation}\label{eq:ss}
+  \vf_{i} \sim \mathrm{N}(\MA_{i-1}\vf_{i-1},\MQ_{i-1}), \quad 
+    y_{i} \sim p(y_{i} \mid \vh\T\vf_{i}),
+\end{equation}
+with $\vf_{0}\sim\mathrm{N}(\mathbf{0},\MP_{0})$. The discrete-time dynamical model is solved through a matrix exponential $\MA_{i} = \exp(\MF\,\Delta t_{i})$, where $\Delta t_{i}=t_{i+1}-t_{i}\ge0$.
+For stationary covariance functions, $\kappa(t,t')=\kappa(t-t')$, the process noise covariance is given by $\MQ_{i}=\MP_{\infty}-\MA_{i}\,\MP_{\infty}\,\MA_{i}\T$. The stationary state (corresponding to the initial state $\MP_0$) is distributed by $\vf_{\infty}\sim\mathrm{N}(\mathbf{0},\MP_{\infty})$ and the stationary covariance can be found by solving the Lyapunov equation
+  $\dot{\MP}_{\infty}=\MF\,\MP_{\infty}+\MP_{\infty}\,\MF\T+\ML\,\MQ_{c}\,\ML\T=\mathbf{0} $. Appendix~\ref{sec:Matern-example} shows an example of representing the Mat\'ern ($\nu=\nicefrac{3}{2}$) covariance function as a state space model. Other covariance functions have been listed in \cite{Solin:2016}.
+\subsection{Bayesian filtering}
+The closed-form solution to the linear Bayesian filtering problem---Eq.~\eqref{eq:ss} with a Gaussian likelihood $\mathrm{N}(y_i \mid \vh\T\vf_i, \sigma_\mathrm{n}^2)$---is known as the Kalman filter \cite{Sarkka:2013}. The interest is in the following marginal distributions:
+  $p(\vf_i \mid y_{1:i-1}) = \mathrm{N}(\vf_i \mid \vm^\mathrm{p}_i, \MP^\mathrm{p}_i)$ 
+   (predictive distribution),
+  $p(\vf_i \mid y_{1:i})   = \mathrm{N}(\vf_i \mid \vm^\mathrm{f}_i, \MP^\mathrm{f}_i)$ 
+   (filtering distribution), and
+  $p(y_i \mid y_{1:i-1})   = \mathrm{N}(y_i \mid v_i, s_i)$
+   (decomposed marginal likelihood).
+The predictive state mean and covariance are given by $\vm^\mathrm{p}_{i} = \MA_{i} \, \vm^\mathrm{f}_{i-1}$ and $\MP^\mathrm{p}_{i} = \MA_{i} \, \MP^\mathrm{f}_{i-1} \, \MA_{i}\T+\MQ_{i}$. The so called `innovation' mean and variances $v_i$ and $s_i$ are
+\begin{align} \label{eq:innovations}
+  v_i = y_i - \vh\T \vm^\mathrm{p}_{i} \qquad \text{and} \qquad
+  s_i = \vh\T \MP^\mathrm{p}_{i} \, \vh + \sigma_\mathrm{n}^2.
+\end{align}
+The log marginal likelihood can be evaluated during the filter update steps by $\log p(\vect{y}) = -\sum_{i=1}^n \frac{1}{2}(\log2\pi s_{i}+v_{i}^{2}/s_{i})$. The filter mean and covariances are given by
+\begin{equation} \label{eq:kalman-filter}
+  \vk_i = \MP^\mathrm{p}_{i} \, \vh / s_i, \qquad
+  \vm^\mathrm{f}_{i} = \vm^\mathrm{p}_{i-1} + \vk_i \, v_i, \qquad 
+  \MP^\mathrm{f}_{i} = \MP^\mathrm{p}_{i} - \vk_i \, \vh\T \MP^\mathrm{p}_{i},
+\end{equation}
+where $\vk_i \in \R^m$ represents the filter {\em gain} term. In batch inference, we are actually interested in the so called {\em smoothing} solution, $p(\vf \mid \mathcal{D})$ corresponding to marginals $p(\vf_i \mid y_{1:n}) = \mathrm{N}(\vf_i \mid \vm^\mathrm{s}_i, \MP^\mathrm{s}_i)$. The smoother mean and covariance is solved by the backward recursion, from $i=n-1$ backwards to $1$:
+\begin{equation} \label{eq:rts-smoother}
+  \vm^\mathrm{s}_{i} = \vm^\mathrm{f}_{i} + \MG_i \, (\vm^\mathrm{s}_{i+1} - \vm^\mathrm{p}_{i+1}), \qquad
+  \MP^\mathrm{s}_{i} = \MP^\mathrm{f}_{i} + \MG_i \,(\MP^\mathrm{s}_{i+1} - \MP^\mathrm{p}_{i+1}) \, \MG_i\T,  
+\end{equation}
+where $\MG_i = \MP^\mathrm{f}_{i} \, \MA_{i+1}\T \, [\MP^\mathrm{p}_{i+1}]^{-1}$ is the smoother {\em gain} at $t_i$. The computational complexity is clearly {\em linear} in the number of data $n$ (recursion repetitions), and {\em cubic} in the state dimension $m$ due to matrix--matrix multiplications, and the matrix inverse in calculation of $\MG_i$.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{figure}[!t]
+  \centering\scriptsize
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},clip=true,scale only axis,axis on top,clip marker paths, xlabel near ticks}
+  \setlength{\figurewidth}{.4\textwidth}
+  \setlength{\figureheight}{.6\figurewidth}
+
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/cov-vs-noise.tex}
+
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/gain-vs-noise.tex}
+
+  \end{subfigure}  
+
+  \caption{(Left)~Interpolation of $\MP^{\mathrm{p}}$ (dots solved, solid interpolated). The dashed lines show elements in $\MP_\infty$ (prior stationary state covariance). (Right)~The Kalman gain $\vk$ evaluated for the $\MP^{\mathrm{p}}$s.}
+  \label{fig:vs-noise}
+
+\end{figure}
+\section{Infinite-horizon Gaussian processes}
+\label{sec:inf-hor}
+We now tackle the cubic computational complexity in the state dimensionality by seeking infinite-horizon approximations to the Gaussian process. In Sec.~\ref{sec:steady-state-kf} we revisit traditional steady-state Kalman filtering (for Gaussian likelihood, equidistant data) from quadratic filter design (see, \eg, \cite{Maybeck:1979} and \cite{Gustafsson:2000} for an introduction), and extend it to provide approximations to the marginal likelihood and its gradients. Finally, we present an infinite-horizon framework for non-Gaussian likelihoods.
+\subsection{Steady-state Kalman filter for $t \to \infty$}
+\label{sec:steady-state-kf}
+In steady-state Kalman filtering (see \cite{Gustafsson:2000}, Ch.~8.4, or \cite{Anderson+Moore:1979}, Ch.~4, for the traditional perspective) we assume $t \gg \ell_\mathrm{eff}$, where $\ell_\mathrm{eff}$ is the longest time scale in the covariance function, and equidistant observations in time ($\MA_i := \MA$ and $\MQ_i := \MQ$). After several $\ell_\mathrm{eff}$ (as $t \to \infty$), the filter gain converges to the stationary limiting Kalman filter gain $\vk$. The resulting filter becomes time-invariant, which introduces approximation errors near the boundaries (\cf\ Fig.~\ref{fig:sinc}).
+
+In practice, we seek a stationary filter state covariance (corresponding to the stationary Kalman gain) $\hat{\MP}^\mathrm{f}$. Solving for this matrix thus corresponds to seeking a covariance that is equal between two consecutive filter recursions. Directly from the Kalman filtering forward prediction and update steps (in Eq.~\ref{eq:kalman-filter}), we recover the recursion (by dropping dependency on the time step):
+\begin{equation}\label{eq:Pp-dare}
+  \hat{\MP}^\mathrm{p} = \MA \, \hat{\MP}^\mathrm{p} \, \MA\T - \MA \, \hat{\MP}^\mathrm{p} \, \vh \, (\vh\T \hat{\MP}^\mathrm{p} \, \vh + \sigma_\mathrm{n}^2)^{-1} \, \vh\T  \hat{\MP}^\mathrm{p} \, \MA\T + \MQ.
+\end{equation}
+This equation is of the form of a discrete algebraic Riccati equation (DARE, see, \eg, \cite{Lancaster+Rodman:1995}), which is a type of nonlinear matrix equation that often arises in the context of infinite-horizon optimal control problems. Since $\sigma_\mathrm{n}^2>0$, $\MQ$ is P.S.D., and the associated state space model being both stabilizable and observable, the DARE has a unique stabilising solution for $\hat{\MP}^\mathrm{p}$ that can be found either by iterating the Riccati equation or by matrix decompositions. The Schur method by \citet{Laub:1979} solves the DARE in $\mathcal{O}(m^3)$, is numerically stable, and widely available in matrix libraries (Python \texttt{scipy.linalg.solve\_discrete\_are}, \textsc{Matlab} Control System Toolbox \texttt{DARE}, see also SLICOT routine \texttt{SB02OD}).
+
+The corresponding stationary gain is $\vk = \hat{\MP}^\mathrm{p}\,\vh/(\vh\T \hat{\MP}^\mathrm{p} \, \vh + \sigma_\mathrm{n}^2)$. Re-deriving the filter recursion with the stationary gain gives a simplified iteration for the filter mean (the covariance is now time-invariant):
+\begin{equation}\label{eq:steady-state}
+  \hat{\vm}^\mathrm{f}_{i} = 
+    (\MA - \vk \, \vh\T \MA) \, \hat{\vm}^\mathrm{f}_{i-1} + \vk \, y_{i} \quad \text{and} \quad \hat{\MP}^\mathrm{f} = \hat{\MP}^\mathrm{p} - \vk\,\vh\T\hat{\MP}^\mathrm{p},
+\end{equation}
+for all $i=1,2,\ldots,n$. This recursive iteration has a computational cost associated with one $m \times m$ matrix--vector multiplication, so the overall computational cost for the forward iteration is $\mathcal{O}(n\,m^2)$ (as opposed to the $\mathcal{O}(n\,m^3)$  in the Kalman filter). 
+
+
+
+\paragraph{Marginal likelihood evaluation:}
+The approximative log marginal likelihood comes out as a by-product of the filter forward recursion: $ \log p(\vy) \approx -\frac{n}{2} \, \log 2\pi\hat{s} - \sum_{i=1}^n \hat{v}_i^2/(2\, \hat{s})$, where the stationary innovation covariance is given by $\hat{s} = \vh\T \hat{\MP}^\mathrm{p} \, \vh + \sigma_\mathrm{n}^2$ and the innovation mean by $\hat{v}_i = y_i - \vh\T\MA\,\hat{\vm}^\mathrm{f}_{i-1}$.
+
+\paragraph{Steady-state backward pass:} To obtain the complete infinite-horizon solution, we formally derive the solution corresponding to the smoothing distribution $p(\vf_i \mid y_{1:n}) \approx \mathrm{N}(\vf_i \mid \hat{\vm}^\mathrm{s}_i, \hat{\MP}^\mathrm{s})$, where $\hat{\MP}$ is the stationary state covariance. Establishing the backward recursion does not require taking any additional limits, as the smoother gain is only a function of consecutive filtering steps. Re-deriving the backward pass in Equation~\eqref{eq:rts-smoother} gives the time-invariant smoother gain and posterior state covariance
+\begin{equation}\label{eq:stat-smooth}
+  \MG = \hat{\MP}^\mathrm{f} \, \MA\T \, [\MA\,\hat{\MP}^\mathrm{f}\,\MA\T + \MQ]^{-1} \quad \text{and} \quad
+  \hat{\MP}^\mathrm{s} = \MG \, \hat{\MP}^\mathrm{s} \, \MG\T + \hat{\MP}^\mathrm{f} - \MG \, (\MA\,\hat{\MP}^\mathrm{f}\,\MA\T + \MQ) \, \MG\T,
+\end{equation}
+where $\hat{\MP}^\mathrm{s}$ is implicitly defined in terms of the solution to a DARE. The backward iteration for the state mean: $\hat{\vm}^\mathrm{s}_{i} = \hat{\vm}^\mathrm{f}_i + \MG \, (\hat{\vm}^\mathrm{s}_{i+1} - \MA \, \hat{\vm}^\mathrm{f}_{i})$. Even this recursion scales as $\mathcal{O}(n\,m^2)$.
+
+
+
+
+
+
+
+
+
+
+\begin{algorithm}[!t]
+  \caption{Infinite-horizon Gaussian process (IHGP) inference. The GP prior is specified in terms of a state space model. After the setup cost on line~2, all operations are at most $\mathcal{O}(m^2)$.}
+  \label{alg:IHGP}
+\begin{algorithmic}[1]\small
+   \STATE{\bfseries Input:} $\{y_i\}, \{\MA, \MQ, \vh, \MP_0\}, p(y \mid f)$ \comm{targets, model, likelihood}
+
+
+   \STATE Set up $\MP^\mathrm{p}(\gamma)$, $\MP^\mathrm{s}(\gamma)$, and $\MG(\gamma)$ for $\gamma_{1:K}$ \comm{solve DAREs for a set of likelihood variances, cost $\mathcal{O}(K\,m^3)$}
+
+   \STATE $\vm^\mathrm{f}_0 \leftarrow \bm{0}; \quad \MP^\mathrm{p}_0 \leftarrow \MP_0; \quad \gamma_0 = \infty$ \comm{initialize}
+
+   \FOR{$i=1$ {\bfseries to} $n$}
+
+
+     \STATE Evaluate $\MP^\mathrm{p}_i \leftarrow \MP^\mathrm{p}(\gamma_{i-1})$ \comm{find predictive covariance}
+
+     \STATE $\tilde{\mu}_{\mathrm{f},i} \leftarrow \vh\T\MA\,\vm^\mathrm{f}_{i-1}; \quad 
+             \tilde{\sigma}_{\mathrm{f},i}^2 = \vh\T\MP^\mathrm{p}_i\,\vh $ \comm{latent}
+     \IF{Gaussian likelihood}
+       \STATE $\eta_i \leftarrow y_i; \quad \gamma_i \leftarrow \sigma_{\mathrm{n},i}^2$ \comm{if $\sigma_{\mathrm{n},i}^2 := \sigma_\mathrm{n}^2$, $\vk_i$ and $\MP^\mathrm{f}_i$ become time-invariant}
+     \ELSE
+
+       \STATE Match $\exp(\nu_i\,f_i - \tau_i\,f_i^2/2) \, \mathrm{N}(f_i \mid \tilde{\mu}_{\mathrm{f},i}, \tilde{\sigma}_{\mathrm{f},i}^2) \stackrel{\mbox{\tiny mom}}{=} p(y_i \mid f_i) \, \mathrm{N}(f_i \mid \tilde{\mu}_{\mathrm{f},i}, \tilde{\sigma}_{\mathrm{f},i}^2)$ \comm{match moments}
+       \STATE $\eta_i \leftarrow \nu_i/\tau_i; \quad \gamma_i \leftarrow \tau_i^{-1}$ \comm{equivalent update}
+     \ENDIF
+
+     \STATE $\vk_i \leftarrow \MP^\mathrm{p}_i\,\vh/(\tilde{\sigma}_{\mathrm{f},i}^2+\gamma_i)$ \comm{gain}
+     \STATE $\vm^\mathrm{f}_i \leftarrow (\MA-\vk_i\,\vh\T\MA)\,\vm^\mathrm{f}_{i-1} + \vk_i \, \eta_i$; \quad
+            $\MP^\mathrm{f}_i \leftarrow \MP^\mathrm{p}_i-\vk_i\,\gamma_i\,\vk_i\T$ \comm{mean and covariance}
+   \ENDFOR
+
+   \STATE $\vm^\mathrm{s}_n \leftarrow \vm^\mathrm{f}_n$; \quad $\MP^\mathrm{s}_n \leftarrow \MP^\mathrm{s}(\gamma_n)$ \comm{initialize backward pass}
+   \FOR{$i=n-1$ {\bfseries to} $1$}
+     \STATE $\vm^\mathrm{s}_i \leftarrow \vm^\mathrm{f}_i + \MG(\gamma_i)\,(\vm^\mathrm{s}_{i+1} - \MA\,\vm^\mathrm{f}_i)$; \quad $\MP^\mathrm{s}_i \leftarrow \MP^\mathrm{s}(\gamma_i)$ \comm{mean and covariance}
+   \ENDFOR
+
+   \STATE{\bfseries Return:} $\mu_{\mathrm{f},i} = \vh\T\vm^\mathrm{s}_i,\:\sigma^2_{\mathrm{f},i} = \vh\T\MP^\mathrm{s}_i\,\vh,\:\log p(\vy)$ \comm{mean, variance, evidence}
+\end{algorithmic}
+\end{algorithm}
+\subsection{Infinite-horizon GPs for general likelihoods}
+\label{sec:IHGP}
+In IHGP, instead of using the true predictive covariance for propagation, we use the one obtained from the stationary state of a system with measurement noise fixed to the current measurement noise and regular spacing. The Kalman filter iterations can be used in solving approximate posteriors for models with general likelihoods in form of Eq.~\eqref{eq:posterior} by manipulating the innovation $v_i$ and $s_i$ (see \cite{Nickish+Solin+Grigorievskiy:2018}). We derive a generalization of the steady-state iteration allowing for time-dependent measurement noise and non-Gaussian likelihoods.
+
+We re-formulate the DARE in Eq.~\eqref{eq:Pp-dare} as an implicit function $\hat{\MP}^\mathrm{p}:\R_+ \to \R^{m\times m}$ of the likelihood variance, `measurement noise', $\gamma \in \R_+$:
+\begin{equation}
+  {\MP}^\mathrm{p}(\gamma) = \MA \, {\MP}^\mathrm{p}(\gamma) \, \MA\T - \MA \, {\MP}^\mathrm{p}(\gamma) \, \vh \, (\vh\T{\MP}^\mathrm{p}(\gamma) \, \vh + \gamma)^{-1} \, \vh\T{\MP}^\mathrm{p}(\gamma) \, \MA\T + \MQ.
+\end{equation}
+The elements in $\MP^\mathrm{p}$ are smooth functions in $\gamma$, and we set up an interpolation scheme---inspired by \citet{Wilson+Nickisch:2015-ICML} who use cubic convolutional interpolation \cite{Keys:1981} in their KISS-GP framework---over a log-spaced one-dimensional grid of $K$ points in $\gamma$ for evaluation of $\hat{\MP}^\mathrm{p}(\gamma)$. Fig.~\ref{fig:vs-noise} shows results of $K=32$ grid points (as dots) over $\gamma = 10^{-2},\ldots,10^3$ (this grid is used throughout the experiments). In the limit of $\gamma\to\infty$ the measurement has no effect, and the predictive covariance returns to the stationary covariance of the GP prior (dashed). Similarly, the corresponding gain terms $\vk$ show the gains going to zero in the same limit. We set up a similar interpolation scheme for evaluating $\MG(\gamma)$ and $\MP^\mathrm{s}(\gamma)$ following Eq.~\ref{eq:stat-smooth}. Now, solving the DAREs and the smoother gain has been replaced by computationally cheap (one-dimensional) kernel interpolation.
+
+Alg.~\ref{alg:IHGP} presents the recursion in IHGP inference by considering a locally steady-state GP model derived from the previous section. As can be seen in Sec.~\ref{sec:steady-state-kf}, the predictive state on step $i$ only depends on $\gamma_{i-1}$. For non-Gaussian inference we set up an EP \cite{Minka:2001,Csato+Opper:2002,Heskes+Zoeter:2002} scheme which only requires one forward pass (assumed density filtering, see also {\em unscented} filtering \cite{Sarkka:2013}), and is thus well suited for streaming applications. We match the first two moments of $p(y_i \mid f_i)$ and $\exp(\tau\,f_i - \nu\,f_i^2/2)$ w.r.t.\ latent values $\mathrm{N}(f_i \mid \tilde{\mu}_{\mathrm{f},i}, \tilde{\sigma}_{\mathrm{f},i}^2)$ (denoted by $\bullet\stackrel{\mbox{\tiny mom}}{=} \bullet$, implemented by quadrature). The steps of the backward pass are also only dependent on the local steady-state model, thus evaluated in terms of $\gamma_i$s.
+
+Missing observations correspond to $\gamma_i = \infty$, and the model could be generalized to non-equidistant time sampling by the scheme in \citet{Nickish+Solin+Grigorievskiy:2018} for calculating $\MA(\Delta t_i)$ and $\MQ(\Delta t_i)$.
+\subsection{Online hyperparameter estimation}
+Even though IHGP can be used in a batch setting, it is especially well suited for continuous data streams. In such applications, it is not practical to require several iterations over the data for optimising the hyperparameters---as new data would arrive before the optimisation terminates. We propose a practical extension of IHGP for online estimation of hyperparameters $\vtheta$ by leveraging that {\it (i)}~new batches of data are guaranteed to be available from the stream, {\it (ii)}~IHGP only requires seeing each data point once for evaluating the marginal likelihood and its gradient, {\it (iii)}~data can be non-stationary, requiring the hyperparameters to adapt.
+
+We formulate the hyperparameter optimisation problem as an incremental gradient descent (\eg, \cite{Bertsekas:1999}) resembling stochastic gradient descent, but without the assumption of finding a stationary optimum. Starting from some initial set of hyperparameters $\vtheta_0$, for each new (mini) batch $j$ of data $\vy^{(j)}$ in a window of size $n_\mathrm{mb}$, iterate
+\begin{equation}
+  \vtheta_j = \vtheta_{j-1} + \eta \, \nabla \log p(\vy^{(j)} \mid \vtheta_{j-1}),
+\end{equation}
+where $\eta$ is a learning-rate (step-size) parameter, and the gradient of the marginal likelihood is evaluated by the IHGP forward recursion. In a vanilla GP the windowing would introduce boundary effect due to growing marginal variance towards the boundaries, while in IHGP no edge effects are present as the data stream is seen to continue beyond any boundaries (\cf\ Fig.~\ref{fig:sinc}).
+
+
+
+
+
+
+
+\begin{figure}[!t]
+  \centering\scriptsize
+
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},scale only axis,axis on top,clip=false, xlabel near ticks}
+  \setlength{\figurewidth}{.4\textwidth}
+  \setlength{\figureheight}{.55\figurewidth}  
+
+  \begin{minipage}{.49\textwidth}
+  \vspace*{-8pt}
+  \captionof{table}{Mean absolute error of IHGP w.r.t.\ SS, negative log-likelihoods, and running times. Mean over 10 repetitions reported; $n=1000$.\label{tbl:results}}  
+  \scriptsize 
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}} lcccc}
+\toprule
+  & Regression & Count data & \multicolumn{2}{c}{Classification} \\
+\cmidrule(r){4-5}
+Likelihood & Gaussian & Poisson & Logit & Probit \\
+\midrule
+MAE $\mathbb{E}[f(t_*)]$ & 0.0095 & 0.0415 & 0.0741 & 0.0351 \\
+MAE $\mathbb{V}[f(t_*)]$ & 0.0008 & 0.0024 & 0.0115 & 0.0079 \\
+NLL-FULL & 1452.5 & 2645.5 & 618.9 & 614.4 \\
+NLL-SS & 1452.5 & 2693.5 & 617.5 & 613.9 \\
+NLL-IHGP & 1456.0 & 2699.3 & 625.1 & 618.2 \\
+$t_\text{full}$ & 0.18 s & 6.17 s & 11.78 s & 9.93 s \\
+$t_\text{ss}$ & 0.04 s & 0.13 s & 0.13 s & 0.11 s \\
+$t_\text{IHGP}$ & 0.01 s & 0.14 s & 0.13 s & 0.10 s \\
+\bottomrule
+\end{tabular*} 
+  \end{minipage}  
+  \hspace*{\fill}
+  \begin{minipage}{.48\textwidth}
+    \raggedleft\scriptsize  
+    \input{./fig/timing.tex}
+    \vspace*{-12pt}
+    \captionof{figure}{Empirical running time comparison for GP regression on $n=10{,}000$ data points. Maximum RMSE in IHGP $\mathbb{E}[f(t_*)] < 0.001$.}
+    \label{fig:timing}
+  \end{minipage}
+   \vspace*{-1.2em}
+\end{figure}
+
+
+
+\begin{figure}[!b]
+
+  \centering\scriptsize
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},scale only axis,axis on top,clip=false}
+  \setlength{\figurewidth}{.4\textwidth}
+  \setlength{\figureheight}{.6\figurewidth}
+
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/coal-full-intensity.tex}
+    \caption{Intensity (EP vs.\ ADF)}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/coal-inf-intensity.tex}
+    \caption{Intensity (state space vs.\ infinite-horizon)}
+  \end{subfigure}  
+
+  \caption{A small-scale comparison study on the coal mining accident data (191 accidents in $n=200$ bins). The data set is sufficiently small that full EP with na\"ive handling of the latent function can be conducted. Full EP is shown to work similarly as ADF (single-sweep EP) by state space modelling. We then compare ADF on state space (exact handling of the latent function) to ADF with the IHGP.}
+  \label{fig:coal}
+
+\end{figure}
+\section{Experiments}
+\label{sec:experiments}
+We provide extensive evaluation of the IHGP both in terms of simulated benchmarks and four real-world experiments in batch and online modes.
+\subsection{Experimental validation}
+In the toy examples, the data were simulated from $y_i = \mathrm{sinc}(x_i-6) + \varepsilon_i$, $\varepsilon_i \sim \mathrm{N}(0,0.1)$ (see Fig.~\ref{fig:sinc} for a visualization). The same function with thresholding was used in the classification examples in the Appendix. Table~\ref{tbl:results} shows comparisons for different log-concave likelihoods over a simulated data set with $n=1000$. Example functions can be seen in Fig.~\ref{fig:sinc} and Appendix~\ref{sec:classification}. The results are shown for a Mat\'ern ($\nu=\nicefrac{3}{2}$) with a full GP (na\"ive handling of latent, full EP as in \cite{Rasmussen+Nickisch:2010}), state space (SS, exact state space model, ADF as in \cite{Nickish+Solin+Grigorievskiy:2018}), and IHGP. With $m$ only 2, IHGP is not faster than SS, but approximation errors remain small.
+Fig.~\ref{fig:timing} shows experimental results for the computational benefits in a regression study, with state dimensionality $m=2,\ldots,100$. Experiments run in Mathworks \textsc{Matlab} (R2017b) on an Apple MacBook Pro (2.3~GHz Intel Core i5, 16~Gb RAM). Both methods have linear time complexity in the number of data points, so the number of data points is fixed to $n=10{,}000$. The GP prior is set up as an increasing-length sum of Mat\'ern ($\nu=\nicefrac{3}{2}$) kernels with different characteristic length-scales. The state space scheme follows $\mathcal{O}(m^3)$ and IHGP is $\mathcal{O}(m^2)$.
+\subsection{Log-Gaussian Cox processes}
+A log Gaussian Cox process is an inhomogeneous Poisson process model for count data. The unknown intensity function $\lambda(t)$ is modelled with a log-Gaussian process such that $f(t) = \log \lambda(t)$. The likelihood of the unknown function $f$ is
+$ p(\{t_j\} \mid f) = \exp(-\int \exp(f(t))\dd t + \sum_{j=1}^N f(t_j) )$.
+The likelihood requires non-trivial integration over the exponentiated GP, and thus instead the standard approach \cite{Moller+Syversveen+Waagepetersen:1998} is to consider locally constant intensity in subregions by discretising the interval into bins. This approximation corresponds to having a Poisson model for each bin. The likelihood becomes
+$ p(\{t_j\} \mid f) \approx \prod_{i=1}^n \mathrm{Poisson}(y_i(\{t_j\}) \mid \exp(f(\hat{t}_i)))$,
+where $\hat{t}_i$ is the bin coordinate and $y_i$ the number of data points in it. This model reaches posterior consistency in the limit of bin width going to zero \cite{Tokdar+Ghosh:2007}. Thus it is expected that the accuracy improves with tighter binning.
+
+\paragraph{Coal mining disasters dataset:} The data (available, \eg, in \cite{Vanhatalo+Riihimaki+Hartikainen+Jylanki+Tolvanen+Vehtari:2013}) contain the dates of 191 coal mine explosions that killed ten or more people in Britain between years 1851--1962, which we discretize into $n=200$ bins. We use a GP prior with a Mat\'ern ($\nu=\nicefrac{5}{2}$) covariance function that has an exact state space representation (state dimensionality $m=3$) and thus no approximations regarding handling the latent are required. We optimise the characteristic length-scale and magnitude hyperparameters w.r.t.\ marginal likelihood in each model. Fig.~\ref{fig:coal} shows that full EP and state space ADF produce almost equivalent results, and IHGP ADF and state space ADF produce similar results. In IHGP the edge effects are clear around 1850--1860. 
+
+
+
+\begin{figure}[!t]
+  \centering\scriptsize
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},scale only axis,axis on top,clip=true,xlabel near ticks,ylabel near ticks}
+
+  \setlength{\figurewidth}{.95\textwidth}
+  \setlength{\figureheight}{.2\figurewidth}
+
+  \begin{subfigure}[b]{\textwidth}
+    \centering\tiny
+    \input{./fig/aircraft-intensity.tex}
+
+  \end{subfigure}  
+  \\[-6pt]
+  \setlength{\figurewidth}{.25\textwidth}
+  \setlength{\figureheight}{.75\figurewidth}
+  \begin{subfigure}[b]{.32\textwidth}
+    \centering\tiny
+    \input{./fig/aircraft-trend.tex}
+
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.32\textwidth}
+    \centering\tiny\hspace*{-1em}
+    \input{./fig/aircraft-month.tex}
+
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.32\textwidth}
+    \centering\tiny
+    \input{./fig/aircraft-day-of-week.tex}
+
+  \end{subfigure}  
+
+  \caption{Explanatory analysis of the aircraft accident data set (1210 accidents predicted in $n=35{,}959$ daily bins) between years 1919--2018 by a log-Gaussian Cox process (Poisson likelihood).}
+  \label{fig:airline}
+
+\end{figure}
+
+
+
+\paragraph{Airline accident dataset:} As a more challenging regression problem we  explain the time-dependent intensity of accidents and incidents of commercial aircraft. The data \cite{Nickish+Solin+Grigorievskiy:2018} consists of dates of 1210 incidents over the time-span of years 1919--2017. We use a bin width of one day and start from year 1900 ensure no edge effects ($n=43{,}099$), and a prior covariance function (similar to \cite{Wilson+Adams:2013,Duvenaud+Lloyd+Grosse+Tenenbaum+Ghahramani:2013})
+\begin{equation}
+  \kappa(t,t') = \kappa^{\nu=\nicefrac{5}{2}}_\text{Mat.}(t,t') + \kappa^{\text{1\,year}}_\text{per}(t,t')\,\kappa^{\nu=\nicefrac{3}{2}}_\text{Mat.}(t,t') + \kappa^{\text{1\,week}}_\text{per}(t,t')\,\kappa^{\nu=\nicefrac{3}{2}}_\text{Mat.}(t,t')
+\end{equation}
+capturing a trend, time-of-year variation (with decay), and day-of-week variation (with decay). This model has a state space representation of dimension $m=3+28+28=59$. All hyperparameters (except time periods) were optimised w.r.t.\ marginal likelihood. Fig.~\ref{fig:airline} shows that we reproduce the time-of-year results from \cite{Nickish+Solin+Grigorievskiy:2018} and additionally recover a high-frequency time-of-week effect.
+\subsection{Electricity consumption}
+\label{sec:offline}
+We do explorative analysis of electricity consumption for one household \cite{Hebrail+Berard:2012} recorded every minute (in log~kW) over 1,442 days ($n = 2{,}075{,}259$, with 25,979 missing observations). We assign the model a GP prior with a covariance function accounting for slow variation and daily periodicity (with decay). We fit a GP to the entire data with 2M data points by optimising the hyperparameters w.r.t.\ marginal likelihood (results shown in Appendix~\ref{sec:el-appendix}) using BFGS. Total running time 624~s.
+
+The data is, however, inherently non-stationary due to the long time-horizon, where use of electricity has varied. We therefore also run IHGP online in a rolling-window of 10 days ($n_\mathrm{mb} = 14{,}400$, $\eta=0.001$, window step size of 1~hr) and learn the hyperparameters online during the 34,348 incremental gradient steps (evaluation time per step $0.26{\pm}0.05$~s). This leads to a non-stationary adaptive GP model which, \eg, learns to dampen the periodic component when the house is left vacant for days. Results shown in Appendix~\ref{sec:el-appendix} in the supplement.
+\subsection{Real-time GPs for adaptive model fitting}
+\label{sec:online}
+In the final experiment we implement the IHGP in C++ with wrappers in Objective-C for running as an app on an Apple iPhone~6s (iOS~11.3). We use the phone accelerometer $x$ channel (sampled at 100~Hz) as an input and fit a GP to a window of 2~s with Gaussian likelihood and a Mat\'ern ($\nu=\nicefrac{3}{2}$) prior covariance function. We fix the measurement noise to $\sigma_\mathrm{n}^2 = 1$ and use separate learning rates $\veta = (0.1, 0.01)$ in online estimation of the magnitude scale and length-scale hyperparemeters. The GP is re-estimated every 0.1~s. Fig.~\ref{fig:iphone} shows examples of various modes of data and how the GP has adapted to it. A video of the app in action is included in the web material together with the codes.
+
+
+
+
+
+\begin{figure}[!t]
+  \centering\scriptsize
+  \setlength{\figurewidth}{.23\textwidth}
+  \renewcommand{\fboxsep}{0pt}
+
+  \begin{subfigure}[b]{.24\textwidth}
+    \tikz[baseline]\node[anchor=base,draw=black!50,inner sep=1pt,rounded corners=1pt]{\includegraphics[width=\figurewidth]{./fig/frame-1}};
+    \caption{Holding in hand}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.24\textwidth}
+    \tikz[baseline]\node[anchor=base,draw=black!50,inner sep=1pt,rounded corners=1pt]{\includegraphics[width=\figurewidth]{./fig/frame-2}};
+    \caption{Shake}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.24\textwidth}
+    \tikz[baseline]\node[anchor=base,draw=black!50,inner sep=1pt,rounded corners=1pt]{\includegraphics[width=\figurewidth]{./fig/frame-4}};
+    \caption{Swinging}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.24\textwidth}
+    \tikz[baseline]\node[anchor=base,draw=black!50,inner sep=1pt,rounded corners=1pt]{\includegraphics[width=\figurewidth]{./fig/frame-5}};
+    \caption{On table}
+  \end{subfigure}
+
+  \caption{Screenshots of online adaptive IHGP running in real-time on an iPhone. The lower plot shows current hyperparameters (measurement noise is fixed to $\sigma_\mathrm{n}^2 = 1$ for easier visualization) of the prior covariance function, with a trail of previous hyperparameters. The top part shows the last 2~seconds of accelerometer data  (red), the GP mean, and 95\% quantiles. The refresh rate for updating the hyperparameters and re-prediction is 10~Hz. Video examples are in the supplementary material.}
+  \label{fig:iphone}
+
+\end{figure}
+\section{Discussion and conclusion}
+We have presented Infinite-Horizon GPs, a novel approximation scheme for state space Gaussian processes, which reduces the time-complexity to $\mathcal{O}(m^2n)$. There is a clear intuition to the approximation: As widely known, in GP regression the posterior marginal variance only depends on the distance between observations, and the likelihood variance. If both these are fixed, and $t$ is larger than the largest length-scale in the prior, the posterior marginal variance reaches a stationary state. The intuition behind IHGP is that for every time instance, we adapt to the current likelihood variance, discard the Markov-trail, and start over by adapting to the current steady-state marginal posterior distribution.
+
+This approximation scheme is important especially in long (number of data in the thousands--millions) or streaming ($n$ growing without limit) data, and/or the GP prior has several components ($m$ large). We showed examples of regression, count data, and classification tasks, and showed how IHGP can be used in interpreting non-stationary data streams both off-line (Sec.~\ref{sec:offline}) and on-line (Sec.~\ref{sec:online}).
+\subsubsection*{Acknowledgments}
+We thank the anonymous reviewers as well as Mark Rowland and Will Tebbutt for their comments on the manuscript. AS acknowledges funding from the Academy of Finland (grant number 308640).
+\phantomsection
+\addcontentsline{toc}{section}{References}
+\begingroup
+\small
+\bibliographystyle{abbrvnat}
+\bibliography{bibliography}
+\endgroup
+
+
+\clearpage\appendix
+\setcounter{section}{0}
+\nipstitle{Supplementary Material for \mbox{Infinite-horizon Gaussian processes}}
+\pagestyle{empty}
+\section{Nomenclature}
+In order of appearance. Vectors bold-face small letters, matrices bold-face capital letters.
+
+\begin{tabular}{ll}
+\toprule
+Symbol & Description \\
+\midrule
+$n$ & Number of (training) data points \\
+$m$ & State dimensionality \\
+$t \in \R$ & Time (input) \\
+$i$ & (Typically) Time index, $t_i$ \\
+$y$ & Observation (output) \\
+$\vy \in \R^n$ & Collection of outputs, $(y_1, y_2, \ldots, y_n)$ \\
+$\kappa(t,t')$ & Covariance function (kernel) \\
+$\mu(t)$ & Mean function \\
+$\vtheta$ & Vector of model (hyper) parameters \\
+$\sigma_\mathrm{n}^2$ & Measurement noise variance \\
+$\ell$ & Characteristic length-scale \\
+$\MK \in \R^{n \times n}$ & Covariance (Gram) matrix, $K_{i,j} = \kappa(t_i,t_j)$ \\
+$\vw \in \R^n$ & Likelihood precision matrix diagonal \\
+$f(t): \R \to \R$ & Latent function \\
+$\vf$ & Vector of evaluated latent, $(f(t_1), f(t_2),\ldots, f(t_n))$ \\
+$f_i$ & Element in $\vf$ \\
+$\vf(t): \R \to \R^m$ & Vector-valued latent function, $f(t) = \vh\T\vf(t)$ \\
+$\vf_i \in \R^m$ & The state variable, $\vf_i = \vf(t_i)$ and $\vf_i \sim \N(\vm_i, \MP_i)$ \\
+$\MF \in \R^{m\times m}$ & Feedback matrix (continuous-time model) \\
+$\ML \in \R^{m \times s}$ & Noise effect matrix (continuous-time model) \\
+$\MQ_\mathrm{c} \in \R^{s \times s}$ & Driving white noise spectral density (continuous-time model) \\
+$\vh \in \R^{m}$ & Measurement model \\
+$\MA \in \R^{m\times m}$ & Dynamic model (discrete-time model) \\
+$\MQ \in \R^{m\times m}$ & Process noise covariance (discrete-time model) \\
+$\MP_\infty \in \R^{m\times m}$ & Stationary state covariance (prior) \\
+$\vm_i \in \R^{m\times m}$ & State mean \\
+$\MP_i \in \R^{m\times m}$ & State covariance \\
+$\vk \in \R^m$ & Kalman gain \\
+$\MG \in \R^{m\times m}$ & Smoother gain \\
+$v_i$ & Innovation mean \\
+$s_i$ & Innovation variance \\
+$\bullet^\mathrm{p}$ & Superscript `p' denotes predictive quantities \\
+$\bullet^\mathrm{f}$ & Superscript `f' denotes filtering quantities \\
+$\bullet^\mathrm{s}$ & Superscript `s' denotes smoothing quantities \\
+$\hat{\bullet}$ & The hat denotes steady-state approximation quantities \\
+$\gamma \in \R_+$ & Likelihood variance \\
+$\eta$ & Learning rate \\
+\bottomrule
+\end{tabular}
+
+\clearpage
+\section{Example of a Mat\'ern ($\nu=\nicefrac{3}{2}$) covariance function}
+\label{sec:Matern-example}
+Consider the Mat\'ern covariance function with smoothness $\nu=\nicefrac{3}{2}$, for which the processes are continuous and once differentiable:
+\begin{equation}
+  \kappa_\mathrm{Mat.}(t,t') = \sigma^2\,\left(1+\frac{\sqrt{3}\,|t-t'|}{\ell}\right)\,\exp\!\left(-\frac{\sqrt{3}\,|t-t'|}{\ell}\right).
+\end{equation}
+It has the SDE representation \cite{Hartikainen+Sarkka:2010}
+\begin{equation} \label{eq:matern32}
+  \MF =  
+  \begin{pmatrix}
+    0          &  1        \\
+    -\lambda^2 & -2\lambda 
+	\end{pmatrix},
+  \quad
+  \ML =  
+  \begin{pmatrix}
+    0 \\
+    1
+  \end{pmatrix},
+  \quad
+  \MP_\infty =   
+	\begin{pmatrix}
+		\sigma^2		& 0 \\
+		0			& \lambda^2 \sigma^2
+	\end{pmatrix},
+  \quad \text{and} \quad
+  \vh = 	
+    \begin{pmatrix}
+		1 \\
+		0
+	\end{pmatrix}, 
+\end{equation}
+where $\lambda=\sqrt{3}/\ell$. The spectral density of the Gaussian white noise process  $w(t)$ is $Q_\mathrm{c} = 4 \lambda^3 \sigma^2$. For higher-order half-integer Mat\'ern covariance functions, the state dimensionality follows the smoothness parameter, $m = \nu+\nicefrac{1}{2}$.
+\section{Forward derivatives for efficient log likelihood gradient evaluation}
+The recursion for evaluating the derivatives of the log marginal likelihood can be derived by differentiating the steady-state recursions. As the equation for the stationary predictive covariance is given by the DARE:
+\begin{equation}
+  \hat{\MP}^\mathrm{p} = \MA \, \hat{\MP}^\mathrm{p} \, \MA\T - \MA \, \hat{\MP}^\mathrm{p} \, \vh \, (\vh\T \hat{\MP}^\mathrm{p} \, \vh + \sigma_\mathrm{n}^2)^{-1} \, \vh\T \hat{\MP}^\mathrm{p} \, \MA\T + \MQ.
+\end{equation}
+
+In order to evaluate the derivatives with respect to hyperparameters, the stationary covariance $\hat{\MP}^{\mathrm{p}}$ must be differentiated. In practice the model matrices $\MA$ and $\MQ$ are functions of the hyperparameter values $\vtheta$ as is the measurement noise variance $\sigma_\mathrm{n}^2$. 
+
+Differentiating gives:
+\begin{equation}\label{eq:partial-dare}
+  \partial\hat{\MP}^\mathrm{p} = (\MA - \MB \, \vh\T) \, \partial\hat{\MP}^\mathrm{p} \, (\MA - \MB \, \vh\T)\T + \MC,
+\end{equation}
+where $\MB = \MA \, \hat{\MP}^\mathrm{p} \, \vh \, (\vh\T \hat{\MP}^\mathrm{p} \, \vh + \sigma_\mathrm{n}^2)^{-1}$ and $\MC = \partial\MA\,\hat{\MP}^\mathrm{p}\,\MA\T + \MA\,\hat{\MP}^\mathrm{p}\,\partial\MA\T - \partial\MA\,\hat{\MP}^\mathrm{p}\,\vh\,\MB\T - \MB\,\vh\T \hat{\MP}^\mathrm{p}\,\partial\MA\T + \MB\,\partial\sigma_\mathrm{n}^2\,\MB\T + \partial\MQ$.
+
+Equation~\eqref{eq:partial-dare} is also a DARE, which means that a DARE needs to be solved for each hyperparameter. However, after this initial cost evaluating the recursion for calculating the gradient of the negative log marginal likelihood is simply a matter of the following operations:
+\begin{equation}
+  \nabla \log p(\vy\mid\vtheta) = -\frac{n}{2\,\hat{s}}\, \nabla\hat{s} - \sum_i \left[ \frac{\hat{v}_i}{\hat{s}}\,\nabla\hat{v}_i - \frac{\hat{v}_i^2}{2\,\hat{s}_i^2}\,\nabla\hat{s}_i \right],
+\end{equation}
+where the recursion only has to propagate $\partial\vm_i$ over steps for evaluating $\nabla\hat{s}_i$. The gradient can be evaluated very efficiently just as a matter of two additional $m^2$ matrix--vector multiplications per time step. This is different from the complete state space evaluations, where calculating the derivatives becomes costly as the entire Kalman filter needs to be differentiated.
+\section{Stabilisation of the forward and backward gains}
+We have included a figure (Fig.~\ref{fig:gain}) showing the quick stabilisation of the gains in running the toy experiment in Fig.~\ref{fig:sinc}. Even though the data is too small to be practical for IHGP, the edge-effects are not severe. For larger data sets, the likelihood curves in Fig.~\ref{fig:sinc} keep approaching each others. 
+
+
+
+\begin{figure}[!t]
+  \centering\scriptsize
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},clip=true,scale only axis}
+  \setlength{\figurewidth}{.4\textwidth}
+  \setlength{\figureheight}{.75\figurewidth}
+
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/sinc-kalman-gain.tex}
+    \caption{Forward gain}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/sinc-smoother-gain.tex}
+    \caption{Backward gain}
+  \end{subfigure}  
+
+  \caption{Example of how the gain terms stabilize over the time span of 100 samples. The solid lines are the true gains and dashed lines the stabilizing infinite-horizon gains. These are the gains for the results in Fig.~\ref{fig:sinc}.}
+  \label{fig:gain}
+\end{figure}
+\section{Classification examples}
+\label{sec:classification}
+We include two additional figures showing results for classification examples using simulated data. Fig.~\ref{fig:classification} shows the results.
+
+
+\begin{figure}[!b]
+  \centering\scriptsize
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},clip=true,scale only axis,axis on top,clip marker paths}
+  \setlength{\figurewidth}{.4\textwidth}
+  \setlength{\figureheight}{.75\figurewidth}
+
+
+
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/classification-logit.tex}
+    \caption{Classification (logit)}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.48\textwidth}
+    \input{./fig/classification-probit.tex}
+    \caption{Classification (probit)}
+  \end{subfigure}  
+
+  \caption{Two examples of IHGP classification on toy data (thresholded sinc function) with a Mat\'ern ($\nu=\nicefrac{3}{2}$) GP  prior. The figure shows results (the mean and 95\% quantiles squashed through the link function) for a full GP (na\"ive handling of latent, full EP inference), state space (exact state space inference of latent, ADF inference), and IHGP. The hyperparameters of the covariance function were optimised (w.r.t.\ marginal likelihood) independently using each model.}
+  \label{fig:classification}
+\end{figure}
+
+
+
+\clearpage
+\section{Electricity example}
+\label{sec:el-appendix}
+In the electricity consumption example we aim to explain the underlying process (occupancy and living rhythm) that generates the electricity consumption in the household.
+
+We first perform GP batch regression with a GP prior with the covariance function
+\begin{equation}
+  \kappa(t,t') = \kappa^{\nu=\nicefrac{3}{2}}_\text{Mat.}(t,t') + \kappa^{\text{1\,day}}_\text{per}(t,t')\,\kappa^{\nu=\nicefrac{3}{2}}_\text{Mat.}(t,t'),
+\end{equation}
+where the first component captures the short or long-scale trend variation, and the second component is a periodic model that aims to capture the time of day variation (with decay, a long length-scale Mat\'ern). In order not to over-fit, we fix the measurement noise variance and the length-scale of the multiplicative Mat\'ern component. We optimised the remaining four hyperparameters with respect to marginal likelihood. The values are visualized in Fig.~\ref{fig:electricity} with dashed lines. Total running time 624~s on the MacBook Pro used in all experiments.
+
+As the stationary model is clearly a over-simplification of the modelling problem, we also apply IHGP in an online setting in finding the hyperparameters. Fig.~\ref{fig:electricity} shows the adapted hyperparameter time-series over the entire time-range.
+
+We have selected three 10-day windows (with 14,400 observations each) to highlight that the model manages to capture the changes in the data. Subfigure~(a) shows the (noisy) daily variation with a clear periodic structure. In (b) the electricity consumption has been small for several days and the magnitude of both components has dropped. Furthermore, the periodic model has increased its length-scale to effectively turn itself off. In (c)~the predictive capability of the model shows and captures the daily variation even though there has been a fault in the data collection.
+
+
+
+\begin{figure}[!b]
+  \centering\scriptsize
+  \pgfplotsset{yticklabel style={rotate=90}, ylabel style={yshift=-15pt},clip=true,scale only axis,axis on top,clip marker paths,legend style={row sep=0pt},legend columns=-1,xlabel near ticks}
+  \setlength{\figurewidth}{.25\textwidth}
+  \setlength{\figureheight}{0.75\figurewidth}
+
+  \begin{subfigure}[b]{.32\textwidth}
+    \input{./fig/electricity-1.tex}
+    \caption{Typical daily rhythm}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.32\textwidth}
+    \input{./fig/electricity-2.tex}
+    \caption{House vacant}
+  \end{subfigure}
+  \hspace*{\fill}
+  \begin{subfigure}[b]{.32\textwidth}
+    \input{./fig/electricity-3.tex}
+    \caption{Missing data}
+  \end{subfigure}
+  \\[2em]
+
+  \setlength{\figurewidth}{.92\textwidth}
+  \setlength{\figureheight}{.3\figurewidth}
+
+  \hspace*{\fill}
+  \begin{subfigure}[b]{\textwidth}
+    \input{./fig/electricity.tex}
+    \caption{Learned hyperparameter over the time-range}
+  \end{subfigure}  
+  \hspace*{\fill}
+  \caption{Results for explorative analysis of electricity consumption data over 1,442 days with one-minute resolution ($n$ > 2M). (d)~The batch optimized hyperparameters values shown by dashed lines, the results for IHGP with adaptation (solid) adapt to changing circumstances. (a)--(c) show three 10-day windows where the model has adapted to different modes of electricity consumption. Data shown by dots, predictive mean and 95\% quantiles shown by the solid line and shaded regions.}
+  \label{fig:electricity}
+\end{figure}

@@ -98,7 +98,9 @@ import openai
 sys.path.insert(0, str(Path(__file__).parent))
 from eval_utils import parse_eval_output, to_data_url, SYSTEM_PROMPT
 
-MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# MODEL = "chamibuddhika/Qwen/Qwen3-VL-32B-Instruct-5a3c713d"
+MODEL = "chamibuddhika/Qwen/Qwen2.5-72B-Instruct-9024c7c9"
 
 
 def build_client() -> openai.OpenAI:
@@ -232,6 +234,11 @@ def evaluate_vision_only(client: openai.OpenAI, example: dict) -> dict:
 
     data_url = to_data_url(image_path)
     text = f"/no_think\nQuestion:\n{question}\nStudent Answer:\n{student}"
+    
+    print("SYSTEM PROMPT:")
+    print(SYSTEM_PROMPT)
+    print("\nUSER CONTENT:")
+    print(text)
 
     user_content = [
         {"type": "text", "text": text},
@@ -247,6 +254,7 @@ def evaluate_vision_only(client: openai.OpenAI, example: dict) -> dict:
     )
 
     output_text = response.choices[0].message.content or ""
+    print(f"Raw output:\n{output_text}\n{'-'*40}")
     return parse_eval_output(output_text), output_text
 
 
@@ -259,6 +267,11 @@ def evaluate_multimodal(client: openai.OpenAI, example: dict) -> dict:
 
     data_url = to_data_url(image_path)
     text = f"/no_think\nCaption:\n{caption}\nQuestion:\n{question}\nStudent Answer:\n{student}"
+    
+    print("SYSTEM PROMPT:")
+    print(SYSTEM_PROMPT)
+    print("\nUSER CONTENT:")
+    print(text)
 
     user_content = [
         {"type": "text", "text": text},
@@ -274,6 +287,7 @@ def evaluate_multimodal(client: openai.OpenAI, example: dict) -> dict:
     )
 
     output_text = response.choices[0].message.content or ""
+    print(f"Raw output:\n{output_text}\n{'-'*40}")
     return parse_eval_output(output_text), output_text
 
 

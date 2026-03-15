@@ -1,0 +1,482 @@
+\section{Introduction}
+\vspace{-2mm}
+Sequence-to-sequence learning with neural networks  \citep{Kalchbrenner2013,cho-etal-2014-learning,Sutskever2014} encompasses a powerful and general class of methods for modeling the distribution over an output target sequence $\tgt$ given  an input source sequence $\src$. Key to its success is a factorization of the output distribution via the chain rule coupled with a richly-parameterized neural network that models the local conditional distribution over the next word given the previous words and the input. While architectural innovations such as attention \citep{Bahdanau2015}, convolutional layers \citep{gehring17a}, and Transformers \citep{vaswani2017attention} have led to significant improvements, this  word-by-word modeling remains core to the approach, and with good reason---since any distribution over the output can be factorized autoregressively via the chain rule, this approach should be able to well-approximate the true target distribution  given large-enough data and  model.\footnote{There are, however, weighted languages whose next-word conditional distributions are hard to compute in a formal sense, and these distributions cannot be captured by locally normalized autogressive models unless one allows the number of parameters (or runtime) to grow superpolynomially in sequence length \cite{lin2021limitations}.}
+
+However, despite their excellent performance across key benchmarks these models are often sample inefficient and can moreover fail spectacularly on diagnostic tasks designed to test for compositional generalization \citep{lake2018generalization,kim-linzen-2020-cogs}. This is partially attributable to the fact that standard sequence-to-sequence models have relatively weak inductive biases (e.g. for capturing hierarchical structure \cite{mccoy-etal-2020-syntax}), which can result in learners that over-rely on surface-level (as opposed to structural) correlations. 
+
+
+In this work, we explore an alternative, hierarchical approach to sequence-to-sequence learning with \emph{latent neural grammars}. This work departs from previous approaches in three ways. First,  we model the distribution over the target sequence with a \emph{quasi-synchronous grammar} \citep{smith-eisner-2006-quasi}  which assumes a hierarchical generative process whereby each node in the target tree is transduced by nodes in the source tree. Such node-level alignments provide provenance and a causal mechanism for how each output part is generated, thereby making the generation process more interpretable. We additionally find that the explicit modeling of source- and target-side hierarchy  improves compositional generalization compared to non-hierarchical models. Second, in contrast the existing line of work on incorporating (often observed) tree structures into sequence modeling with neural networks
+\citep[\emph{inter alia}]{dyer2016rnng,melis2017drnn,rabinovich2017asn,eriguchi2017nmt,yin2017syntax,aharoni2017tree,gu2018topdown,chen2018tree2tree,du-black-2019-top}, we treat the source and target trees as fully \emph{latent} and induce them during training. Finally, whereas previous work on synchronous grammars typically utilized log-linear models over handcrafted/pipelined features \citep[\emph{inter alia}]{chiang-2005-hierarchical,huang-etal-2006-syntax,wong-mooney-2007-learning,smith-eisner-2006-quasi,wang-etal-2007-jeopardy,das-smith-2009-paraphrase,gimpel-smith-2009-feature} we make use of \emph{neural} features to parameterize the grammar's rule probabilities, which enables efficient sharing of parameters over the combinatorial space of derivation rules without the need for any manual feature engineering. We also use the grammar directly for end-to-end generation instead of  as part of a larger pipelined system (e.g. to extract alignments) \citep{yamada-knight-2001-syntax,gildea-2003-loosely,burkett-etal-2010-joint}.
+
+We apply our approach to a variety of sequence-to-sequence learning tasks---SCAN language navigation task designed to test for compositional generalization  \citep{lake2018generalization}, style transfer on the English Penn Treebank  \citep{lyu2021styleptb}, and small-scale English-French machine translation---and find that it performs respectably compared to baseline approaches.
+\vspace{-2mm}
+\section{Neural Synchronous Grammars for Sequence-to-Sequence Learning}
+\vspace{-2mm}
+We use  $\src = x_1, \dots, x_S$, $\tgt = y_1, \dots, y_T$ to denote the source/target strings, and further use $\srctree$, $\tgttree$ to refer to source/target  trees, represented as a set of nodes including the leaves (i.e. $\yield(\srctree) = \src$ and $\yield(\tgttree) = \tgt$). 
+\vspace{-1mm}
+\subsection{Quasi-Synchronous Grammars}
+\vspace{-1mm}
+Quasi-synchronous grammars, introduced by \citet{smith-eisner-2006-quasi}, define a monolingual grammar over target strings conditioned on a source tree, where the grammar's rule set depends dynamically on the source tree $\srctree$. In this paper we work with probabilistic quasi-synchronous context-free grammars (QCFG), which can be represented as a tuple $G[\srctree] = (S, \mcN, \mcP, \Sigma, \mcR[\srctree], \theta)$ where $S$ is the distinguished start symbol, $\mcN$ is the set of nonterminals which expand to other nonterminals, $\mcP$ is the set of nonterminals which expand to terminals (i.e. preterminals), $\Sigma$ is the set of terminals,  and $\mcR[\srctree]$ is a set of context-free rules conditioned on $\srctree$, where each rule is one of
+\begin{align*}
+    &S \to A[\alpha_i], &&\text{$A \in \mcN$, \hspace{2mm} $\alpha_i \subseteq \srctree$} \\
+    &A[\alpha_i] \to B[\alpha_j]C[\alpha_k],  &&\text{$A \in \mcN$, \hspace{2mm} $B, C \in \mcN \cup \mcP$,\hspace{2mm} $\alpha_i, \alpha_j, \alpha_k \subseteq \srctree$} \\
+    &D[\alpha_i] \to w,  &&\text{$D \in \mcP, w \in \Sigma$, \hspace{2mm} $\alpha_i \subseteq \srctree$}.
+\end{align*}
+We use $\theta$ to parameterize the rule probabilities $p_\theta(r)$ for each $r \in \mcR[\srctree]$. In the above, $\alpha_i$'s are subsets of nodes in the source tree $\srctree$, and thus a QCFG tranduces the output tree by aligning each target tree node to a subset of source tree nodes. This monolingual generation process differs from that of classic synchronous context-free grammars \citep{wu-1997-stochastic} which jointly generate source and target trees in tandem (and therefore require that source and target trees be isomorphic), making QCFGs appropriate tools for tasks such as machine translation where syntactic divergences are common.\footnote{It is also possible to model syntactic divergences with  richer grammatical formalisms \cite{shieber-schabes-1990-synchronous,melamed-etal-2004-generalized}. However these approaches require more expensive algorithms for learning and inference.} 
+Since the $\alpha_i$'s are elements of the power set of $\srctree$, the above formulation as presented is completely intractable. We follow prior work \citep{smith-eisner-2006-quasi,wang-etal-2007-jeopardy} and restrict $\alpha_i$'s to be single nodes (i.e. $\alpha_i, \alpha_j, \alpha_k \in \srctree$), which amounts to assuming that each target tree node is aligned to exactly one source tree node.
+
+
+In contrast to standard, ``flat'' sequence-to-sequence models where any hierarchical structure necessary for the task must be captured implicitly within a neural network's hidden layers, synchronous grammars explicitly model the hierarchical structure on both the source and target side, which acts as a strong source of inductive bias. This tree transduction process furthermore results in a more interpretable generation process as each span in the target aligned to a span in the source via node-level alignments.\footnote{Similarly, latent variable attention \citep{Xu2015,Ba2015b,deng2018latent,shankar2018,wu2018} provides for more a interpretable generation process than standard soft attention via explicit word-level alignments.} More generally, the grammar's rules  provide a symbolic interface to the model with which operationalize constraints and imbue inductive biases, and we show how this mechanism can be used to, for example, incorporate phrase-level copy mechanisms (section~\ref{sec:copy}).
+
+\vspace{-1mm}
+\subsection{Parameterization}
+\vspace{-1mm}
+Since each source tree node $\alpha_i$ is likely to occur only a few times (or just once) in the training corpus, parameter sharing becomes crucial. Prior work on QCFGs typically utilized  log-linear models over handcrafted features to share parameters across rules \citep{smith-eisner-2006-quasi,gimpel-smith-2009-feature}. In this work we instead use a neural parameterization which allows for easy parameter sharing without the need for manual feature engineering. Concretely, we represent each target nonterminal and source node combination $A[\alpha_i]$ as an embedding,
+\vspace{-2mm}
+\begin{align*}
+\bolde_{A[\alpha_i]} = \boldu_{A} + \boldh_{\alpha_i},    
+\end{align*}
+where $\boldu_{A}$ is the embedding for $A$, and $\boldh_{\alpha_i}$ is the representation of node $\alpha_i$ given by running a TreeLSTM over the source tree $\srctree$ \cite{tai2015treelstm,zhu2015treelstm}. These embeddings are then combined to produce the probability of each rule, \vspace{-1mm}
+\begin{align*}
+    &p_\theta(S \to A[\alpha_i]) &&\propto \exp\left(\boldu_{S}^\top \bolde_{A[\alpha_i]}\right),\\
+    &p_\theta(A[\alpha_i] \to B[\alpha_j]C[\alpha_k]) &&\propto \exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B[\alpha_j]}) + f_{\text{3}}(\bolde_{C[\alpha_k]}))\right), \\
+    &p_\theta(D[\alpha_i] \to w) && \propto \exp\left(f_4(\bolde_{D[\alpha_i]})^\top\boldu_{w} + b_w \right),
+\end{align*}
+where $f_1, f_2, f_3, f_4$ are feedforward networks with residual layers (see  Appendix~\ref{app:parameterization} for the exact parameterization). Therefore the learnable parameters in this model are the nonterminal embeddings (i.e. $\boldu_A$ for $A \in \{S\} \cup \mcN \cup \mcP$), terminal embeddings/biases (i.e. $\boldu_w, b_w$ for $w \in \Sigma$),  and the parameters of the TreeLSTM and the feedforward networks.
+\vspace{-1mm}
+\subsection{Learning and Inference}
+\vspace{-1mm}
+The QCFG described above defines a distribution over target trees (and by marginalization, target strings) given a source tree. While prior work on QCFGs typically relied on an off-the-shelf parser over the source to obtain its parse tree, this limits the generality of the approach. In this work, we learn a probabilistic source-side parser along with the QCFG. This parser is a monolingual PCFG with parameters $\phi$ that defines a posterior distribution over binary parse trees given source strings,  i.e. $p_\phi(\srctree \given \src)$. Our PCFG uses the neural parameterization from \citet{kim2019pcfg}. With the parser in hand, we are now ready to define the log marginal likelihood, \vspace{-1mm}
+\begin{align*}
+  \log \,p_{\theta,\phi}(\tgt \given \src) = \log \left(  \sum_{\srctree \in \mcT(\src)} \sum_{\tgttree \in \mcT(\tgt)} p_\theta(\tgttree \given \srctree)p_\phi(\srctree \given \src) \right).
+\end{align*}
+Here $\mcT(\src)$ and $\mcT(\tgt)$ are the sets of trees whose yields are $\src$ and $\tgt$ respectively. Unlike in synchronous context-free grammars, it is not possible to efficiently marginalize over both $\mcT(\tgt)$ and $\mcT(\src)$  due to the non-isomorphic assumption. However, we observe that the inner summation $\sum_{\tgttree \in \mcT(\tgt)} p_\theta(\tgttree \given \srctree) = p_\theta(\tgt \given \srctree)$ can be computed with the usual inside algorithm \citep{baker1979io} in $\mathcal{O}(\vert\mcN\vert (\vert \mcN \vert + \vert \mcP \vert )^2 S^3 T^3)$, where $S$ is the source length and $T$ is the target length. This motivates the following lower bound on the log marginal likelihood, \vspace{-1mm}
+\begin{align*}
+    \log p_{\theta, \phi}(\tgt \given \src) \ge \E_{\srctree \sim p_\phi(\srctree \given \src)}\left[\log p_\theta(\tgt \given \srctree) \right],
+\end{align*}
+which is obtained by the usual application of Jensen's inequality (see Appendix~\ref{app:derivation}).\footnote{As is standard in variational approaches, one can tighten this bound with the use of a variational distribution $q_\psi(\srctree \given \src, \tgt)$, which results in the following evidence lower bound,
+\vspace{-1mm}
+\[     \log \, p_{\theta, \phi}(\tgt \given \src) \ge \E_{\srctree \sim q_\psi(\srctree \given \src, \tgt)}\left[\log p_\theta(\tgt \given \srctree) \right] - \KL[q_\psi(\srctree \given \src, \tgt) \, \Vert \, p_\phi(\srctree \given \src)]. \vspace{-1mm}\] This  is equivalent to our objective if we set $q_\psi(\srctree \given \src, \tgt) = p_\phi(\srctree \given \boldx)$. Rearranging some terms, we then have,
+\vspace{-1mm}
+\[  \E_{\srctree \sim p_\phi(\srctree \given \src)}\left[\log p_\theta(\tgt \given \srctree) \right] = \log \, p_{\theta,\phi}(\tgt \given \src) - \KL[p_\phi(\srctree \given \src) \, \Vert \, p_{\theta,\phi}(\srctree \given \src, \tgt)].\vspace{-1mm} \]
+Hence, our use of $p_\phi(\srctree \given \boldx)$ as the variational distribution is militating towards learning a model which achieves good likelihood but at the same time has a posterior distribution $p_{\theta,\phi}(\srctree \given \src, \tgt)$ that is close to the prior $p_\phi(\srctree \given \boldx)$ (i.e. learning a model where most of the uncertainty about $\srctree$ is captured by $\src$ alone). This is arguably reasonable for many language applications since parse trees are often assumed to be task-agnostic.}
+
+An unbiased Monte Carlo estimator for the gradient with respect to $\theta$ is straightforward to compute given a sample from $p_\phi(\srctree \given \src)$, since we can just backpropagate through the inside algorithm. For the gradient respect to $\phi$, we use the score function estimator with a self-critical baseline \citep{rennie2017self},
+\begin{align*}
+\nabla_\phi \, \E_{\srctree \sim p_\phi(\srctree \given \src)}\left[\log p_\theta(\tgt \given \srctree) \right] \approx \left(\log p_\theta(\tgt \given \srctree') - \log p_\theta(\tgt \given \widehat{\srctree}) \right) \nabla_\phi \log p_\phi(\srctree' \given \src),
+\end{align*}
+where $\srctree'$ is a sample from  $p_\phi(\srctree \given \src)$ and $\widehat{\srctree}$ is the MAP tree from $p_\phi(\srctree \given \src)$. We also found it important to regularize the source parser by simultaneously training it as a monolingual PCFG, and therefore add $\nabla_\phi \log p_\phi(\src)$ to the gradient expression above.\footnote{This motivates our use of a generative rather than a discriminative parser on the source side.}
+Obtaining the sample tree $\srctree'$, the argmax tree $\widehat{\srctree}$, and scoring the sampled tree $\log p_\phi(\srctree' \given \src)$ all require $\mathcal{O}(S^3)$ dynamic programs. Hence the runtime is still dominated by the $\mathcal{O}(S^3 T^3)$ dynamic program to compute $\log p_\theta(\tgt \given \srctree')$ and $\log p_\theta(\tgt \given \widehat{\srctree})$.\footnote{This runtime is incidentally is the same as that of the bitext inside algorithm for marginalizing over both source and target trees in rank-two synchronous context-free grammars.} We found this to be manageable on modern GPUs with a vectorized implementation of the inside algorithm. Our implementation uses the $\textsf{\fontsize{9}{10}\selectfont Torch-Struct}$ library \cite{alex2020torchstruct}.
+\vspace{-2mm}
+\paragraph{Predictive inference} For decoding, we first run MAP inference with the source parser to obtain $\widehat{\srctree} = \argmax_{\srctree} p_\phi(\srctree \given \src)$. Given $\widehat{\srctree}$, finding the most probable sequence $\argmax_{\tgt} p_\theta(\tgt \given \widehat{\srctree})$ (i.e. the consensus string of the grammar $G[\widehat{\srctree}]$) is still difficult, and in fact NP-hard \citep{siman1996comp,ch-ccppgt-00,DBLP:journals/jcss/LyngsoP02}. We therefore resort to an approximate decoding scheme where we sample $K$ target trees $\tgttree^{(1)}, \dots \tgttree^{(K)}$ from 
+$G[\widehat{\srctree}]$, rescore the yields of the sampled trees, and return the tree whose yield has the lowest perplexity.
+\vspace{-2.5mm}
+\subsection{Extensions}
+\vspace{-2.5mm}
+\label{sec:copy}
+Here we show that the formalism of synchronous grammars provides a flexible interface with which to interact with the model.
+\vspace{-2.5mm}
+\paragraph{Phrase-level copying} 
+Incorporating copy mechanisms into sequence-to-sequence models has led to significant improvements for tasks where there is overlap between the source and target sequences \citep{jia-liang-2016-data,nallapati-etal-2016-abstractive,gulcehre-etal-2016-pointing,ling-etal-2016-latent,gu2016incorporating,see-etal-2017-get}. These models typically define a latent variable at each time step that learns to decide to either copy from the source or generate from the target vocabulary.  While useful, most existing copy mechanisms can only  copy singletons due to the word-level encoder/decoder.\footnote{However see \citet{zhou2018copy,panthaplackel2021copy}, and \citet{wiseman2021formulaic}.}
+In contrast, the hierarchical generative process of QCFGs makes it convenient to incorporate phrase-level copy mechanisms by using a special-purpose nonterminal/preterminal that always copies the yield of the source subtree that it is combined with. Concretely, letting $A_\textsc{copy} \in \mcN$ be a \textsc{copy} nonterminal, we can expand the rule set $\mcR[\srctree]$ to include rules of the form $A_\textsc{copy}[\alpha_i] \to v$ for $v \in \Sigma^{+}$, and define the probabilities to be,
+\vspace{-2.5mm}
+\begin{align*}
+    p_\theta(A_\textsc{copy}[\alpha_i] \to v) \, \myeq \, \mathbbm{1}\{v = \yield(\alpha_i)\}.
+\end{align*} 
+(The preterminal copy mechanism is similarly defined.) Computing $p_\theta(\tgt \given \srctree)$ in this modified grammar requires a straightforward modification of the inside algorithm.\footnote{Letting $\beta[s, t, N] = p_\theta (N \derives \tgt_{s:t})$ be the inside variable for $N$'s being the root of the subtree over $\tgt_{s:t}$, we can simply set  $\beta[s, t, A_{\textsc{copy}}[\alpha_{i}]] = \mathbbm{1}\{\tgt_{s:t} = \yield(\alpha_i)\}$.} In our style transfer experiments in section~\ref{sec:styleptb} we show that this phrase-level copying is important for obtaining good performance. While not explored in the present work, such a mechanism can readily  be employed to incorporate external transformations rules (e.g. from bilingual lexicons or transliteration tables) into the
+modeling process, which has been previously investigated at the singleton-level \cite{prabhu-kann-2020-making,akyurek2021lexicon}.
+\vspace{-2.5mm}
+\paragraph{Adding constraints on rules}
+For some applications we may want to place additional restrictions on the rule set to operationalize domain-specific constraints and inductive biases. For example, setting $\alpha_j, \alpha_k \in \child(\alpha_i)$ for rules of the form $A[\alpha_i] \to B[\alpha_j]C[\alpha_k]$ would constrain the target tree hierarchy to respect the source tree hierarchy, while restricting $\alpha_i$ to source terminals (i.e. $\alpha_i \in \yield(\srctree)$) for rules of the form $D[\alpha_i] \to w$ would enforce that each target terminal be aligned to a source terminal. We indeed make use of such restrictions in our experiments.
+\vspace{-2.5mm}
+\paragraph{Incorporating autoregressive language models}
+Finally, we remark that simple extensions of the QCFG can incorporate standard autoregressive language models. Let $p_{\textsc{lm}}(w \given   \gamma)$ be a distribution over the next word given by a  (potentially conditional) language model given arbitrary context $\gamma$ (e.g. $\gamma = \tgt_{<t}$ for a monolingual language model and $\gamma = \src, \tgt_{<t}$ for a sequence-to-sequence model). One way to embed this language model into a QCFG would be to use a special \textsc{lm} preterminal $D_{\textsc{lm}} \in \mcP$ that is not combined with any source node, and define the emission probability to be,
+\vspace{-2mm}
+\begin{align*}
+ p_\theta(D_{\textsc{lm}} \to w)\, \myeq \, p_{\textsc{lm}}(w \given   \gamma).
+\end{align*}
+(The nonterminal probabilities $p_\theta(A[\alpha_i] \to  D_{\textsc{lm}} C[\alpha_k])$ and $p_\theta(A[\alpha_i] \to B[\alpha_j]D_{\textsc{lm}})$ are computed with the associated symbol embedding $\boldu_{D_{\textsc{lm}}}$.)
+Both the QCFG and the language model can then be trained jointly.
+
+For some cases we may want to make use of a conditional language model that condition on subparts of the source sentence. This may be appropriate for learning to translate non-compositional phrases whose translations cannot be obtained by stitching together independent translations of subparts (e.g. idioms such as ``kicked the bucket''). In this case we can make use of a special nonterminal $A_{\textsc{lm}} \in \mcN$ which is combined with source tree nodes to produce rules of the form $A_\textsc{lm}[\alpha_i] \to v$ for $v \in \Sigma^{+}$. The associated probabilities are then defined to be, \vspace{-1mm}
+\begin{align*}
+    p_\theta(A_\textsc{lm}[\alpha_i] \to v) \, \myeq \, p_{\textsc{lm}}(v \given \yield(\alpha_i)).
+\end{align*} 
+While these extensions can embed flexible autoregressive models within a QCFG,\footnote{Alternatively, we can also embed a QCFG within an autoregressive language model with a binary latent variable $z_t$ (with distribution $p_{\textsc{lm}}(z_t \given \src, \tgt_{<t})$) at each time step. This variable---marginalized over during training---selects between $p_{\textsc{lm}}( y_t \given \src, \tgt_{<t})$ and $p_{\theta}(y_t \given \srctree, \tgt_{<t})$, where the latter next-word probability distribution in the QCFG can be computed with a probabilistic Earley parser \citep{stolcke-1995-efficient}. The difference between  the approaches stems from whether the switch decision is made by the QCFG or by the language model.} they also inherit many of the issues attendant with such models (e.g. over-reliance on surface form). In preliminary experiments with these variants, we found the combined model to quickly degenerate into the uninteresting case of always using the conditional language model, and hence did not pursue this further. However it is possible that modifications to the approach (e.g. posterior regularization to penalize overuse of the conditional language model) could lead to improvements. 
+
+
+\begin{table}
+\begin{minipage}{0.5\textwidth}{  \footnotesize
+\begin{tabular}{l c c c c}
+
+\toprule
+Approach & Simple & Jump & A. Right & Length \\
+\midrule 
+RNN \citep{lake2018generalization} & 99.7 & 1.7 & 2.5 & 13.8 \\ 
+CNN \citep{dessi-baroni-2019-cnns} & 100.0 & 69.2 & 56.7 & 0.0 \\
+Transformer \citep{furrer2020compositional} & $-$ & 1.0 & 53.3 & 0.0 \\
+T5-base \citep{furrer2020compositional} & $-$ & 99.5 & 33.2 & 14.4 \\
+Syntactic Attn \citep{russin2019compositional} & 100.0 & 91.0 & 28.9 & 15.2 \\
+Meta Seq2Seq \citep{lake2019compositional} & $-$ & 99.9 & 99.9 & 16.6 \\
+CGPS \citep{li2019compositional} & 99.9 & 98.8 & 83.2 & 20.3 \\
+Equivar. Seq2Seq \citep{gordon2020eq} & 100.0 & 99.1 & 92.0 & 15.9 \\
+Span-based SP \citep{herzig2020span} & 100.0 & $-$ & 100.0 & $-$ \\
+LANE \citep{liu2020compositional} & 100.0 & 100.0 & 100.0 & 100.0 \\
+Program Synth. \citep{nye2020compositional} & 100.0 & 100.0 & 100.0 &  100.0 \\ 
+NeSS \citep{chen2020compositional} & 100.0 & 100.0 & 100.0 & 100.0 \\
+NQG-T5 \citep{shaw2020compositional}  & 100.0 & 100.0 & $-$ & 100.0 \\
+GECA \citep{andreas-2020-good} & $-$ & 87.0 & 82.0 & $-$ \\
+R\&R Data Aug. \citep{akyurek2021learning} & $-$ & 88.0 &82.0 & $-$ \\
+Neural QCFG (ours) \hspace{-4mm}  & 96.9 & 96.8 & 98.7 & 95.7 \\
+     \bottomrule
+\end{tabular}
+}
+\vspace{1mm}
+    \caption{Accuracy on the SCAN dataset splits compared to previous work.}
+    \label{tab:scan}
+    \end{minipage}
+    \hspace{3mm}
+    \begin{minipage}{0.47\textwidth}{ \fontsize{7.3}{10.3}\selectfont
+\begin{tabular}{l l}
+\toprule
+$P_{0}[\textsf{run}] \to \textsf{RUN}$  \\
+$P_{0}[\textsf{look}] \to \textsf{LOOK}$ \\
+$P_{0}[\textsf{walk}] \to \textsf{WALK}$ \\
+$P_{0}[\textsf{jump}] \to \textsf{JUMP}$   \\
+$P_{0}[\textsf{right}] \to \textsf{TURN-RIGHT}$ \\
+$P_{0}[\textsf{left}] \to \textsf{TURN-LEFT}$   \\
+$N_{4}[\textsf{look left}] \to P_{0}[\textsf{left}]\,\,P_{0}[\textsf{look}]$    \\
+$N_{4}[\textsf{look right}] \to P_{0}[\textsf{right}]\,\,P_{0}[\textsf{look}]$  \\
+$N_{4}[\textsf{walk left}] \to P_{0}[\textsf{left}]\,\,P_{0}[\textsf{walk}]$    \\
+$N_{4}[\textsf{walk right}] \to P_{0}[\textsf{right}]\,\,P_{0}[\textsf{walk}]$  \\
+$N_{1}[\textsf{look right twice}] \to N_{4}[\textsf{look right}]\,\,N_{4}[\textsf{look right}]$ \\
+$N_{1}[\textsf{walk left twice}] \to N_{4}[\textsf{walk left}]\,\,N_{4}[\textsf{walk left}]$  \\
+$N_{1}[\textsf{look thrice}] \to N_{8}[\textsf{look thrice}]\,\,P_{0}[\textsf{look}]$  \\
+$N_{1}[\textsf{look right thrice}] \to N_{8}[\textsf{look right thrice}]\,\,N_{4}[\textsf{look right}]$ \\
+$N_{8}[\textsf{look right thrice}] \to N_{4}[\textsf{look right}]\,\,N_{4}[\textsf{look right}]$        \\
+$N_{1}[\textsf{walk left thrice}] \to N_{8}[\textsf{walk left thrice}]\,\,N_{4}[\textsf{walk left}]$ \\
+$N_{8}[\textsf{walk left thrice}] \to N_{4}[\textsf{walk left}]\,\,N_{4}[\textsf{walk left}]$  \\
+\bottomrule
+    \end{tabular}
+}
+\vspace{1mm}
+    \caption{Frequently-occurring rules from MAP target trees on the \emph{add primitive (jump)} train set.}
+    \label{tab:scan-rules}
+
+    \end{minipage} 
+    \vspace{-8mm}
+\end{table}
+\vspace{-2mm}
+\section{Experiments}
+\vspace{-2mm}
+\label{sec:experiments}
+We apply the neural QCFG described above to a variety of sequence-to-sequence learning tasks. These experiments are not intended to push the state-of-the-art on these tasks but rather intended to assess whether our approach performs respectably against standard baselines while simulatenously learning interesting and interpretable structures. 
+\vspace{-2mm}
+\subsection{SCAN}
+\vspace{-2mm}
+\label{sec:scan}
+We first experiment on SCAN \citep{lake2018generalization}, a diagnostic dataset where a model has to learn to translate simple English commands to actions (e.g. $\textsf{\fontsize{9}{10}\selectfont jump twice after walk} \rightarrow \textsf{\fontsize{9}{10}\selectfont WALK JUMP JUMP}$). While conceptually simple, standard sequence-to-sequence models have been shown to fail on splits of the data designed to test for compositional generalization. We focus on four commonly-used splits: (1) \emph{simple}, where train/test split is random, (2) \textit{add primitive (jump)}, where the primitive command \textsf{\fontsize{9}{10}\selectfont jump} is  seen in isolation in training and must combine with other commands during testing,\footnote{The QCFG defined in this paper places zero probability on length-one target strings, which presents an issue for this split of SCAN where $\textsf{\fontsize{7.5}{10}\selectfont jump} \rightarrow \textsf{\fontsize{7.5}{10}\selectfont JUMP}$ is the only context in which ``\textsf{\fontsize{7.5}{10}\selectfont JUMP}'' occurs in the training set. To address this, in cases where the target string is a singleton we simply replicate the source and target, i.e. $\textsf{\fontsize{7.5}{10}\selectfont jump} \rightarrow \textsf{\fontsize{7.5}{10}\selectfont JUMP}$ becomes $\textsf{\fontsize{7.5}{10}\selectfont jump jump} \rightarrow \textsf{\fontsize{7.5}{10}\selectfont JUMP JUMP}$.} (3) \emph{add template (around right)}, where the template  \textsf{\fontsize{9}{10}\selectfont around right} is not seen during training, and (4) \emph{length}, where
+the model is trained on action sequences of length at most 22 and tested on action sequences of length between 24 and 48. 
+
+In these experiments, the nonterminals $A \in \mcN$ are only combined with source nodes that govern at least two nodes, and the preterminals $P \in \mcP$ are only combined with source terminals. We set $|\mcN| = 10$ and $|\mcP| = 1$, and place two additional restrictions on the rule set. First, for rules of the form $S \to A[\alpha_i]$ we restrict $\alpha_i$ to always be the root of the source tree. Second,  for rules of the form $A[\alpha_i] \to B[\alpha_j]C[\alpha_k]$ we restrict $\alpha_j, \alpha_k$ either be a   descendant of $\alpha_i$, or $\alpha_i$ itself (i.e. $\alpha_j, \alpha_k \in \child(\alpha_i) \cup \{\alpha_i\}$).
+ These restrictions operationalize the constraint that the target tree hierarchy respects the source tree hierarchy, though still in a much looser sense than in an isomorphism. We found these  constraints to be crucial in learning models that perform well on the compositional splits of the dataset. See Appendix~\ref{app:scan} for the full experimental setup and hyperparameters.
+
+
+\vspace{-2.5mm}
+\paragraph{Results} Table~\ref{tab:scan} shows our results against various baselines on SCAN. While many approaches are able to solve this dataset almost perfectly, they often make use of SCAN-specific knowledge, which precludes their straightforward application to non-synthetic domains. The neural QCFG performs respectably while remaining domain-agnostic. In Table~\ref{tab:scan-rules} we show some examples of frequently-occurring rules based on their MAP target tree counts on the training set of the \emph{add primitive (jump)} split. Many of the rules are sensible, and they furthermore illustrate the need for multiple nonterminal symbols. For example, in order to deal with source phrases of form ``$x \,\, \textsf{\fontsize{9}{10}\selectfont thrice}$'' in a grammar that only has unary and binary rules, the model uses the nonterminals $N_1$ and $N_8$ in different ways when combined with the same phrase. Figure~\ref{fig:scan_example} shows an example generation from the test set of the
+\emph{add primitive (jump)} split, where we find that node-level alignments provide explicit provenance for each target span and thus makes the generation process more interpretable than standard attention mechanisms. 
+These alignments can also be used to diagnose and rectify systematic errors. For example, we sometimes found the model to incorrectly split ``$x$ \textsf{\fontsize{9}{10}\selectfont \{and,after\}} $y$'' to ``$x \, x$'' (or ``$y \, y$'') at the root node. When we manually disallowed such splits during decoding, performance increased by 1\%-2\% across the board, showcasing a benefit of grammar-based models which makes it possible to directly manipulate model generations by intervening on the set of derivation rules.
+\begin{figure}
+\begin{minipage}{\textwidth}
+\begin{tikzpicture}
+\fontsize{6.6}{10}\selectfont
+\tikzset{level distance=17.5pt}
+\tikzset{sibling distance=0.5pt}
+\Tree[.\node (a12) {$\alpha_{12}$};  [.\node (a10) {$\alpha_{10}$};  [.$\alpha_8$ [.$\alpha_0$ \textsf{run} ][.$\alpha_1$ \textsf{left} ] ] [.$\alpha_2$ \textsf{twice} ] ]   [.\node (a11) {$\alpha_{11}$}; [.$\alpha_3$ \textsf{after} ] [.\node (a9) {$\alpha_9$};  [.\node (a7) {$\alpha_7$}; [.\node (a4) {$\alpha_4$}; \textsf{jump} ] [.\node (a5) {$\alpha_5$}; \textsf{right} ] ]  [.$\alpha_6$ \textsf{twice} ] ]  ]  ] 
+\begin{scope}[xshift=7.8cm]
+\Tree[.\node (n0a12) {$N_{0}$[$\alpha_{12}$]}; [.\node (n2a11) {$N_{2}$[$\alpha_{11}$]}; [.\node (n4a7) {$N_{4}$[$\alpha_{7}$]}; [.\node (p0a5) {P$_{0}$[$\alpha_5$]}; \textsf{TURN-RIGHT} ][.\node (p0a4) {P$_{0}$[$\alpha_4$]}; \textsf{JUMP} ] ] [.$N_{4}$[$\alpha_{7}$] [.P$_{0}$[$\alpha_5$] \textsf{TURN-RIGHT} ] [.P$_{0}$[$\alpha_4$] \textsf{JUMP} ] ] ] [.$N_{1}$[$\alpha_{10}$] [.$N_{4}$[$\alpha_{8}$] [.P$_{0}$[$\alpha_1$] \textsf{TURN-LEFT} ] [.P$_{0}$[$\alpha_1$] \textsf{RUN} ] ] [.$N_{4}$[$\alpha_{8}$] [.P$_{0}$[$\alpha_1$] \textsf{TURN-LEFT} ] [.P$_{0}$[$\alpha_1$] \textsf{RUN} ] ] ] ]
+
+\draw[red,dashed,-stealth] (n0a12) to[bend right=15] (a12);
+\draw[red,dashed,-stealth] (n2a11) to[bend right=15] (a11);
+\draw[red,dashed,-stealth] (n4a7) to[bend right=25] (a7);
+\draw[red,dashed,-stealth] (p0a4) to[bend right=33] (a4);
+\draw[red,dashed,-stealth] (p0a5) to[bend right=18] (a5);
+
+\end{scope}
+\end{tikzpicture}
+\end{minipage}
+\vspace{-2mm}
+    \caption{Generation from the neural QCFG on a test example from the \emph{add primitive (jump)} split of SCAN. The induced tree from the learned source parser is shown on the left, and the target tree derivation is shown on the right. We do not show the initial root-level node (i.e. $S \to N_0[\alpha_{12}]$). While the model does not distinguish between preterminals and terminals on the source tree, we have shown them separately for additional clarity. We also show some of the node-level alignments with dashed lines.}
+    \label{fig:scan_example}
+    \vspace{-5.5mm}
+\end{figure}
+
+
+\begin{table}[]
+\footnotesize
+    \centering
+    \begin{tabular}{l l c c c c c c c}
+    \toprule
+    Transfer Type & Approach & BLEU-1 & BLEU-2 & BLEU-3 & BLEU-4 & METEOR & ROUGE-L & CIDEr \\
+    \midrule
+    \multirow{8}{*}{Active to Passive} &   GPT2-finetune  &  0.476 & 0.329 & 0.238 & 0.189 & 0.216 & 0.464 & 1.820 \\
+    & Seq2Seq & 0.373 & 0.220 & 0.141 & 0.103 & 0.131 & 0.345 & 0.845 \\
+    & Retrieve-Edit & 0.681 & 0.598 & 0.503 & 0.427 & 0.383 & 0.663 & 4.535 \\ 
+       & Human  & 0.931 & 0.881 & 0.835 & 0.795 & 0.587 & 0.905 & 8.603 \\
+    \cmidrule{2-9}
+    & Seq2Seq  & 0.505 & 0.349 & 0.253 & 0.190 & 0.235 & 0.475 & 2.000 \\
+    & Neural QCFG  & 0.431 & 0.637 & 0.548 & 0.472 & 0.415 & 0.695 & 4.294  \\
+    & Seq2Seq + copy & 0.838 & 0.735 & 0.673 & 0.598 & 0.467 & 0.771 & 5.941 \\
+    & Neural QCFG + copy &  0.836& 0.771 & 0.713 & 0.662 & 0.499 & 0.803 & 6.410 \\ 
+        \midrule
+       \multirow{8}{*}{Adj. Emphasis} &  
+        GPT2-finetune &  0.263 & 0.079 & 0.028 & 0.000 & 0.112 & 0.188 & 0.386 \\
+    & Seq2Seq & 0.187 & 0.058 & 0.018 & 0.000 & 0.059 & 0.179 & 0.141 \\
+    & Retrieve-Edit & 0.387 & 0.276 & 0.211 & 0.164 & 0.193 & 0.369 & 1.679 \\ 
+    & Human  & 0.834 & 0.753 & 0.679 & 0.661 & 0.522 & 0.811 & 6.796 \\
+    \cmidrule{2-9}
+    & Seq2Seq  & 0.332 & 0.333 & 0.051 & 0.000 & 0.142 & 0.27 & 0.845  \\ 
+    & Neural QCFG  & 0.348 & 0.178 & 0.062 & 0.000 & 0.162 & 0.317 & 0.667  \\ 
+    & Seq2Seq + copy & 0.505 & 0.296 & 0.184 & 0.119 & 0.242 & 0.514 & 1.839 \\    
+    & Neural QCFG + copy &  0.676 & 0.506 & 0.393 & 0.316 & 0.373 & 0.683 & 3.424 \\ 
+     
+        \midrule    \multirow{8}{*}{Verb Emphasis} &   
+     GPT2-finetune &  0.309 & 0.170 & 0.095 & 0.041 & 0.140 & 0.292 & 0.593 \\
+    & Seq2Seq & 0.289 & 0.127 & 0.066 & 0.038 & 0.098 & 0.275 & 0.300 \\
+    & Retrieve-Edit & 0.416 & 0.284 & 0.209 & 0.148 & 0.223 & 0.423 & 1.778 \\ 
+    & Human  & 0.649 & 0.569 & 0.493 & 0.421 & 0.433 & 0.693 & 5.668 \\
+    \cmidrule{2-9}
+    & Seq2Seq  & 0.355 & 0.152 & 0.083 & 0.043 & 0.151 & 0.320 & 0.530  \\ 
+    & Neural QCFG  & 0.431 & 0.250 & 0.140 & 0.073 & 0.219 & 0.408 & 1.097  \\ 
+    & Seq2Seq + copy & 0.526 & 0.389 & 0.294 & 0.214 & 0.294 & 0.464 & 2.346 \\
+    & Neural QCFG + copy &  0.664 & 0.512 & 0.407 & 0.319 & 0.370 & 0.589 & 3.227 \\ 
+        
+    \bottomrule
+    \end{tabular}
+    \vspace{1mm}
+    \caption{Results on the \emph{hard} style transfer tasks from the StylePTB dataset \citep{lyu2021styleptb}. For each transfer type, the top four rows are from \citet{lyu2021styleptb}, while the bottom four rows are from this paper. Metrics such as BLEU and ROUGE are normally scaled to [0, 100] (as in Table~\ref{tab:mt}), but here we keep them at [0, 1] as in the original paper.}
+    \label{tab:styleptb_full}
+        \vspace{-7.5mm}
+\end{table}
+
+\vspace{-2mm}
+\subsection{Style Transfer}
+\vspace{-2mm}
+\label{sec:styleptb} 
+We next apply our approach on style transfer on English utilizing the  StylePTB dataset from \citet{lyu2021styleptb}. We focus on the three \emph{hard transfer} tasks identified by the original paper: (1) \emph{active to passive}, where a sentence has to be changed from active to passive voice (2808 examples), (2) \emph{adjective emphasis}, where a sentence has to be rewritten to emphasize a particular adjective  (696 examples) (3) \emph{verb/action emphasis},  where a sentence has to be rewritten to emphasize a particular verb/action (1201 examples).\footnote{To encode information about which word to be emphasized in the adjective/verb emphasis tasks, we use a binary variable whose embedding is added to the word embedding on the encoder side.} The main difficulty with these tasks stems from the small training set combined with the relative complexity of these tasks.
+
+For these experiments we set $|\mcN| = |\mcP| = 8$ and use the same restrictions on the rule set as in the SCAN experiments. We also found it helpful to contextualize the source embedding with a bidirectional LSTM before feeding to the TreeLSTM encoder.\footnote{A drawback of using contextualized word embeddings as input to the TreeLSTM is that since the representations $\boldh_{\alpha_i}$ for each node $\alpha_i$ are now a function of the entire sentence (and not just the leaves), we can no longer guarantee that target derivations such as $A[\alpha_i] \derives \tgt_{s:t}$ only depend on $\alpha_i$. This somewhat hinders the interpretability of the node-level alignments.} We further experiment with the phrase-level copy mechanism as described in section~\ref{sec:copy}. The original paper provides several strong baselines: finetuned GPT2, a standard sequence-to-sequence model, and the retrieve-and-edit model from \citet{hashimoto2018retrieve}. We also train our own baseline sequence-to-sequence model with a word-level copy mechanism. See Appendix~\ref{app:styleptb} for more details. 
+\vspace{-2.5mm}
+\paragraph{Results} Table~\ref{tab:styleptb_full} shows the results where we observe that the neural QCFG performs well compared to the various baselines.\footnote{As in the original paper we calculate the automatic metrics using the \textsf{\fontsize{8.5}{10}\selectfont nlg-eval} library, available at \\ \url{https://github.com/Maluuba/nlg-eval}.} We further find that incorporating the copy mechanism improves results substantially for both the baseline LSTM and the neural QCFG.\footnote{Even for models that do not explicitly use the copy mechanism, we indirectly allow for copying by replacing the $\langle$\textsf{\fontsize{8.5}{10}\selectfont unk}$\rangle$ token with the source token that the preterminal is combined with in the neural QCFG case, or the source token that had the maximum attention weight in the LSTM case. This explains the outperformance of our baseline sequence-to-sequence models compared to the baselines from \citet{lyu2021styleptb}, which roughly uses  the same architecture.} Figure~\ref{fig:styleptb} shows a test example from the \textit{active-to-passive} task, which shows the word- and phrase-level copying mechanism in action. In this example the source tree is linguistically incorrect, but the grammar is nonetheless able to appropriately transduce the output. Given that linguistic phrases are generally more likely to remain unchanged in these types tasks, incorporating this knowledge into the learning process could potentially improve results.\footnote{There are many ways to do this. For example, one could identify the longest overlap between the source and target, and use posterior regularization on the source PCFG to encourage it to be a valid constituent.} For example in Figure~\ref{fig:styleptb} the ideal case would be to copy the phrase ``\textsf{\fontsize{9}{10}\selectfont a 2-for-1 stock split}'' but this is not possible due to the incorrectly predicted source tree. 
+Finally, although our approach ostensibly improves upon the baselines according to many of the $n$-gram-based metrics, we observed the generated sentences to be often ungrammatical, highlighting the limitations of automatic metrics for these tasks while at the same time indicating opportunities for further work in this area.
+
+
+
+
+\begin{figure}
+\begin{minipage}{\textwidth}
+\begin{tikzpicture}
+\fontsize{6.6}{10}\selectfont
+\tikzset{level distance=16.5pt}
+\tikzset{sibling distance=0.5pt}
+\Tree[.$\alpha_{12}$ [.$\alpha_{10}$ [.$\alpha_9$ [.$\alpha_8$ [.\node (a7) {$\alpha_7$}; [.$\alpha_0$ \textsf{unifirst} ][.$\alpha_1$ \textsf{corp.} ] ]   [.\node (a2) {$\alpha_2$}; \textsf{declared} ] ] [.$\alpha_3$ \textsf{a} ] ]  [.\node (a4) {$\alpha_4$}; \textsf{2-for-1}  ] ] [.\node (a11) {$\alpha_{11}$}; [.$\alpha_5$ \textsf{stock} ] [.$\alpha_6$ \textsf{split} ] ] ]
+\begin{scope}[xshift=7.5cm]
+\Tree[.$N_{5}$[$\alpha_{12}$][.$N_{4}$[$\alpha_{12}$][.$N_{2}$[$\alpha_{12}$][.$N_{2}$[$\alpha_{10}$][.$P_{7}$[$\alpha_{3}$] \textsf{a} ] [.\node (copya4) {$P_{\textsc{copy}}$[$\alpha_{4}$]}; \textsf{2-for-1} ] ] 
+[. {$N_{\textsc{copy}}$[$\alpha_{11}$}] \edge[roof]; \node (copya11) {\textsf{stock split}}; ] ]
+ [.$N_{1}$[$\alpha_8$] [.$N_{3}$[$\alpha_8$] [.$P_{6}$[$\alpha_2$] \textsf{is} ] [.\node (copya2) {$P_{\textsc{copy}}$[$\alpha_2$]}; \textsf{declared} ] ] [.$P_{2}$[$\alpha_0$] \textsf{by} ] ] ] [.{$N_{\textsc{copy}}$[$\alpha_{7}$]} \edge[roof]; \node (copya7) {\textsf{unifirst corp.} };  ] ]
+ 
+
+\draw[red,dashed,-stealth] (copya4)  ++(-15pt,4pt) to[bend right=7] (a4);
+\draw[red,dashed,-stealth] (copya11) ++(-18pt,18pt) to[bend right=7] (a11);
+\end{scope}
+
+\end{tikzpicture}
+\end{minipage}
+\vspace{-2mm}
+    \caption{A test example from the \textit{active to passive} style transfer task on the Penn Treebank. The induced tree from the learned source parser  is shown on the left, and the target tree derivation is shown on the right. The source tree is linguistically incorrect but the model is still able to correctly tranduce the output. Some examples of \textsc{copy} nonterminals/preterminals and their aligned source nodes are shown with dashed arrows. }
+    \label{fig:styleptb}
+        \vspace{-6mm}
+\end{figure}
+
+\vspace{-2mm}
+\subsection{Machine Translation}
+\vspace{-2mm}
+\label{sec:mt}
+Our final experiment is on a small-scale English-French machine translation dataset from \citet{lake2018generalization}. Here we are interested in evaluating the model  in two ways: first, to see if it can perform well as a standard machine translation system on a randomly held out test set, and second, to see if it can systematically generalize to unseen combinations. To assess the latter, \citet{lake2018generalization} add 1000 repetitions of $\textsf{\fontsize{9}{10}\selectfont i am daxy} \rightarrow \textsf{\fontsize{9}{10}\selectfont je suis daxiste }$ to the training set and test on 8 new sentences that use \emph{daxy} in  novel combinations (e.g.  $\textsf{\fontsize{9}{10}\selectfont he is daxy} \rightarrow \textsf{\fontsize{9}{10}\selectfont il est daxiste}$ and  $\textsf{\fontsize{9}{10}\selectfont i am not daxy} \rightarrow \textsf{\fontsize{9}{10}\selectfont je ne suis pas daxiste}$). As the original dataset does not provide official splits, we randomly split the dataset into 6073 examples for training (1000 of which is the ``\textsf{\fontsize{9}{10}\selectfont i am daxy}'' example), 631 examples for validation, and 583 for test.\footnote{The original dataset has 10000 examples (not including the  \emph{daxy} examples), but many of them involve duplicate source sentences. We removed such duplicates in our split of the data.} 
+
+For these experiments, we set $|\mcN| = |\mcP| = 14$ and combine all source tree nodes with all nonterminals/preterminals. We place two restrictions on the rule set: for rules of the form $S \to A[\alpha_i]$ we restrict $\alpha_i$ to be the root of the source tree (as in previous experiments), and for rules of the form $A[\alpha_i] \to B[\alpha_j]C[\alpha_k]$ we restrict $\alpha_j, \alpha_k$ to be the direct children of $\alpha_i$ such that $\alpha_j \ne \alpha_k$ (or $\alpha_i$ itself if $\alpha_i$ has no children).\footnote{These restrictions are closer to the strict isormorphic requirement in synchronous context-free grammars than in previous experiments. However they still allow for non-isormorphic trees since $\alpha_i$ can be inherited if it has no children.} As in the style transfer experiments, we also experiment with a bidirectional LSTM encoder which contextualizes the source word embeddings before the TreeLSTM layer.
+Our baselines here include standard LSTM/Transformer models as well as approaches that explicitly target compositional generalization \cite{li2019compositional,chen2020compositional}.
+
+\begin{wraptable}{l}{4.3cm}
+\vspace{-2.5mm}{ \footnotesize
+\begin{tabular}{l l l  }
+\toprule
+Approach & BLEU & \emph{daxy} acc.  \\
+\midrule
+LSTM & 25.1 & 12.5\% \\
+Transformer & 30.4 & 100\% \\
+CGPS \citep{li2019compositional} & 19.2 & 100\% \\
+NeSS \citep{chen2020compositional} & $-$ & 100\% \\
+Neural QCFG \hspace{1mm} & 23.5 & 100\% \\ 
+ \hspace{0.5mm} + BiLSTM \hspace{1mm} & 26.8 & 75.0\% \\
+     \bottomrule
+\end{tabular}
+\vspace{-1mm}
+    \caption{Results on English-French machine translation.}
+    \label{tab:mt}
+    }
+    \vspace{-4mm}
+\end{wraptable}
+
+\vspace{-3mm}
+\paragraph{Results}
+ Table~\ref{tab:mt} shows BLEU on the regular test set of 583 sentences and accuracy on the 8 \emph{daxy} sentences.\footnote{For CGPS and NeSS, the original papers  only assess accuracy on the \emph{daxy} test set, and furthermore do not provide the training/validation/test splits. To obtain BLEU for CGPS, we run the publicly available code (\url{https://github.com/yli1/CGPS}) on our split of the data. For NeSS, the code is not publicly available but the authors provided a version of their implementation. However, the provided code/hyperparameters were tailored for the SCAN dataset, and despite our best efforts to adapt the code/hyperparameters to our setup we were unable obtain sensible results on the machine translation dataset.} While the neural QCFG performs nontrivially, it is soundly outperformed by a well-tuned Transformer model, which performs impressively well even on the \emph{daxy} test set.\footnote{The Transformer did, however, require some hyperparameter tuning given the small size of our dataset. Similar findings have been reported by \citet{wu-etal-2021-applying} in the context of applying Transformers to moderately sized character-level transduction datasets.} We thus consider our results on machine translation to be largely negative.  Interestingly, the use of contextualized word embeddings (via the bidirectional LSTM) improves BLEU but hurts compositional generalization, highlighting the potential pitfalls of using flexible models which can sometimes entangle representations in undesirable ways.\footnote{This variant of the neural QCFG also does poorly on the compositional splits of SCAN.}
+ Figure~\ref{fig:mt} shows several examples of target tree derivations
+ from the neural QCFG that does not use contextualized word embeddings. The induced source trees are sometimes linguistically incorrect (e.g. in the top left example ``\textsf{\fontsize{9}{10}\selectfont as tall as}'' would not be considered a valid linguistic phrase), but the QCFG is still able to correctly transduce the output by also learning unconventional trees on the target side as well. This is reminiscent of classic hierarchical phrase-based approaches to machine translation where the extracted phrases often do not correspond to linguistic phrases \cite{chiang-2005-hierarchical}. Finally, although the model does well on the \emph{daxy} test set, it still incorrectly translates simple but unusual made-up examples such as  ``\href{https://www.youtube.com/watch?v=lGOofzZOyl8}{\color{black} \textsf{\fontsize{9}{10}\selectfont i m not a cat}}'' (Figure~\ref{fig:mt}, top right). This is despite the fact that examples of the form $\textsf{\fontsize{9}{10}\selectfont i \{am,m\} not a $x$} \rightarrow \textsf{\fontsize{9}{10}\selectfont je ne suis pas \{un,une\} $y$}$ occur  multiple times in the training set.\footnote{The other models were also unable to correctly translate this sentence.} We speculate that while the probabilistic nature of the grammar and the use of distributed representations enables easier training, they contribute to the model's being (still) vulnerable to spurious correlations.
+
+\begin{figure}
+\begin{minipage}{\textwidth}
+\begin{tikzpicture}
+\fontsize{6.4}{10}\selectfont
+\tikzset{level distance=17.5pt}
+\tikzset{sibling distance=0.2pt}
+\hspace{5mm}
+\Tree[.$N_{13}$[\textsf{i m as tall as my father .}][.$N_{2}$[\textsf{i m as tall as my father}][.$P_{8}$[\textsf{i}] \textsf{je} ] [.$N_{12}$[\textsf{m as tall as my father}] [.$P_{8}$[\textsf{m}] \textsf{suis} ] [.$N_{13}$[\textsf{as tall as my father}] [.$N_{2}$[\textsf{as tall as}] [.$N_{13}$[\textsf{as tall}] [.$P_{8}$[\textsf{as}] \textsf{aussi} ] [.$P_{8}$[\textsf{tall}] \textsf{grand} ] ] [.$P_{5}$[\textsf{as}] \textsf{que} ] ] [.$N_{2}$[\textsf{my father}] [.$P_{1}$[\textsf{my}] \textsf{mon} ] [.$P_{4}$[\textsf{father}] \textsf{pere} ] ] ] ] ] [.$P_{2}$[\textsf{.}] \textsf{.} ] ]
+
+
+\begin{scope}[xshift=6.8cm]
+\Tree[.$N_{0}$[\href{https://www.youtube.com/watch?v=lGOofzZOyl8}{\color{black} \textsf{i m not a cat .}}][.$N_{5}$[\textsf{i m not a cat}][.$P_{8}$[\textsf{i}] \textsf{je} ] [.$N_{2}$[\textsf{m not a cat}] [.$N_{3}$[\textsf{m}] [.$P_{13}$[\textsf{m}] \textsf{ne} ] [.$P_{9}$[\textsf{m}] \textsf{vais} ] ] [.$N_{0}$[\textsf{not a cat}] [.$P_{0}$[\textsf{not}] \textsf{pas} ] [.$N_{11}$[\textsf{a cat}] [.$P_{13}$[\textsf{a}] \textsf{un} ] [.$P_{5}$[\textsf{cat}] \textsf{chat} 
+] ] ] ] ] [.$P_{0}$[\textsf{.}] \textsf{.} ] ]
+\end{scope}
+\end{tikzpicture}
+\end{minipage}
+
+\begin{minipage}{\textwidth}
+\vspace{4mm}
+\begin{tikzpicture}
+\fontsize{6.4}{10}\selectfont
+\tikzset{level distance=17.5pt}
+\tikzset{sibling distance=0.3pt}
+
+\Tree[.$N_{13}$[\textsf{i am very daxy .}][.$N_{2}$[\textsf{i am very daxy}][.$P_{8}$[\textsf{i}] \textsf{je} ] [.$N_{12}$[\textsf{am very daxy}] [.$P_{8}$[\textsf{am}] \textsf{suis} ] [.$N_{12}$[\textsf{very daxy}] [.$P_{8}$[\textsf{very}] \textsf{tres} ] [.$P_{2}$[\textsf{daxy}] \textsf{daxiste} ] ] ] ] [.$P_{2}$[\textsf{.}] \textsf{.} ] ]
+
+
+\begin{scope}[xshift=4.2cm]
+\Tree[.$N_{13}$[\textsf{he is daxy .}][.$N_{2}$[\textsf{he is daxy}][.$P_{2}$[\textsf{he}] \textsf{il} ] [.$N_{12}$[\textsf{is daxy}] [.$P_{8}$[\textsf{is}] \textsf{est} ] [.$P_{2}$[\textsf{daxy}] \textsf{daxiste} ] ] ] [.$P_{2}$[\textsf{.}] \textsf{.} ] ]
+
+\end{scope}
+
+\begin{scope}[xshift=9cm]
+\Tree[.$N_{13}$[\textsf{he is not daxy .}][.$N_{2}$[\textsf{he is not daxy}][.$P_{5}$[\textsf{he}] \textsf{il} ] [.$N_{12}$[\textsf{is not daxy}] [.$N_{6}$[\textsf{is}] [.$P_{13}$[\textsf{is}] \textsf{n} ] [
+.$P_{8}$[\textsf{is}] \textsf{est} ] ] [.$N_{12}$[\textsf{not daxy}] [.$P_{8}$[\textsf{not}] \textsf{pas} ] [.$P_{2}$[\textsf{daxy}] \textsf{daxiste} ] ] ] ] [.$P_{2}$[\textsf{.}] \textsf{.} ] ]
+
+
+\end{scope}
+
+\end{tikzpicture}
+\end{minipage}
+\vspace{-2mm}
+    \caption{Target tree derivations from the English-French machine translation experiments. Top left is an example from the regular test set,  top right is a \href{https://www.youtube.com/watch?v=lGOofzZOyl8}{\color{black}made-up example} (which is incorrectly translated by the model), and the bottom three trees are from the  \emph{daxy} test set.  We do not explicitly show the source trees here and instead show the source phrases as arguments to the target tree nonterminals/preterminals.}
+    \label{fig:mt}
+        \vspace{-5.5mm}
+\end{figure}
+
+\vspace{-2mm}
+\section{Discussion}
+\vspace{-2.5mm}
+While we have shown that neural quasi-synchronous grammars can perform well for some sequence-to-sequence learning tasks, there are several serious limitations. For one, the $\mathcal{O}(\vert\mcN\vert (\vert \mcN \vert + \vert \mcP \vert )^2 S^3 T^3)$ dynamic program will likely pose challenges in scaling this approach to larger datasets with longer sequences.\footnote{Indeed, on realistic machine translation datasets with longer sequences we quickly ran into memory issues when running the model on just a single example, even with a multi-GPU implementation of the inside algorithm distributed over four 32GB GPUs. To apply the model on longer sentences, an interesting future direction might involve working with a ``soft'' version of the grammar, where the nonterminals embeddings are contexualized against source elements via soft attention. The runtime and memory for marginalizing over target trees in this soft QCFG would have a linear (instead of cubic) dependence source length.} Predictive inference was also much more expensive since we found it necessary to sample and score a large number of target trees to perform well on the non-synthetic datasets (see Appendix~\ref{app:hyperparameters}). The conditional independence assumptions made by the QCFG may also be too strong for some tasks that involve complex dependencies, and the approach may furthermore be inappropriate for domains where the input and output are not naturally tree-structured. The models were quite sensitive to hyperparameters and some datasets needed training over multiple random seeds to perform well. These factors make our approach much less ``off-the-shelf'' than standard sequence-to-sequence models, although this may be partially attributable to the availability of a robust set of hyperparameters for existing approaches.
+
+At the start of this project, our initial hope was to show that classic, grammar-based approaches to sequence transduction had been unfairly overlooked in the current deep learning era, and that revisiting these methods with contemporary parameterizations would prove to be more than just an academic exercise. \href{http://www.incompleteideas.net/IncIdeas/BitterLesson.html}{\color{black}Disappointingly}, this seems not to be the case. While we did observe decent performance on niche datasets such as SCAN and StylePTB where inductive biases from grammars were favorably aligned to the task at hand, for tasks like machine translation our approach was thoroughly steamrolled by a well-tuned Transformer. 
+
+What role, then, can such models play in building practical NLP systems (if any)? It remains to be seen, but we venture some guesses. Insofar as grammars and other models with symbolic components  are able to better surface model decisions than standard approaches, they may have a role in
+developing more controllable and interpretable models, particularly in the context of collaborative human-machine systems \cite{gehrmann2019visual}.
+Alternatively, inflexible  models with strong inductive biases have in the past been used to guide (overly) flexible neural models in various ways, for example by helping to generate additional data \cite{jia-liang-2016-data,liu-etal-2021-counterfactual} or inducing structures with which to regularize/augment models \cite{cohn-etal-2016-incorporating,liu-etal-2016-neural,akyurek2021lexicon,yin-etal-2021-compositional}.
+In this vein, it may be interesting to explore how induced structures from grammars (such as the tranduction rules in Table~\ref{tab:scan-rules}) can be used in conjunction with flexible neural models.
+
+\vspace{-2mm}
+\section{Related Work}
+\vspace{-2mm}
+\paragraph{Synchronous grammars}
+Synchronous grammars and tree transducers  have a long and rich history in natural language processing \citep[\emph{inter alia}]{aho1969syntax,shieber-schabes-1990-synchronous,wu-1997-stochastic,melamed-2003-multitext,eisner-2003-learning,ding-palmer-2005-machine,Nesson06inductionof,huang-etal-2006-syntax,wong-mooney-2007-learning,graehl-etal-2008-training,blunsom2009scfg,cohn2009compression}.
+In this work we focus on the formalism of quasi-synchronous grammars, which relaxes the requirement that source trees be isomorphic to target trees. Quasi-synchronous grammars  have enjoyed applications across a wide range of domains including in machine translation \citep{smith-eisner-2006-quasi,gimpel-smith-2009-feature,gimpel-smith-2011-quasi}, question answering \citep{wang-etal-2007-jeopardy}, paraphrase detection \citep{das-smith-2009-paraphrase}, sentence simplification \citep{woodsend-etal-2010-title,woodsend-lapata-2011-learning}, and parser projection \citep{smith-eisner-2009-parser}. Prior work on quasi-synchronous grammars generally relied on pipelined parse trees for the source and only marginalized out the target tree, in contrast to the present work which treats both source and target trees as latent.
+\vspace{-2mm}
+\paragraph{Compositional sequence-to-sequence learning}
+\citet{lake2018generalization} proposed the influential SCAN dataset for assessing the compositional generalization capabilities of neural sequence-to-sequence models. There has since been a large body of work on compositional sequence-to-sequence learning through various approaches including modifications to existing architectures \citep{li2019compositional,russin2019compositional,gordon2020eq,chaabouni2021transformer,scordas2021devil}, grammars and neuro-symbolic models \citep{oren2020compositional,shaw2020compositional,nye2020compositional,chen2020compositional,liu2020compositional}, meta-learning \citep{lake2019compositional,conklin2021meta}, and data augmentation \citep{andreas-2020-good,guo-etal-2020-sequence,guo2021revisiting,akyurek2021learning}. Our approach is closely related to NQG-T5 \cite{shaw2020compositional} which uses a rules-based approach to induce a non-probabilistic QCFG and then backs off to a flexible sequence-to-sequence model during prediction if the grammar cannot parse the input sequence. 
+\vspace{-2mm}
+\paragraph{Deep latent variable models}
+There has much work on neural parameterizations of classic probabilistic latent variable models including hidden Markov models, \citep{tran2016,wiseman2018templates,chiu2020hmm}, finite state transducers \cite{rastogi-etal-2016-weighting,lin-etal-2019-neural} topic models \citep{miao2017topic,dieng2019dynamic,dieng-etal-2020-topic}, dependency models \citep{jiang-etal-2016-unsupervised,han2017dependency,buys2018syntax,han2019enhancing,yang2020second}, and 
+ context-free grammars \citep{kim2019pcfg,jin2019unsupervised,zhu2020lexpcfg,zhao-titov-2021-empirical,yang2021pcfg,yang2021lexical}.
+These works essentially extend feature-based unsupervised learning \citep{kirk2010} to the neural case with the use of neural networks over embedding parameterizations, which makes it easy to share parameters and additionally condition the generative model on side information such as 
+auxiliary latent variables \citep{han2019enhancing,kim2019pcfg}, images \citep{zhao2020pcfg,jin-schuler-2020-grounded,hong2021grammar},  video and audio \citep{zhang2021grammar}, and source-side context \citep{wiseman2018templates,shen-etal-2020-neural}.
+Since we marginalize over unobserved trees during learning, our work is also related to the line of work on marginalizing out latent variables/structures for sequence transduction tasks \citep[\emph{inter alia}]{graves2006ctc,dreyer-etal-2008-latent,blunsom-etal-2008-discriminative,kong2016segrnn,yu2016online,raffel2017,huang2018towards,li-rush-2020,tan-etal-2020-recursive,wang2021structured}.
+
+
+
+\vspace{-2mm}
+\section{Conclusion}
+\vspace{-2mm}
+In this paper we have studied sequence-to-sequence learning with latent neural grammars. We have shown that the formalism quasi-synchronous grammars provides a flexible  tool with which to imbue inductive biases, operationalize constraints, and interface with the model. Future work in this area could consider: (1) revisiting richer grammatical formalisms (e.g. synchronous tree-adjoining grammars \cite{shieber-schabes-1990-synchronous}) with contemporary parameterizations, (2) conditioning on other modalities such as images/audio for grounded grammar induction \cite{shi2019visual,zhao2020pcfg,jin-schuler-2020-grounded,zhang2021grammar}, (3) adapting these methods to other structured domains such as programs and graphs, and (4) investigating how  grammars and symbolic models can be integrated with pretrained language models to solve practical tasks.
+
+{\small 
+\bibliographystyle{plainnat}
+\bibliography{ref}}
+
+\newpage
+\appendix
+\section{Appendix}
+
+\subsection{Neural QCFG Parameterization}
+\label{app:parameterization}
+Each nonterminal is combined with a source node to produce a symbol $A[\alpha_i]$, whose embedding representation is given by $\bolde_{A[\alpha_i]} = \boldu_{A} + \boldh_{\alpha_i}$. Here $\boldu_{A}$ is a randomly initialized embedding and $\boldh_{\alpha_i}$ is the node representation for $\alpha_i$ from a TreeLSTM. The rule probabilities are then given by,
+\begin{align*}
+    &p_\theta(S \to A[\alpha_i]) &&= \frac{\exp\left(\boldu_{S}^\top \bolde_{A[\alpha_i]}\right)}{\sum\limits_{A' \in \mcN}\sum\limits_{\alpha' \in \srctree}\exp\left(\boldu_{S}^\top \bolde_{A'[\alpha']}\right)},\\
+    &p_\theta(A[\alpha_i] \to B[\alpha_j]C[\alpha_k]) &&= \frac{\exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B[\alpha_j]}) + f_{\text{3}}(\bolde_{C[\alpha_k]}))\right)}{\sum\limits_{B' \in \mcM} \sum\limits_{\alpha' \in \srctree} \sum\limits_{C'' \in \mcM}\sum\limits_{\alpha'' \in \srctree}\exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B'[\alpha']}) + f_{\text{3}}(\bolde_{C''[\alpha'']}))\right)}, \\
+    &p_\theta(D[\alpha_i] \to w) && = \frac{\exp\left(f_4(\bolde_{D[\alpha_i]})^\top\boldu_{w} + b_w \right)}{\sum\limits_{w' \in \Sigma}\exp\left(f_4(\bolde_{D[\alpha_i]})^\top\boldu_{w'} + b_{w'} \right)},
+\end{align*}
+where $\mcM = \mcN \cup \mcP$. In the above $f_i$'s are feedforward networks with three residual blocks, 
+\begin{align*}
+    f_i(\boldx) &= g_{i, 3}(g_{i, 2}(g_{i, 1}(\mathbf{W}_i\boldx +\mathbf{b}_i))), && i \in \{1,2,3,4\},\\
+    g_{i, j}(\boldx) &= \relu(\mathbf{V}_{i, j}(\relu(\mathbf{U}_{i,j} + \mathbf{c}_{i,j})) + \boldd_{i,j}) + \boldx, && j \in \{1,2,3\}.
+\end{align*}
+We often place restrictions on the derivations to operationalize domain-specific constraints. For example, in our machine translation experiments we constrain  $\alpha_j, \alpha_k$ to be the immediate children of $\alpha_j$ for rules of the form $A[\alpha_i] \to B[\alpha_j]C[\alpha_k]$ such that $\alpha_j \ne \alpha_k$, unless $\alpha_i$ is a leaf node in which case $\alpha_i$ is always inherited. To  calculate $p_\theta(A[\alpha_i] \to B[\alpha_j]C[\alpha_k])$ with this restriction, we consider different cases. In the case where  $\alpha_j, \alpha_k$ are the immediate children of $\alpha_i$,  $p_\theta(A[\alpha_i] \to B[\alpha_j]C[\alpha_k])$ is given by
+\begin{align*}
+\frac{\exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B[\alpha_j]}) + f_{\text{3}}(\bolde_{C[\alpha_k]}))\right)}{\sum\limits_{B' \in \mcM} \sum\limits_{C'' \in \mcM}\exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B'[\alpha_j]}) + f_{\text{3}}(\bolde_{C''[\alpha_k]}))\right) + \exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B'[\alpha_k]}) + f_{\text{3}}(\bolde_{C''[\alpha_j]}))\right)}.
+\end{align*}
+In the case where $\alpha_i \in \yield(\srctree)$ (i.e. it has no children), we have
+\begin{align*}
+p_\theta(A[\alpha_i] \to B[\alpha_j]C[\alpha_k]) = 
+\begin{cases} \frac{\exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B[\alpha_j]}) + f_{\text{3}}(\bolde_{C[\alpha_k]}))\right)}{\sum\limits_{B' \in \mcM} \sum\limits_{C'' \in \mcM}\exp \left(f_{\text{1}}(\bolde_{A[\alpha_i]})^\top (f_{\text{2}}(\bolde_{B'[\alpha_i]}) + f_{\text{3}}(\bolde_{C''[\alpha_i]}))\right)},& \alpha_j = \alpha_k = \alpha_i, \\
+0, & \text{otherwise}.
+\end{cases}
+\end{align*}
+All other $p_\theta(A[\alpha_i] \to B[\alpha_j]C[\alpha_k])$'s are assigned to 0.
+In practice these constraints are implemented by masking out the full third-order tensor of the rules' (log) probabilities, which is of size $(2S-1)|\mcN| \times (2S-1)|\mcN \cup \mcP| \times (2S-1)|\mcN \cup \mcP|$. Here $(2S-1)$ is the number of nodes in the binary source tree. This masking strategy makes it possible to still utilize vectorized implementations of the inside algorithm.
+\subsection{Lower Bound Derivation}
+\label{app:derivation}
+\begin{align*}
+\log \, p_{\theta, \phi} (\tgt \given \src) &= \log \left(  \sum_{\srctree \in \mcT(\src)} \sum_{\tgttree \in \mcT(\tgt)} p_\theta(\tgttree \given \srctree)p_\phi(\srctree \given \src) \right) \\
+&= \log \left(\sum_{\srctree \in \mcT(\src)}p_\theta(\tgt \given \srctree) p_\phi(\srctree \given \src)\right)\\
+&= \log \, \E_{\srctree \sim p_\phi(\srctree \given \src)}\left[ p_\theta(\tgt \given \srctree) \right]      \\
+&\ge \E_{\srctree \sim p_\phi(\srctree \given \src)}\left[ \log p_\theta(\tgt \given \srctree) \right]      
+\end{align*}
+\subsection{Experimental Setup and Hyperparameters}
+\label{app:hyperparameters}
+For all experiments the source parser is a neural PCFG \citep{kim2019pcfg} with 20 nonterminals and 20 preterminals. Other model settings that are shared across the experiments include: (1) Adam optimizer with learning rate $= 0.0005$, $\beta_1  = 0.75$, $\beta_2 = 0.999$, (2) gradient norm clipping at $3$, (3) $L_2$ penalty (i.e. weight decay) of $10^{-5}$, (4) Xavier Glorot uniform initialization, and (5) training for 15 epochs with early stopping on the validation set (most models converged well before 15 epochs).  The batch size is 4 for the SCAN and style transfer datasets, and 32 for the machine translation dataset. Due to memory constraints, in practice we use a batch size of 1 and simulate larger batch sizes through gradient accumulation.
+We observed training to be somewhat unstable and some datasets (e.g. SCAN and machine translation) needed training across 4 to 6 random seeds to perform well. In general we found it okay to overparameterize the grammar and use more nonterminals than seems necessary \cite{buhai2020over}.
+\subsubsection{SCAN}
+\label{app:scan}
+For SCAN, all models and embeddings are 256-dimensional. The QCFG has 10 nonterminals and 1 preterminal ($|\mcN| = 10, |\mcP| = 1$).Since SCAN does not provide official validations sets, we use the test set of the \emph{simple} split as the validation set for the \textit{add primitive (jump)}, \textit{add template (around right)}, \textit{length} splits. For the \textit{simple} split, we use the training set itself as the validation set for early stopping. For decoding we take 10 sample derivations from the grammar and take the yield that has the lowest perplexity after rescoring.
+\subsubsection{Style Transfer}
+\label{app:styleptb}
+On StylePTB, all models and embeddings with 512-dimensional. The QCFG has 8 nonterminals and 8 preterminals ($|\mcN| = 8, |\mcP| = 8$). We also contextualize the source embedding by passing it through a bidirectional LSTM, where the concatenation of the forward and backward hidden states for each word are projected down to 512 dimensions via an affine layer before they are fed to the TreeLSTM. For decoding we use 1000 samples and take the yield that has the lowest perplexity after rescoring. The adjective/verb emphasis tasks also provide a particular word in the source sentence to emphasize. We encode this information through a binary variable, whose embedding is added to the word embedding (before contexualization) in the encoder. Tokens which occur less than three times are replaced with the
+$\langle$\textsf{\fontsize{9}{10}\selectfont unk}$\rangle$ token.
+
+The baseline uses a bidirectional LSTM encoder and an LSTM decoder with soft attention \cite{Bahdanau2015} and a pointer copy mechanism \cite{see-etal-2017-get}. We tune over the number of layers, hidden units, and dropout rate. For decoding we use beam search with beam size of 5 (larger beam sizes did not improve performance).
+\subsubsection{Machine Translation}
+\label{app:mt}
+In these experiments we use 512-dimensional models/embeddings. 
+The QCFG has 14 nonterminals and 14 preterminals ($|\mcN| = 14, |\mcP| = 14$). As in the Style Transfer experiments, we also experiment with a variant where we  contextualize the source word embeddings with a bidirectional LSTM before the TreeLSTM layer. For decoding we use 1000 samples and take the yield that has the lowest perplexity after rescoring. Tokens which occur less than two times are replaced with the $\langle$\textsf{\fontsize{9}{10}\selectfont unk}$\rangle$ token.
+
+The LSTM baseline uses a bidirectional LSTM encoder and a LSTM decoder with soft attention \cite{Bahdanau2015}. We tune over the number of layers, dimensions, and dropout rate. The Transformer baseline is from \textsf{\fontsize{9}{10}\selectfont OpenNMT} \cite{klein-etal-2017-opennmt}, where we tune over the number of layers, hidden units, dropout rate, warm-up steps, and batch size. Given the small size of our dataset, the Transformer was particularly sensitive to the number of warm-up steps and the batch size. For decoding we use beam search with beam size of 5 (larger beam sizes did not improve performance).
+
+We calculate BLEU with the \textsf{\fontsize{9}{10}\selectfont multi-bleu.perl} script from \textsf{\fontsize{9}{10}\selectfont mosesdecoder}. For the \emph{daxy} test set, the original paper \cite{lake2018generalization} only considers the ``\textsf{\fontsize{9}{10}\selectfont tu}'' translation of  ``\textsf{\fontsize{9}{10}\selectfont you}'' to be correct. We follow \citet{li2019compositional} and \citet{chen2020compositional} and also count ``\textsf{\fontsize{9}{10}\selectfont vous}'' to be correct as well (e.g. both ``\textsf{\fontsize{9}{10}\selectfont tu n es pas daxiste .}'' and ``\textsf{\fontsize{9}{10}\selectfont vous n etes pas daxiste .}'' are considered to be valid translations of ``\textsf{\fontsize{9}{10}\selectfont you are not daxy .}'').

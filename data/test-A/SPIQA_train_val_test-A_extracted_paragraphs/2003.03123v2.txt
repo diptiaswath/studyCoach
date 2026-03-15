@@ -1,0 +1,591 @@
+\section{Introduction}
+In recent years scientists have started leveraging machine learning to reduce the computation time required for predicting molecular properties from a matter of hours and days to mere milliseconds. With the advent of graph neural networks (GNNs) this approach has recently experienced a small revolution, since they do not require any form of manual feature engineering and significantly outperform previous models \citep{gilmer_neural_2017,schutt_schnet:_2017}. GNNs model the complex interactions between atoms by embedding each atom in a high-dimensional space and updating these embeddings by passing messages between atoms. By predicting the potential energy these models effectively learn an empirical potential function. Classically, these functions have been modeled as the sum of four parts: \citep{leach_molecular_2001}
+\begin{equation}
+    E = E_\text{bonds} + E_\text{angle} + E_\text{torsion} + E_\text{non-bonded},
+    \label{eq:energy}
+\end{equation}
+where $E_\text{bonds}$ models the dependency on bond lengths, $E_\text{angle}$ on the angles between bonds, $E_\text{torsion}$ on bond rotations, i.e. the dihedral angle between two planes defined by pairs of bonds, and $E_\text{non-bonded}$ models interactions between unconnected atoms, e.g. via electrostatic or van der Waals interactions. The update messages in GNNs, however, only depend on the previous atom embeddings and the pairwise distances between atoms -- not on directional information such as bond angles and rotations. Thus, GNNs lack the second and third terms of this equation and can only model them via complex higher-order interactions of messages. Extending GNNs to model them directly is not straightforward since GNNs solely rely on pairwise distances, which ensures their invariance to translation, rotation, and inversion of the molecule, which are important physical requirements.
+
+In this paper, we propose to resolve this restriction by using embeddings associated with the directions to neighboring atoms, i.e. by embedding atoms as a set of messages. These directional message embeddings are equivariant with respect to the above transformations since the directions move \emph{with} the molecule. Hence, they preserve the relative directional information between neighboring atoms. We propose to let message embeddings interact based on the distance between atoms and the angle between directions. Both distances and angles are invariant to translation, rotation, and inversion of the molecule, as required. Additionally, we show that the distance and angle can be jointly represented in a principled and effective manner by using spherical Bessel functions and spherical harmonics. We leverage these innovations to construct the directional message passing neural network (DimeNet). DimeNet can learn both molecular properties and atomic forces. It is twice continuously differentiable and solely based on the atom types and coordinates, which are essential properties for performing molecular dynamics simulations. DimeNet outperforms previous GNNs on average by \SI{76}{\percent} on MD17 and by \SI{31}{\percent} on QM9. Our paper's main contributions are:
+\setlist{nolistsep}
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item Directional message passing, which allows GNNs to incorporate directional information by connecting recent advances in the fields of equivariance and graph neural networks as well as ideas from belief propagation and empirical potential functions such as Eq. \ref{eq:energy}.
+    \item Theoretically principled orthogonal basis representations based on spherical Bessel functions and spherical harmonics. Bessel functions achieve better performance than Gaussian radial basis functions while reducing the radial basis dimensionality by 4x or more.
+    \item The Directional Message Passing Neural Network (DimeNet): A novel GNN that leverages these innovations to set the new state of the art for molecular predictions and is suitable both for predicting molecular properties and for molecular dynamics simulations.
+\end{enumerate}
+\section{Related work}
+\textbf{ML for molecules.} The classical way of using machine learning for predicting molecular properties is combining an expressive, hand-crafted representation of the atomic neighborhood \citep{bartok_representing_2013} with Gaussian processes \citep{bartok_gaussian_2010,bartok_machine_2017,chmiela_machine_2017} or neural networks \citep{behler_generalized_2007}. Recently, these methods have largely been superseded by graph neural networks, which do not require any hand-crafted features but learn representations solely based on the atom types and coordinates molecules \citep{duvenaud_convolutional_2015,gilmer_neural_2017,schutt_schnet:_2017,hy_predicting_2018,unke_physnet:_2019}. Our proposed message embeddings can also be interpreted as directed edge embeddings or embeddings on the line graph \citep{chen_supervised_2019}. (Undirected) edge embeddings have already been used in previous GNNs for molecules \citep{jorgensen_neural_2018,chen_graph_2019}. However, these GNNs use both node and edge embeddings and do not leverage any directional information.
+
+\textbf{Graph neural networks.} GNNs were first proposed in the 90s \citep{baskin_neural_1997,sperduti_supervised_1997} and 00s \citep{gori_new_2005,scarselli_graph_2009}. General GNNs have been largely inspired by their application to molecular graphs and have started to achieve breakthrough performance in various tasks at around the same time the molecular variants did \citep{kipf_semi-supervised_2017,gasteiger_predict_2019,zambaldi_deep_2019}. Some recent progress has been focused on GNNs that are more powerful than the 1-Weisfeiler-Lehman test of isomorphism \citep{morris_weisfeiler_2019,maron_provably_2019}. However, for molecular predictions these models are significantly outperformed by GNNs focused on molecules (see Sec. \ref{sec:exp}). Some recent GNNs have incorporated directional information by considering the change in local coordinate systems per atom \citep{ingraham_generative_2019}. However, this approach breaks permutation invariance and is therefore only applicable to chain-like molecules (e.g. proteins).
+
+\textbf{Equivariant neural networks.} Group equivariance as a principle of modern machine learning was first proposed by \citet{cohen_group_2016}. Following work has generalized this principle to spheres \citep{cohen_spherical_2018}, molecules \citep{thomas_tensor_2018}, volumetric data \citep{weiler_3d_2018}, and general manifolds \citep{cohen_gauge_2019}. Equivariance with respect to continuous rotations has been achieved so far by switching back and forth between Fourier and coordinate space in each layer \citep{cohen_spherical_2018} or by using a fully Fourier space model \citep{kondor_clebsch-gordan_2018,anderson_cormorant:_2019}. The former introduces major computational overhead and the latter imposes significant constraints on model construction, such as the inability of using non-linearities. Our proposed solution does not suffer from either of those limitations.
+\section{Requirements for molecular predictions}
+\label{sec:req}
+
+In recent years machine learning has been used to predict a wide variety of molecular properties, both low-level quantum mechanical properties such as potential energy, energy of the highest occupied molecular orbital (HOMO), and the dipole moment and high-level properties such as toxicity, permeability, and adverse drug reactions \citep{wu_moleculenet:_2018}. In this work we will focus on scalar regression targets, i.e. targets $t \in \R$. A molecule is uniquely defined by the atomic numbers $\vz = \{ z_1, \ldots , z_N \}$ and positions $\mX = \{ \vx_1, \ldots, \vx_N \}$. Some models additionally use auxiliary information $\mTheta$ such as bond types or electronegativity of the atoms. We do not include auxiliary features in this work since they are hand-engineered and non-essential. In summary, we define an ML model for molecular prediction with parameters $\theta$ via $f_\theta: \{ \mX, \vz \} \rightarrow \R$.
+
+\textbf{Symmetries and invariances.} All molecular predictions must obey some basic laws of physics, either explicitly or implicitly. One important example of such are the fundamental symmetries of physics and their associated invariances. In principle, these invariances can be learned by any neural network via corresponding weight matrix symmetries \citep{ravanbakhsh_equivariance_2017}. However, not explicitly incorporating them into the model introduces duplicate weights and increases training time and complexity. The most essential symmetries are translational and rotational invariance (follows from homogeneity and isotropy), permutation invariance (follows from the indistinguishability of particles), and symmetry under parity, i.e. under sign flips of single spatial coordinates.
+
+\textbf{Molecular dynamics.} Additional requirements arise when the model should be suitable for molecular dynamics (MD) simulations and predict the forces $\mF_i$ acting on each atom. The force field is a conservative vector field since it must satisfy conservation of energy (the necessity of which follows from homogeneity of time \citep{noether_invariante_1918}). The easiest way of defining a conservative vector field is via the gradient of a potential function. We can leverage this fact by predicting a potential instead of the forces and then obtaining the forces via backpropagation to the atom coordinates, i.e. $\mF_i(\mX, \vz) = - \frac{\partial}{\partial \vx_i} f_\theta(\mX, \vz)$. We can even directly incorporate the forces in the training loss and directly train a model for MD simulations \citep{pukrittayakamee_simultaneous_2009}:
+\begin{equation}
+    \mathcal{L}_\text{MD}(\mX, \vz) = \left| f_\theta(\mX, \vz) - \hat{t}(\mX, \vz) \right| + \frac{\rho}{3N} \sum_{i=1}^N \sum_{\alpha=1}^3 \left| -\frac{\partial f_\theta(\mX, \vz)}{\partial \vx_{i\alpha}} - \hat{F}_{i\alpha}(\mX, \vz) \right|,
+\label{eq:loss_md}
+\end{equation}
+where the target $\hat{t} = \hat{E}$ is the ground-truth energy (usually available as well), $\hat{\mF}$ are the ground-truth forces, and the hyperparameter $\rho$ sets the forces' loss weight. For stable simulations $\mF_i$ must be continuously differentiable and the model $f_\theta$ itself therefore twice continuously differentiable. We hence cannot use discontinuous transformations such as ReLU non-linearities. Furthermore, since the atom positions $\mX$ can change arbitrarily we cannot use pre-computed auxiliary information $\mTheta$ such as bond types.
+\section{Directional message passing}
+\label{sec:dime}
+
+\textbf{Graph neural networks.} Graph neural networks treat the molecule as a graph, in which the nodes are atoms and edges are defined either via a predefined molecular graph or simply by connecting atoms that lie within a cutoff distance $c$. Each edge is associated with a pairwise distance between atoms $d_{ij} = \|\vx_i - \vx_j\|_2$. GNNs implement all of the above physical invariances by construction since they only use pairwise distances and not the full atom coordinates. However, note that a predefined molecular graph or a step function-like cutoff cannot be used for MD simulations since this would introduce discontinuities in the energy landscape. GNNs represent each atom $i$ via an atom embedding $\vh_i \in \R^H$. The atom embeddings are updated in each layer by passing messages along the molecular edges. Messages are usually transformed based on an edge embedding $\ve_{(ij)} \in \R^{H_\text{e}}$ and summed over the atom's neighbors $\mathcal{N}_i$, i.e. the embeddings are updated in layer $l$ via
+\begin{equation}
+    \vh_i^{(l+1)} = f_\text{update}(\vh_i^{(l)}, \sum_{j \in \mathcal{N}_i} f_\text{int}(\vh_j^{(l)}, \ve_{(ij)}^{(l)})),
+\end{equation}
+with the update function $f_\text{update}$ and the interaction function $f_\text{int}$, which are both commonly implemented using neural networks. The edge embeddings $\ve_{(ij)}^{(l)}$ usually only depend on the interatomic distances, but can also incorporate additional bond information \citep{gilmer_neural_2017} or be recursively updated in each layer using the neighboring atom embeddings \citep{jorgensen_neural_2018}.
+
+\textbf{Directionality.} In principle, the pairwise distance matrix contains the full geometrical information of the molecule. However, GNNs do not use the full distance matrix since this would mean passing messages globally between all pairs of atoms, which increases computational complexity and can lead to overfitting. Instead, they usually use a cutoff distance $c$, which means they cannot distinguish between certain molecules \citep{xu_how_2019}. E.g. at a cutoff of roughly \SI{2}{\angstrom} a regular GNN would not be able to distinguish between a hexagonal (e.g. Cyclohexane) and two triangular molecules (e.g. Cyclopropane) with the same bond lengths since the neighborhoods of each atom are exactly the same for both (see Appendix, Fig. \ref{fig:wl-test}). This problem can be solved by modeling the directions to neighboring atoms instead of just their distances. A principled way of doing so while staying invariant to a transformation group $G$ (such as described in Sec. \ref{sec:req}) is via group-equivariance \citep{cohen_group_2016}. A function $f: X \rightarrow Y$ is defined as being equivariant if $f(\varphi_g^X(x)) = \varphi_g^Y(f(x))$, with the group action in the input and output space $\varphi_g^X$ and $\varphi_g^Y$. However, equivariant CNNs only achieve equivariance with respect to a discrete set of rotations \citep{cohen_group_2016}. For a precise prediction of molecular properties we need \emph{continuous} equivariance with respect to rotations, i.e. to the SO(3) group.
+
+\textbf{Directional embeddings.} We solve this problem by noting that an atom by itself is rotationally invariant. This invariance is only broken by neighboring atoms that interact with it, i.e. those inside the cutoff $c$. Since each neighbor breaks up to one rotational invariance they also introduce additional degrees of freedom, which we need to represent in our model. We can do so by generating a separate embedding $\vm_{ji}$ for each atom $i$ and neighbor $j$ by applying the same learned filter in the direction of each neighboring atom (in contrast to equivariant CNNs, which apply filters in fixed, global directions). These directional embeddings are equivariant with respect to global rotations since the associated directions rotate \emph{with} the molecule and hence conserve the relative directional information between neighbors.
+
+\textbf{Representation via joint 2D basis.} We use the directional information associated with each embedding by leveraging the angle $\alpha_{(kj,ji)} = \angle \vx_k \vx_j \vx_i$ when aggregating the neighboring embeddings $\vm_{kj}$ of $\vm_{ji}$. We combine the angle with the interatomic distance $d_{kj}$ associated with the incoming message $\vm_{kj}$ and jointly represent both in $\va_\text{SBF}^{(kj,ji)} \in \R^{N_\text{SHBF} \cdot N_\text{SRBF}}$ using a 2D representation based on spherical Bessel functions and spherical harmonics, as explained in Sec. \ref{sec:pbr}. We empirically found that this basis representation provides a better inductive bias than the raw angle alone. Note that by only using interatomic distances and angles our model becomes invariant to rotations.
+
+\begin{wrapfigure}[11]{r}{0.23\textwidth}
+    \centering
+    \vspace*{-0.3cm}
+
+\begingroup
+\medmuskip=0mu
+\pgfdeclarelayer{background}
+\pgfdeclarelayer{foreground}
+\pgfsetlayers{background,main,foreground}
+\begin{tikzpicture}
+    \def\linewidth{0.4pt}  %
+    \tikzstyle{atom} = [draw, line width=\linewidth, circle, fill=white, anchor=north, inner sep=0.1pt, minimum size=0.6cm]
+    \tikzstyle{conn} = [-{Latex}, line width=0.7pt]
+
+    \begin{pgfonlayer}{foreground}
+        \node[atom] (j) at (0, 0) {$j$};
+        \node[atom, line width=0.6pt, fill=black!10] (i) at (0, 1.8) {$i$};
+        \node[black!50, atom] (k1) at (-0.9, 0.8) {$k_1$};
+        \node[black!50, atom] (k2) at (0.8, 1.4) {$k_2$};
+        \node[black!50, atom] (k3) at (1.4, 0.2) {$k_3$};
+    \end{pgfonlayer}
+
+    \pic[draw, color=orange, {Latex}-, angle eccentricity=0.83, angle radius=0.7cm, fill=orange!5]{angle = i--j--k1};
+    \pic[draw, color=blue, -{Latex}, angle eccentricity=0.7, angle radius=1.0cm, fill=blue!5]{angle = k2--j--i};
+    \pic[draw, color=green, -{Latex}, angle eccentricity=0.75, angle radius=0.8cm, fill=green!5]{angle = k3--j--i};
+
+    \draw[conn, line width=0.8pt] (j) -> (i) node[pos=0.8, left=1pt, inner sep=1pt] {$\vm_{ji}$};
+    \draw[conn, color=orange] (k1) -> (j) node[pos=0.8, below left=1pt, inner sep=0pt] {$\vm_{k_1j}$};
+    \draw[conn, color=blue] (k2) -> (j) node[pos=0.35, below right, inner sep=0.5pt] {$\vm_{k_2j}$};
+    \draw[conn, color=green] (k3) -> (j) node[pos=0.4, below=4pt, inner sep=1pt] {$\vm_{k_3j}$};
+\end{tikzpicture}
+\endgroup
+
+    \caption{Aggregation scheme for message embeddings.}
+    \label{fig:agg}
+\end{wrapfigure}
+
+\textbf{Message embeddings.} The directional embedding $\vm_{ji}$ associated with the atom pair $ji$ can be thought of as a message being sent from atom $j$ to atom $i$. Hence, in analogy to belief propagation, we embed each atom $i$ using a set of incoming messages $\vm_{ji}$, i.e. $\vh_i = \sum_{j \in \mathcal{N}_i} \vm_{ji}$, and update the message $\vm_{ji}$ based on the incoming messages $\vm_{kj}$ \citep{yedidia_understanding_2003}. Hence, as illustrated in Fig. \ref{fig:agg}, we define the update function and aggregation scheme for message embeddings as
+\begin{equation}
+    \vm_{ji}^{(l+1)} = f_\text{update}(\vm_{ji}^{(l)}, \sum_{k \in \mathcal{N}_j \setminus \{i\}} f_\text{int}(\vm_{kj}^{(l)}, \ve_\text{RBF}^{(ji)}, \va_\text{SBF}^{(kj,ji)})),
+    \label{eq:agg}
+\end{equation}
+where $\ve_\text{RBF}^{(ji)}$ denotes the radial basis function representation of the interatomic distance $d_{ji}$, which will be discussed in Sec. \ref{sec:pbr}. We found this aggregation scheme to not only have a nice analogy to belief propagation, but also to empirically perform better than alternatives. Note that since $f_\text{int}$ now incorporates the angle between atom pairs, or bonds, we have enabled our model to directly learn the angular potential $E_\text{angle}$, the second term in Eq. \ref{eq:energy}. Moreover, the message embeddings are essentially embeddings of atom pairs, as used by the provably more powerful GNNs based on higher-order Weisfeiler-Lehman tests of isomorphism. Our model can therefore provably distinguish molecules that a regular GNN cannot (e.g. the previous example of a hexagonal and two triangular molecules) \citep{morris_weisfeiler_2019}.
+\section{Physically based representations}
+\label{sec:pbr}
+
+\textbf{Representing distances and angles.} For the interaction function $f_\text{int}$ in Eq. \ref{eq:agg} we use a joint representation $\va_\text{SBF}^{(kj,ji)}$ of the angles $\alpha_{(kj,ji)}$ between message embeddings and the interatomic distances $d_{kj} = \|\vx_k - \vx_j\|_2$, as well as a representation $\ve_\text{RBF}^{(ji)}$ of the distances $d_{ji}$. Earlier works have used a set of Gaussian radial basis functions to represent interatomic distances, with tightly spaced means that are distributed e.g. uniformly \citep{schutt_schnet:_2017} or exponentially \citep{unke_physnet:_2019}. Similar in spirit to the functional bases used by steerable CNNs \citep{cohen_steerable_2017,cheng_rotdcf:_2019} we propose to use an orthogonal basis instead, which reduces redundancy and thus improves parameter efficiency. Furthermore, a basis chosen according to the properties of the modeled system can even provide a helpful inductive bias. We therefore derive a proper basis representation for quantum systems next.
+
+\textbf{From Schrödinger to Fourier-Bessel.} To construct a basis representation in a principled manner we first consider the space of possible solutions. Our model aims at approximating results of density functional theory (DFT) calculations, i.e. results given by an electron density $\left< \Psi(\vd) | \Psi(\vd) \right>$, with the electron wave function $\Psi(\vd)$ and $\vd = \vx_k - \vx_j$. The solution space of $\Psi(\vd)$ is defined by the time-independent Schrödinger equation $\left( -\frac{\hbar^2}{2m}\nabla^2 + V(\vd) \right) \Psi(\vd) = E \Psi(\vd)$, with constant mass $m$ and energy $E$. We do not know the potential $V(\vd)$ and so choose it in an uninformative way by simply setting it to 0 inside the cutoff distance $c$ (up to which we pass messages between atoms) and to $\infty$ outside. Hence, we arrive at the Helmholtz equation $(\nabla^2 + k^2) \Psi(\vd) = 0$, with the wave number $k = \frac{\sqrt{2mE}}{\hbar}$ and the boundary condition $\Psi(c) = 0$ at the cutoff $c$. Separation of variables in polar coordinates $(d, \alpha, \varphi)$ yields the solution \citep{griffiths_introduction_2018}
+\begin{equation}
+    \Psi(d, \alpha, \varphi) = \sum_{l=0}^\infty \sum_{m=-l}^l (a_{lm} j_l(kd) + b_{lm}y_l(kd)) Y_l^m(\alpha, \varphi),
+\end{equation}
+\begin{wrapfigure}[26]{r}{0.27\textwidth}
+    \vspace*{-0.3cm}
+    \begin{minipage}{0.27\textwidth}
+        \centering
+        \resizebox{\textwidth}{!}{
+        \begin{tikzpicture}
+            \node[anchor=south west] (plot) at (0, 0) {\includegraphics{figures/sbf.png}};
+
+            \draw[-{latex}, line width=0.4pt] (0, 3.5) -- (0, 0.5) node[pos=0.5, left] {$l$};
+            \draw[-{latex}, line width=0.4pt] (0.5, 0) -- (3.5, 0) node[pos=0.5, below] {$n$};
+        \end{tikzpicture}
+        }
+        \caption{2D spherical Fourier-Bessel basis $\tilde{a}_{\text{SBF}, ln}(d, \alpha)$.}
+        \label{fig:sbf}
+    \end{minipage}
+    \\
+    \vspace{\baselineskip}
+    \begin{minipage}{0.27\textwidth}
+        \centering
+        \resizebox{\textwidth}{!}{
+        \input{figures/rbf.pgf}
+        }
+        \caption{Radial Bessel basis for $N_\text{RBF} = 5$.}
+        \label{fig:rbf}
+    \end{minipage}
+\end{wrapfigure}
+with the spherical Bessel functions of the first and second kind $j_l$ and $y_l$ and the spherical harmonics $Y_l^m$. As common in physics we only use the regular solutions, i.e. those that do not approach $-\infty$ at the origin, and hence set $b_{lm} = 0$. Recall that our first goal is to construct a joint 2D basis for $d_{kj}$ and $\alpha_{(kj,ji)}$, i.e. a function that depends on $d$ and a single angle $\alpha$. To achieve this we set $m=0$ and obtain $\Psi_\text{SBF}(d, \alpha) = \sum_l a_l j_l(kd) Y_l^0(\alpha)$. The boundary conditions are satisfied by setting $k = \frac{z_{ln}}{c}$, where $z_{ln}$ is the \mbox{$n$-th} root of the \mbox{$l$-order} Bessel function, which are precomputed numerically. Normalizing $\Psi_\text{SBF}$ inside the cutoff distance $c$ yields the 2D spherical Fourier-Bessel basis $\tilde{\va}_\text{SBF}^{(kj,ji)} \in \R^{N_\text{SHBF} \cdot N_\text{SRBF}}$, which is illustrated in Fig. \ref{fig:sbf} and defined by
+\begin{equation}
+    \tilde{a}_{\text{SBF}, ln}(d, \alpha) = \sqrt{\frac{2}{c^3 j_{l+1}^2(z_{ln})}} j_l(\frac{z_{ln}}{c} d) Y_l^0(\alpha),
+\end{equation}
+with $l \in [0 \twodots N_\text{SHBF} - 1]$ and $n \in [1 \twodots N_\text{SRBF}]$. Our second goal is constructing a radial basis for $d_{ji}$, i.e. a function that solely depends on $d$ and not on the angles $\alpha$ and $\varphi$. We achieve this by setting $l=m=0$ and obtain $\Psi_\text{RBF}(d) = a j_0(\frac{z_{0,n}}{c} d)$, with roots at $z_{0,n} = n \pi$. Normalizing this function on $[0, c]$ and using $j_0(d) = \sin(d)/d$ gives the radial basis $\tilde{\ve}_\text{RBF} \in \R^{N_\text{RBF}}$, as shown in Fig. \ref{fig:rbf} and defined by
+\begin{equation}
+    \tilde{e}_{\text{RBF}, n}(d) = \sqrt{\frac{2}{c}} \frac{\sin(\frac{n \pi}{c} d)}{d},
+\end{equation}
+with $n \in [1 \twodots N_\text{RBF}]$. Both of these bases are purely real-valued and orthogonal in the domain of interest. They furthermore enable us to bound the highest-frequency components by $\omega_\alpha \le \frac{N_\text{SHBF}}{2\pi}$, $\omega_{d_{kj}} \le \frac{N_\text{SRBF}}{c}$, and $\omega_{d_{ji}} \le \frac{N_\text{RBF}}{c}$. This restriction is an effective way of regularizing the model and ensures that predictions are stable to small perturbations. We found $N_\text{SRBF} = 6$ and $N_\text{RBF} = 16$ radial basis functions to be more than sufficient. Note that $N_\text{RBF}$ is 4x lower than PhysNet's 64 \citep{unke_physnet:_2019} and 20x lower than SchNet's 300 radial basis functions \citep{schutt_schnet:_2017}.
+
+\textbf{Continuous cutoff.} $\tilde{\va}_\text{SBF}^{(kj,ji)}$ and $\tilde{\ve}_\text{RBF}(d)$ are not twice continuously differentiable due to the step function cutoff at $c$. To alleviate this problem we introduce an envelope function $u(d)$ that has a root of multiplicity 3 at $d=c$, causing the final functions $\va_\text{RBF}(d) = u(d) \tilde{\va}_\text{RBF}(d)$ and $\ve_\text{RBF}(d) = u(d) \tilde{\ve}_\text{RBF}(d)$ and their first and second derivatives to go to 0 at the cutoff. We achieve this with the polynomial
+\begin{equation}
+    u(d) = 1 - \frac{(p+1)(p+2)}{2} d^p + p(p+2) d^{p+1} - \frac{p(p+1)}{2} d^{p+2},
+    \label{eq:env}
+\end{equation}
+where $p \in \sN_0$. We did not find the model to be sensitive to different choices of envelope functions and choose $p=6$. Note that using an envelope function causes the bases to lose their orthonormality, which we did not find to be a problem in practice. We furthermore fine-tune the Bessel wave numbers $k_n = \frac{n \pi}{c}$ used in $\tilde{\ve}_\text{RBF} \in \R^{N_\text{RBF}}$ via backpropagation after initializing them to these values, which we found to give a small boost in prediction accuracy.
+\section{Directional Message Passing Neural Network (DimeNet)}
+\begin{figure}[t]
+    \centering
+    \resizebox{\textwidth}{!}{
+
+\pgfplotsset{set layers=standard}
+\begingroup
+\medmuskip=0mu
+\begin{tikzpicture}
+    \def\linewidth{0.4pt}  %
+    \tikzstyle{block} = [draw, line width=\linewidth, minimum height=0.6cm, minimum width=2cm, fill=white, anchor=north]
+    \tikzstyle{opcircle} = [draw, line width=\linewidth, circle, fill=white, anchor=north, inner sep=0.1pt, minimum size=0.6cm]
+    \tikzstyle{flow} = [-{Latex}, line width=\linewidth]
+
+    \node[anchor=south west] (model_title) at (-8.5, -0.45) {{\large \textbf{Model:}}};
+
+    \node[block, minimum width=3.9cm, minimum height=4.5cm, fill=green!30, anchor=north west] (emb_) at (-2.05, 0) {};
+    \node[block, minimum width=7.6cm, minimum height=8.2cm, fill=blue!30, anchor=north west] (int_) at ($(emb_.north east) + (0.8, 0)$) {};
+    \node[block, minimum width=2.6cm, minimum height=5.8cm, fill=orange!30, anchor=north west] (out_) at ($(int_.north east) + (0.2, 0)$) {};
+    \node[block, minimum width=2.6cm, minimum height=2.8cm, fill=pink!30, anchor=south] (res_) at (emb_ |- int_.south) {};
+
+    \node[anchor=south west] (emb_title) at ($(emb_.north west) + (-0.2, 0.5)$) {{\large \textbf{Embedding:}}};
+    \node[anchor=south west] (int_title) at ($(int_.north west) + (-0.2, 0.6)$) {{\large \textbf{Interaction:}}};
+    \node[anchor=south west] (out_title) at ($(out_.north west) + (-0.2, 0.5)$) {{\large \textbf{Output:}}};
+    \node[anchor=south west] (res_title) at ($(emb_title.west |- res_.north west) + (0, 0.05)$) {{\large \textbf{Residual:}}};
+
+    {
+        \begin{pgfonlayer}{axis foreground}
+            \node[block, minimum width=1.2cm, minimum height=1.2cm, fill=none] (rbf) at ($(model_title.south west) + (1.0, -0.5)$) {RBF};
+        \end{pgfonlayer}
+        \node[anchor=south east] (dji) at (rbf.north) {$d_{ji}$};
+        \begin{axis}[scale only axis, hide axis, width=1.2cm, height=1.2cm, domain=0:1, anchor=center, at=(rbf.center), samples=100, xmin=0, xmax=1]
+            \foreach \n in {1,...,12}
+            {
+                \addplot[mark=none, line width=0.2pt, color=yellow!80]{sin(deg(\n*pi*x)) * (1/x - 6*x*x*x*x + 15*x*x*x - 10*x*x)};
+            }
+        \end{axis}
+        \draw[flow] ($(dji.east) + (0, 0.1)$) -> (rbf);
+        \node[anchor=north east, inner xsep=2pt] (e) at (rbf.south) {$\ve_\text{RBF}^{(ji)}$};
+
+        \node[block, minimum height=1.2cm, minimum width=1.2cm, fill=none] (sbf) at ($(rbf.north) + (1.4, 0)$) {};
+        \node[anchor=center, opacity=0.7] (sbf_plot) at (sbf.center) {\includegraphics[width=1.1cm]{figures/sbf.png}};
+        \node[anchor=center] (sbf_label) at (sbf.center) {SBF};
+        \node[anchor=south east] (dkj) at ($(sbf.north) + (-0.2, 0)$) {$d_{kj}$};
+        \node[anchor=south west] (alpha) at ($(sbf.north) + (0.2, 0)$) {$\alpha_{(kj,ji)}$};
+        \draw[flow] ($(dkj.east) + (0, 0.1)$) -> (dkj.south east);
+        \draw[flow] ($(alpha.west) + (0, 0.133)$) -> (alpha.south west);
+        \node[anchor=north east, inner xsep=2pt] (a) at (sbf.south) {$\va_\text{SBF}^{(kj,ji)}$};
+
+        \node[anchor=south] (z) at ($(sbf.north) + (1.4, -1.3)$) {$\vz$};
+        \node[block, fill=green!30] (emb) at ($(z.south) + (0, -0.35)$) {Embedding};
+        \draw[flow] (z) -> (emb);
+        \draw[flow] (rbf) |- (emb.west);
+
+        \node[block, fill=blue!30] (int1) at ($(emb.south) + (0, \linewidth)$) {Interaction};
+        \draw[flow] (sbf) |- ($(int1.west) + (0, 0.1)$);
+        \draw[flow] (rbf |- emb.west) |- ($(int1.west) + (0, -0.1)$);
+        \node[block, fill=blue!30] (int2) at ($(int1.south) + (0, \linewidth)$) {Interaction};
+        \draw[flow] ($(sbf |- int1.west) + (0, 0.1)$) |- ($(int2.west) + (0, 0.1)$);
+        \draw[flow] ($(rbf |- int1.west) + (0, -0.1)$) |- ($(int2.west) + (0, -0.1)$);
+        \node[block, fill=blue!30] (int3) at ($(int2.south) + (0, \linewidth)$) {Interaction};
+        \draw[flow] ($(sbf |- int2.west) + (0, 0.1)$) |- ($(int3.west) + (0, 0.1)$);
+        \draw[flow] ($(rbf |- int2.west) + (0, -0.1)$) |- ($(int3.west) + (0, -0.1)$);
+        \node[block, fill=blue!30] (int4) at ($(int3.south) + (0, \linewidth)$) {Interaction};
+        \draw[flow] ($(sbf |- int3.west) + (0, 0.1)$) |- ($(int4.west) + (0, 0.1)$);
+        \draw[flow] ($(rbf |- int3.west) + (0, -0.1)$) |- ($(int4.west) + (0, -0.1)$);
+
+        \node[block, fill=blue!30] (int5) at ($(int4.south) + (0, \linewidth)$) {Interaction};
+        \draw[flow] ($(sbf |- int4.west) + (0, 0.1)$) |- ($(int5.west) + (0, 0.1)$);
+        \draw[flow] ($(rbf |- int4.west) + (0, -0.1)$) |- ($(int5.west) + (0, -0.1)$);
+        \node[block, fill=blue!30] (int6) at ($(int5.south) + (0, \linewidth)$) {Interaction};
+        \draw[flow] ($(sbf |- int5.west) + (0, 0.1)$) |- ($(int6.west) + (0, 0.1)$);
+        \draw[flow] ($(rbf |- int5.west) + (0, -0.1)$) |- ($(int6.west) + (0, -0.1)$);
+
+        \node[opcircle,anchor=west] (sum) at ($(int3.east) + (0.5, 0)$) {$\sum$};
+        \draw[flow] (emb.east) -- ($(emb.east) + (0.2, 0)$) |- (sum.west);
+        \draw[line width=\linewidth] (int1.east) -- ($(int1.east) + (0.2, 0)$);
+        \draw[line width=\linewidth] (int2.east) -- ($(int2.east) + (0.2, 0)$);
+        \draw[line width=\linewidth] (int3.east) -- ($(int3.east) + (0.2, 0)$);
+        \draw[line width=\linewidth] (int4.east) -| ($(int3.east) + (0.2, 0)$);
+        \draw[line width=\linewidth] (int5.east) -| ($(int4.east) + (0.2, 0)$);
+        \draw[line width=\linewidth] (int6.east) -| ($(int5.east) + (0.2, 0)$);
+        \node[anchor=south] (t) at ($(sum.east) + (0.3, 0)$) {$t$};
+        \draw[flow] (sum.east) -- (t.south);
+    }
+
+    {
+        \node[anchor=south west] (emb_rbf) at ($(emb_.north west) + (0.9, 0)$) {$\ve_\text{RBF}^{(ji)}$};
+        \node[anchor=south west] (emb_z) at ($(emb_rbf.south west) + (1.7, 0)$) {$z_j, z_i$};
+
+        \node[block, minimum width=1cm] (emb_dense_rbf) at ($(emb_rbf.south west) + (0, -0.5)$) {$\mW \square$};
+        \draw[flow] (emb_rbf.west) -> (emb_dense_rbf);
+
+        \node[block] (emb_embz) at ($(emb_z.south west) + (0, -0.5)$) {Embedding};
+        \draw[flow] (emb_z.west) -> (emb_embz);
+        \node[anchor=north west, inner xsep=1pt, inner ysep=1pt] (emb_hj) at ($(emb_embz.south) + (-0.5, 0)$) {$\vh_j^{(0)}$};
+        \node[anchor=north west, inner xsep=1pt, inner ysep=1pt] (emb_hi) at ($(emb_embz.south) + (0.5, 0)$) {$\vh_i^{(0)}$};
+
+        \node[opcircle] (emb_concat) at ($(emb_dense_rbf.south) + (0.6, -0.5)$) {$\|$};
+        \draw[flow] (emb_dense_rbf.south) |- (emb_concat.west);
+        \draw[flow] (emb_hj.north west) -> ($(emb_hj.north west) + (0, -0.2)$) -| (emb_concat.north);
+        \draw[flow] (emb_hi.north west) |- (emb_concat.east);
+
+        \node[block] (emb_dense) at ($(emb_concat.south) + (-0.1, -0.5)$) {$\sigma(\mW \square + \vb)$};
+        \draw[flow] (emb_concat.south) -> ($(emb_concat.south) + (0, -0.2)$) -| (emb_dense.north);
+
+        \node[block, fill=orange!30, anchor=south east] (emb_out) at ($(emb_.south east) + (-0.2, 0.2)$) {Output};
+        \draw[flow] ($(emb_dense |- emb_out.west) + (0, 0.1)$) -> ($(emb_out.west) + (0, 0.1)$);
+        \draw[flow] ($(emb_rbf.south west) + (0, -0.2)$) -> ($(emb_.north west) + (0.2, -0.2)$) |- ($(emb_out.west) + (0, -0.1)$);
+        \node[anchor=south west] (emb_h) at (emb_.east |- emb_out.east) {$t_i^{(1)}$};
+        \draw[flow] (emb_out.east) -> (emb_h.south);
+
+        \node[anchor=north east] (emb_next) at (emb_dense.south) {$\vm_{ji}^{(1)}$};
+        \draw[flow] (emb_dense.south) -> ($(emb_.south -| emb_dense.south) + (0, -0.3)$);
+    }
+
+    {
+        \node[block, anchor=north west, minimum width=3.5cm, minimum height=4.1cm, fill=blue!10] (int_dime_block) at ($(int_.north west) + (0.5, -0.05)$) {};
+        \node[anchor=south west, align=left] (int_dime) at (int_dime_block.south west) {Directional \\ message passing};
+
+        \node[anchor=south east, inner xsep=2pt] (int_rbf_ji) at ($(int_.north west) + (0.2, 0)$) {$\ve_\text{RBF}^{(ji)}$};
+        \node[anchor=south west, inner xsep=2pt] (int_sbf) at ($(int_.north -| int_rbf_ji.east) + (0.15, 0)$) {$\va_\text{SBF}^{(kj,ji)}$};
+        \node[anchor=south west] (int_mkj) at ($(int_.north -| int_sbf.west) + (2.55, 0)$) {$\vm_{kj}^{(l-1)}$};
+        \node[anchor=north east] (int_Nj) at (int_mkj.west |- int_dime_block.north) {\scriptsize $k \in \mathcal{N}_j \setminus \{i\}$};
+        \node[anchor=south west] (int_mji) at ($(int_.north -| int_mkj.west) + (2.2, 0)$) {$\vm_{ji}^{(l-1)}$};
+
+        \node[block] (int_dense_mji) at ($(int_mji.south west) + (0, -0.5)$) {$\sigma(\mW \square + \vb)$};
+        \node[block] (int_dense_mkj) at (int_mkj.south west |- int_dense_mji.north) {$\sigma(\mW \square + \vb)$};
+        \draw[flow] (int_mji.west) -> (int_dense_mji);
+        \draw[flow] (int_mkj.west) -> (int_dense_mkj);
+
+        \node[opcircle] (int_dot_rbf) at ($(int_dense_mkj.south) + (0, -0.3)$) {$\odot$};
+        \node[block, anchor=north east, minimum width=1cm] (int_dense_rbf) at ($(int_dense_mkj.west |- int_dot_rbf.north) + (-0.2, 0)$) {$\mW \square$};
+        \draw[flow] ($(int_rbf_ji.east |- int_dense_rbf.north) + (0, 0.3)$) -| (int_dense_rbf.north);
+        \draw[flow] (int_dense_mkj) -> (int_dot_rbf);
+        \draw[flow] (int_dense_rbf) |- (int_dot_rbf.west);
+
+        \node[block, minimum width=1.4cm] (int_bilinear_sbf) at ($(int_dot_rbf.south) + (-0.2, -0.5)$) {$\square^T \tW \square$};
+        \node[block, minimum width=1cm] (int_dense_sbf) at (int_dense_rbf |- int_bilinear_sbf.north) {$\mW \square$};
+        \draw[flow] (int_sbf.west) |- ($(int_dense_sbf.north) + (0, 0.3)$) -> (int_dense_sbf);
+        \draw[flow] (int_dot_rbf.south) |- ($(int_bilinear_sbf.north) + (0, 0.3)$) -> (int_bilinear_sbf);
+        \draw[flow] (int_dense_sbf) |- (int_bilinear_sbf.west);
+
+        \node[opcircle, anchor=west] (int_sum_mkj) at ($(int_bilinear_sbf.east) + (0.3, 0)$)  {$\sum_k$};
+        \draw[flow] (int_bilinear_sbf) -> (int_sum_mkj);
+
+        \node[opcircle, anchor=north] (int_add_sum) at (int_dense_mji.south |- int_sum_mkj.north) {$+$};
+        \draw[flow] (int_dense_mji) -> (int_add_sum);
+        \draw[flow] (int_sum_mkj) -> (int_add_sum);
+
+        \node[block, fill=pink!30] (int_res) at ($(int_add_sum.south) + (0, -0.3)$) {Residual};
+        \draw[flow] (int_add_sum) -> (int_res);
+        \node[block] (int_dense1) at ($(int_res.south) + (0, \linewidth)$) {$\sigma(\mW \square + \vb)$};
+
+        \node[opcircle] (int_add_old) at ($(int_dense1.south) + (0, -0.3)$) {$+$};
+        \draw[flow] (int_dense1) -> (int_add_old);
+        \draw[flow] ($(int_mji.south west) + (0, -0.2)$) -| ($(int_add_old.east) + (1, 0)$) -> (int_add_old.east);
+
+        \node[block, fill=pink!30] (int_atomres1) at ($(int_add_old.south) + (0, -0.3)$) {Residual};
+        \draw[flow] (int_add_old) -> (int_atomres1);
+        \node[block, fill=pink!30] (int_atomres2) at ($(int_atomres1.south) + (0, \linewidth)$) {Residual};
+
+        \node[block, fill=orange!30, anchor=south east] (int_out) at ($(int_.south east) + (-0.2, 0.2)$) {Output};
+        \draw[flow] ($(int_atomres2 |- int_out.west) + (0, 0.1)$) -> ($(int_out.west) + (0, 0.1)$);
+        \draw[flow] (int_rbf_ji.east) |- ($(int_out.west) + (0, -0.1)$);
+        \node[anchor=south west] (int_h) at (int_.east |- int_out.east) {$t_i^{(l)}$};
+        \draw[flow] (int_out.east) -> (int_h.south);
+
+        \node[anchor=north east] (int_next) at (int_atomres2.south) {$\vm_{ji}^{(l)}$};
+        \draw[flow] (int_atomres2.south) -> ($(int_.south -| int_atomres2.south) + (0, -0.3)$);
+    }
+
+    {
+        \node[anchor=south east, inner xsep=2pt] (out_rbf) at ($(out_.north west) + (0.65, 0)$) {$\ve_\text{RBF}^{(ji)}$};
+        \node[anchor=south west] (out_mji) at ($(out_.north) + (0, 0)$) {$\vm_{ji}^{(l)}$};
+        \node[anchor=north west] (out_Ni) at (out_.north) {\scriptsize $j \in \mathcal{N}_i$};
+
+        \node[block, minimum width=1cm] (out_dense_rbf) at ($(out_rbf.south east) + (0, -0.3)$) {$\mW \square$};
+        \draw[flow] (out_rbf.east) -> (out_dense_rbf);
+
+        \node[opcircle] (out_dot_rbf) at ($(out_ |- out_dense_rbf.south) + (0, -0.3)$) {$\odot$};
+        \draw[flow] (out_mji.west) |- ($(out_dot_rbf.north) + (0, 0.3)$) -> (out_dot_rbf.north);
+        \draw[flow] (out_dense_rbf.south) |- (out_dot_rbf.west);
+
+        \node[opcircle] (out_sum) at ($(out_dot_rbf.south) + (0, -0.3)$) {$\sum_j$};
+        \draw[flow] (out_dot_rbf) -> ($(out_dot_rbf.south) + (0, -0.2)$) -| (out_sum);
+
+        \node[block] (out_dense1) at ($(out_sum.south) + (0, -0.3)$) {$\sigma(\mW \square + \vb)$};
+        \node[block] (out_dense2) at ($(out_dense1.south) + (0, \linewidth)$) {$\sigma(\mW \square + \vb)$};
+        \node[block] (out_dense3) at ($(out_dense2.south) + (0, \linewidth)$) {$\sigma(\mW \square + \vb)$};
+        \node[block] (out_dense4) at ($(out_dense3.south) + (0, \linewidth)$) {$\mW \square$};
+        \draw[flow] (out_sum) -> (out_dense1);
+
+        \node[anchor=north west] (out_hi) at (out_.south) {$t_i^{(l)}$};
+        \draw[flow] (out_dense4.south) -> ($(out_.south) + (0, -0.3)$);
+    }
+
+    {
+        \node[anchor=south west] (res_in) at ($(res_.north) + (-0.1, 0)$) {$\vm_{ji}$};
+
+        \node[block] (res_dense1) at ($(res_in.south west) + (0, -0.5)$) {$\sigma(\mW \square + \vb)$};
+        \node[block] (res_dense2) at ($(res_dense1.south) + (0, \linewidth)$) {$\sigma(\mW \square + \vb)$};
+        \draw[flow] (res_in.west) -> (res_dense1);
+
+        \node[opcircle] (res_add) at ($(res_dense2.south) + (0, -0.3)$) {$+$};
+        \draw[flow] (res_dense2) -> (res_add);
+        \draw[flow] ($(res_in.south west) + (0, -0.2)$) -| ($(res_add) + (1.2, 0)$) -> (res_add);
+
+        \draw[flow] (res_add.south) -> ($(res_.south -| res_in.west) + (0, -0.3)$);
+    }
+\end{tikzpicture}
+\endgroup
+
+    }
+    \caption{The DimeNet architecture. $\square$ denotes the layer's input and $\|$ denotes concatenation. The distances $d_{ji}$ are represented using spherical Bessel functions and the distances $d_{kj}$ and angles $\alpha_{(kj,ji)}$ are jointly represented using a 2D spherical Fourier-Bessel basis. An \textcolor{green}{embedding block} generates the inital message embeddings $\vm_{ji}$. These embeddings are updated in multiple \textcolor{blue}{interaction blocks} via directional message passing, which uses the neighboring messages $\vm_{kj}, k \in \mathcal{N}_j \setminus \{i\}$, the 2D representations $\va_\text{SBF}^{(kj,ji)}$, and the distance representations $\ve_\text{RBF}^{(ji)}$. Each block passes the resulting embeddings to an \textcolor{orange}{output block}, which transforms them using the radial basis $\ve_\text{RBF}^{(ji)}$ and sums them up per atom. Finally, the outputs of all layers are summed up to generate the prediction.}
+    \label{fig:dimenet}
+\end{figure}
+
+The Directional Message Passing Neural Network's (DimeNet) design is based on a streamlined version of the PhysNet architecture \citep{unke_physnet:_2019}, in which we have integrated directional message passing and spherical Fourier-Bessel representations. DimeNet generates predictions that are invariant to atom permutations and translation, rotation and inversion of the molecule. DimeNet is suitable both for the prediction of various molecular properties and for molecular dynamics (MD) simulations. It is twice continuously differentiable and able to learn and predict atomic forces via backpropagation, as described in Sec. \ref{sec:req}. The predicted forces fulfill energy conservation by construction and are equivariant with respect to permutation and rotation. Model differentiability in combination with basis representations that have bounded maximum frequencies furthermore guarantees smooth predictions that are stable to small deformations. Fig. \ref{fig:dimenet} gives an overview of the architecture.
+
+\textbf{Embedding block.} Atomic numbers are represented by learnable, randomly initialized atom type embeddings $\vh_i^{(0)} \in \R^F$ that are shared across molecules. The first layer generates message embeddings from these and the distance between atoms via
+\begin{equation}
+    \vm_{ji}^{(1)} = \sigma([\vh_j^{(0)} \| \vh_i^{(0)} \| \ve_\text{RBF}^{(ji)}] \mW + \vb),
+\end{equation}
+where $\|$ denotes concatenation and the weight matrix $\mW$ and bias $\vb$ are learnable.
+
+\textbf{Interaction block.} The embedding block is followed by multiple stacked interaction blocks. This block implements $f_\text{int}$ and $f_\text{update}$ of Eq. \ref{eq:agg} as shown in Fig. \ref{fig:dimenet}. Note that the 2D representation $\va_\text{SBF}^{(kj,ji)}$ is first transformed into an $N_\text{bilinear}$-dimensional representation via a linear layer. The main purpose of this is to make the dimensionality of $\va_\text{SBF}^{(kj,ji)}$ independent of the subsequent bilinear layer, which uses a comparatively large $N_\text{bilinear} \times F \times F$-dimensional weight tensor. We have also experimented with using a bilinear layer for the radial basis representation, but found that the element-wise multiplication $\ve_\text{RBF}^{(ji)} \mW \odot \vm_{kj}$ performs better, which suggests that the 2D representations require more complex transformations than radial information alone. The interaction block transforms each message embedding $\vm_{ji}$ using multiple residual blocks, which are inspired by ResNet \citep{he_deep_2016} and consist of two stacked dense layers and a skip connection.
+
+\textbf{Output block.} The message embeddings after each block (including the embedding block) are passed to an output block. The output block transforms each message embedding $\vm_{ji}$ using the radial basis $\ve_\text{RBF}^{(ji)}$, which ensures continuous differentiability and slightly improves performance. Afterwards the incoming messages are summed up per atom $i$ to obtain $\vh_i = \sum_j \vm_{ji}$, which is then transformed using multiple dense layers to generate the atom-wise output $t_i^{(l)}$. These outputs are then summed up to obtain the final prediction $t = \sum_i \sum_l t_i^{(l)}$.
+
+\textbf{Continuous differentiability.} Multiple model choices were necessary to achieve twice continuous model differentiability. First, DimeNet uses the self-gated Swish activation function $\sigma(x) = x \cdot \text{sigmoid}(x)$ \citep{ramachandran_searching_2018} instead of a regular ReLU activation function. Second, we multiply the radial basis functions $\tilde{\ve}_\text{RBF}(d)$ with an envelope function $u(d)$ that has a root of multiplicity 3 at the cutoff $c$. Finally, DimeNet does not use any auxiliary data but relies on atom types and positions alone.
+\section{Experiments}
+\label{sec:exp}
+
+\textbf{Models.} For hyperparameter choices and training setup see Appendix \ref{app:exp}. We use 6 state-of-the-art models for comparison: SchNet \citep{schutt_schnet:_2017}, PhysNet (results based on the reference implementation) \citep{unke_physnet:_2019}, provably powerful graph networks (PPGN, results provided by the original authors) \citep{maron_provably_2019}, MEGNet-simple (without auxiliary information) \citep{chen_graph_2019}, Cormorant \citep{anderson_cormorant:_2019}, and symmetrized gradient-domain machine learning (sGDML) \citep{chmiela_towards_2018}. Note that sGDML cannot be used for QM9 since it can only be trained on a single molecule.
+
+\begin{table}
+    \centering
+    \caption{MAE on QM9. DimeNet sets the state of the art on 11 targets, outperforming the second-best model on average by \SI{31}{\percent} (mean std. MAE).}
+    \begin{tabular}{llccccccc}
+Target &                                             Unit &         PPGN &                SchNet &       PhysNet &     MEGNet-s &    Cormorant &       \textbf{DimeNet} \\
+\hline
+$\mu$                        &                                      \si{\debye} &  \num{0.047} &           \num{0.033} &  \num{0.0529} &   \num{0.05} &   \num{0.13} &  \textbf{\num{0.0286}} \\
+$\alpha$                     &                                     \si{\bohr^3} &  \num{0.131} &           \num{0.235} &  \num{0.0615} &  \num{0.081} &  \num{0.092} &  \textbf{\num{0.0469}} \\
+$\epsilon_\text{HOMO}$       &                         \si{\milli\electronvolt} &   \num{40.3} &              \num{41} &    \num{32.9} &     \num{43} &     \num{36} &    \textbf{\num{27.8}} \\
+$\epsilon_\text{LUMO}$       &                         \si{\milli\electronvolt} &   \num{32.7} &              \num{34} &    \num{24.7} &     \num{44} &     \num{36} &    \textbf{\num{19.7}} \\
+$\Delta\epsilon$             &                         \si{\milli\electronvolt} &     \num{60.0} &              \num{63} &    \num{42.5} &     \num{66} &     \num{60} &    \textbf{\num{34.8}} \\
+$\left< R^2 \right>$         &                                     \si{\bohr^2} &  \num{0.592} &  \textbf{\num{0.073}} &   \num{0.765} &  \num{0.302} &  \num{0.673} &            \num{0.331} \\
+ZPVE                         &                         \si{\milli\electronvolt} &   \num{3.12} &             \num{1.7} &    \num{1.39} &   \num{1.43} &   \num{1.98} &    \textbf{\num{1.29}} \\
+$U_0$                        &                         \si{\milli\electronvolt} &   \num{36.8} &              \num{14} &    \num{8.15} &     \num{12} &     \num{28} &    \textbf{\num{8.02}} \\
+$U$                          &                         \si{\milli\electronvolt} &   \num{36.8} &              \num{19} &    \num{8.34} &     \num{13} &            - &    \textbf{\num{7.89}} \\
+$H$                          &                         \si{\milli\electronvolt} &   \num{36.3} &              \num{14} &    \num{8.42} &     \num{12} &            - &    \textbf{\num{8.11}} \\
+$G$                          &                         \si{\milli\electronvolt} &   \num{36.4} &              \num{14} &    \num{9.40} &     \num{12} &            - &    \textbf{\num{8.98}} \\
+$c_\text{v}$ \vspace{1pt}    &  \si[per-mode=fraction]{\cal\per\mol\per\kelvin} &  \num{0.055} &           \num{0.033} &  \num{0.0280} &  \num{0.029} &  \num{0.031} &  \textbf{\num{0.0249}} \\
+\hline
+std. MAE \rule{0pt}{1em-1pt} &                                    \si{\percent} &   \num{1.84} &            \num{1.76} &    \num{1.37} &   \num{1.80} &   \num{2.14} &    \textbf{\num{1.05}} \\
+logMAE                       &                                                - &  \num{-4.64} &           \num{-5.17} &   \num{-5.35} &  \num{-5.17} &  \num{-4.75} &   \textbf{\num{-5.57}} \\
+\end{tabular}
+
+    \label{tab:qm9}
+\end{table}
+
+\textbf{QM9.} We test DimeNet's performance for predicting molecular properties using the common QM9 benchmark \citep{ramakrishnan_quantum_2014}. It consists of roughly \num{130000} molecules in equilibrium with up to 9 heavy C, O, N, and F atoms. We use \num{110000} molecules in the training, \num{10000} in the validation and \num{10831} in the test set. We only use the atomization energy for $U_0$, $U$, $H$, and $G$, i.e. subtract the atomic reference energies, which are constant per atom type, and perform the training using \si{\electronvolt}. In Table \ref{tab:qm9} we report the mean absolute error (MAE) of each target and the overall mean standardized MAE (std. MAE) and mean standardized logMAE (for details see Appendix \ref{app:sum}). We predict $\Delta\epsilon$ simply by taking $\epsilon_\text{LUMO} - \epsilon_\text{HOMO}$, since it is calculated in exactly this way by DFT calculations. We train a separate model for each target, which significantly improves results compared to training a single shared model for all targets (see App. \ref{app:mt}). DimeNet sets the new state of the art on 11 out of 12 targets and decreases mean std. MAE by \SI{31}{\percent} and mean logMAE by \num{0.22} compared to the second-best model.
+
+\begin{figure}
+    \centering
+    \begin{minipage}{0.54\textwidth}
+        \captionsetup{type=table}
+        \caption{MAE on MD17 using \num{1000} training samples (energies in \si[per-mode=fraction]{\kilo\cal\per\mol}, forces in \si[per-mode=fraction]{\kilo\cal\per\mol\per\angstrom}). DimeNet outperforms SchNet by a large margin and performs roughly on par with sGDML.}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{llccc}
+                         &        &                sGDML &               SchNet &      \textbf{DimeNet} \\
+\hline
+\multirow{2}{*}{Aspirin} & Energy &  \textbf{\num{0.19}} &           \num{0.37} &           \num{0.204} \\
+                         & Forces &           \num{0.68} &           \num{1.35} &  \textbf{\num{0.499}} \\
+\cline{1-5}
+\multirow{2}{*}{Benzene} & Energy &           \num{0.10} &  \textbf{\num{0.08}} &  \textbf{\num{0.078}} \\
+                         & Forces &  \textbf{\num{0.06}} &           \num{0.31} &           \num{0.187} \\
+\cline{1-5}
+\multirow{2}{*}{Ethanol} & Energy &           \num{0.07} &           \num{0.08} &  \textbf{\num{0.064}} \\
+                         & Forces &           \num{0.33} &           \num{0.39} &  \textbf{\num{0.230}} \\
+\cline{1-5}
+\multirow{2}{*}{Malonaldehyde} & Energy &  \textbf{\num{0.10}} &           \num{0.13} &  \textbf{\num{0.104}} \\
+                         & Forces &           \num{0.41} &           \num{0.66} &  \textbf{\num{0.383}} \\
+\cline{1-5}
+\multirow{2}{*}{Naphthalene} & Energy &  \textbf{\num{0.12}} &           \num{0.16} &  \textbf{\num{0.122}} \\
+                         & Forces &  \textbf{\num{0.11}} &           \num{0.58} &           \num{0.215} \\
+\cline{1-5}
+\multirow{2}{*}{Salicylic acid} & Energy &  \textbf{\num{0.12}} &           \num{0.20} &           \num{0.134} \\
+                         & Forces &  \textbf{\num{0.28}} &           \num{0.85} &           \num{0.374} \\
+\cline{1-5}
+\multirow{2}{*}{Toluene} & Energy &  \textbf{\num{0.10}} &           \num{0.12} &  \textbf{\num{0.102}} \\
+                         & Forces &  \textbf{\num{0.14}} &           \num{0.57} &           \num{0.216} \\
+\cline{1-5}
+\multirow{2}{*}{Uracil} & Energy &  \textbf{\num{0.11}} &           \num{0.14} &           \num{0.115} \\
+                         & Forces &  \textbf{\num{0.24}} &           \num{0.56} &           \num{0.301} \\
+\cline{1-5}
+\multirow{2}{*}{std. MAE (\si{\percent})} & Energy &           \num{2.53} &           \num{3.32} &   \textbf{\num{2.49}} \\
+                         & Forces &  \textbf{\num{1.01}} &           \num{2.38} &            \num{1.10} \\
+\end{tabular}
+        }
+        \label{tab:md17}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.44\textwidth}
+        \begin{minipage}{\textwidth}
+            \centering
+            \includegraphics{figures/2dfilters_layer2.png}
+            \caption{Examples of DimeNet filters. They exhibit a clear 2D structure. For details see Appendix \ref{app:filters}.}
+            \label{fig:filters}
+        \end{minipage}
+        \begin{minipage}{\textwidth}
+            \vspace{\baselineskip}
+            \captionsetup{type=table}
+            \caption{Ablation studies using multi-task learning on QM9. All of our contributions have a significant impact on performance.}
+            \resizebox{\textwidth}{!}{
+            \begin{tabular}{lcc}
+Variation & $\frac{\text{MAE}}{\text{MAE DimeNet}}$ \vspace{1pt} & $\Delta$logMAE \\
+\hline
+Gaussian RBF     &                                   \SI{110}{\percent} &     \num{0.10} \\
+$N_\text{SHBF}=1$ &                                   \SI{126}{\percent} &     \num{0.11} \\
+Node embeddings  &                                   \SI{168}{\percent} &     \num{0.45} \\
+\end{tabular}
+
+            }
+            \label{tab:ablation}
+        \end{minipage}
+    \end{minipage}
+\end{figure}
+
+\textbf{MD17.} We use MD17 \citep{chmiela_machine_2017} to test model performance in molecular dynamics simulations. The goal of this benchmark is predicting both the energy and atomic forces of eight small organic molecules, given the atom coordinates of the thermalized (i.e. non-equilibrium, slightly moving) system. The ground truth data is computed via molecular dynamics simulations using DFT. A separate model is trained for each molecule, with the goal of providing highly accurate individual predictions. This dataset is commonly used with \num{50000} training and \num{10000} validation and test samples. We found that DimeNet can match state-of-the-art performance in this setup. E.g. for Benzene, depending on the force weight $\rho$, DimeNet achieves \SI{0.035}{\kilo\cal\per\mol} MAE for the energy or \SI{0.07}{\kilo\cal\per\mol} and \SI{0.17}{\kilo\cal\per\mol\per\angstrom} for energy and forces, matching the results reported by \citet{anderson_cormorant:_2019} and \citet{unke_physnet:_2019}. However, this accuracy is two orders of magnitude below the DFT calculation's accuracy (approx. \SI{2.3}{\kilo\cal\per\mol} for energy \citep{faber_machine_2017}), so any remaining difference to real-world data is almost exclusively due to errors in the DFT simulation. Truly reaching better accuracy can therefore only be achieved with more precise ground-truth data, which requires far more expensive methods (e.g. CCSD(T)) and thus ML models that are more sample-efficient \citep{chmiela_towards_2018}. We therefore instead test our model on the harder task of using only \num{1000} training samples. As shown in Table \ref{tab:md17} DimeNet outperforms SchNet by a large margin and performs roughly on par with sGDML. However, sGDML uses hand-engineered descriptors that provide a strong advantage for small datasets, can only be trained on a single molecule (a fixed set of atoms), and does not scale well with the number of atoms or training samples.
+
+\textbf{Ablation studies.} To test whether directional message passing and the Fourier-Bessel basis are the actual reason for DimeNet's improved performance, we ablate them individually and compare the mean standardized MAE and logMAE for multi-task learning on QM9. Table \ref{tab:ablation} shows that both of our contributions have a significant impact on the model's performance. Using 64 Gaussian RBFs instead of 16 and 6 Bessel basis functions to represent $d_{ji}$ and $d_{kj}$ increases the error by \SI{10}{\percent}, which shows that this basis does not only reduce the number of parameters but additionally provides a helpful inductive bias. DimeNet's error increases by around \SI{26}{\percent} when we ignore the angles between messages by setting $N_\text{SHBF} = 1$, showing that directly incorporating directional information does indeed improve performance. Using node embeddings instead of message embeddings (and hence also ignoring directional information) has the largest impact and increases MAE by \SI{68}{\percent}, at which point DimeNet performs worse than SchNet. Furthermore, Fig. \ref{fig:filters} shows that the filters exhibit a structurally meaningful dependence on both the distance and angle. For example, some of these filters are clearly being activated by benzene rings (\SI{120}{\degree} angle, \SI{1.39}{\angstrom} distance). This further demonstrates that the model learns to leverage directional information.
+\section{Conclusion}
+In this work we have introduced directional message passing, a more powerful and expressive interaction scheme for molecular predictions. Directional message passing enables graph neural networks to leverage directional information in addition to the interatomic distances that are used by normal GNNs. We have shown that interatomic distances can be represented in a principled and effective manner using spherical Bessel functions. We have furthermore shown that this representation can be extended to directional information by leveraging 2D spherical Fourier-Bessel basis functions. We have leveraged these innovations to construct DimeNet, a GNN suitable both for predicting molecular properties and for use in molecular dynamics simulations. We have demonstrated DimeNet's performance on QM9 and MD17 and shown that our contributions are the essential ingredients that enable DimeNet's state-of-the-art performance.
+DimeNet directly models the first two terms in Eq. \ref{eq:energy}, which are known as the important ``hard'' degrees of freedom in molecules \citep{leach_molecular_2001}. Future work should aim at also incorporating the third and fourth terms of this equation. This could improve predictions even further and enable the application to molecules much larger than those used in common benchmarks like QM9.
+\subsubsection*{Acknowledgments}
+This research was supported by the German Federal Ministry of Education and Research (BMBF), grant no. 01IS18036B, and by the Deutsche Forschungsgemeinschaft (DFG) through the Emmy Noether grant GU 1409/2-1 and the TUM International Graduate School of Science and Engineering (IGSSE), GSC 81. The authors of this work take full responsibilities for its content.
+
+\bibliography{dimenet}
+\bibliographystyle{iclr2020_conference}
+
+\newpage
+
+\appendix
+\section{Indistinguishable molecules}
+\begin{figure}[h!]
+    \centering
+    \scalebox{0.7}{
+
+\begingroup
+\medmuskip=0mu
+\begin{tikzpicture}
+    \def\linewidth{0.4pt}  %
+    \tikzstyle{atom} = [draw=none, circle, fill=white, anchor=center, inner sep=0.1pt, minimum size=0.6cm]
+    \tikzstyle{conn} = [line width=1pt]
+
+    \node[atom, fill=blue] (tri1_1) at (6.5, 1.7320508075688772) {};
+    \node[atom, fill=blue] (tri1_2) at (5.5, 3.464101615137755) {};
+    \node[atom, fill=blue] (tri1_3) at (7.5, 3.464101615137755) {};
+    \draw[conn, draw=blue] (tri1_1) -- (tri1_2);
+    \draw[conn, draw=blue] (tri1_2) -- (tri1_3);
+    \draw[conn, draw=blue] (tri1_3) -- (tri1_1);
+
+    \node[atom, fill=blue] (tri2_1) at (8.5, 1.7320508075688772) {};
+    \node[atom, fill=blue] (tri2_2) at (7.5, 0) {};
+    \node[atom, fill=blue] (tri2_3) at (9.5, 0) {};
+    \draw[conn, draw=blue] (tri2_1) -- (tri2_2);
+    \draw[conn, draw=blue] (tri2_2) -- (tri2_3);
+    \draw[conn, draw=blue] (tri2_3) -- (tri2_1);
+
+    \node[atom, fill=green] (hex_1) at (3, 0) {};
+    \node[atom, fill=green] (hex_2) at (1, 0) {};
+    \node[atom, fill=green] (hex_3) at (0, 1.7320508075688772) {};
+    \node[atom, fill=green] (hex_4) at (1, 3.464101615137755) {};
+    \node[atom, fill=green] (hex_5) at (3, 3.464101615137755) {};
+    \node[atom, fill=green] (hex_6) at (4, 1.7320508075688772) {};
+    \draw[conn, draw=green] (hex_1) -- (hex_2);
+    \draw[conn, draw=green] (hex_2) -- (hex_3);
+    \draw[conn, draw=green] (hex_3) -- (hex_4);
+    \draw[conn, draw=green] (hex_4) -- (hex_5);
+    \draw[conn, draw=green] (hex_5) -- (hex_6);
+    \draw[conn, draw=green] (hex_6) -- (hex_1);
+\end{tikzpicture}
+\endgroup
+
+    }
+    \caption{A standard non-directional GNN cannot distinguish between a hexagonal (left) and two triangular molecules (right) with the same bond lengths, since the neighborhood of each atom is exactly the same. An example of this would be Cyclohexane and two Cyclopropane molecules with slightly stretched bonds, when the GNN either uses the molecular graph or a cutoff distance of $c \le \SI{2.5}{\angstrom}$. Directional message passing solves this problem by considering the direction of each bond.}
+    \label{fig:wl-test}
+\end{figure}
+\section{Experimental setup}
+\label{app:exp}
+
+The model architecture and hyperparameters were optimized using the QM9 validation set. We use 6 stacked interaction blocks and embeddings of size $F = 128$ throughout the model. For the basis functions we choose $N_\text{SHBF} = 7$ and $N_\text{SRBF} = N_\text{RBF} = 6$. For the weight tensor in the interaction block we use $N_\text{bilinear} = 8$. We did not find the model to be very sensitive to these values as long as they were large enough (i.e. at least 4).
+
+We found the cutoff $c = \SI{5}{\angstrom}$ and the learning rate \num{1e-3} to be rather important hyperparameters. We optimized the model using AMSGrad \citep{reddi_convergence_2018} with 32 molecules per mini-batch. We use a linear learning rate warm-up over \num{3000} steps and an exponential decay with ratio \num{0.1} every \num{2000000} steps. The model weights for validation and test were obtained using an exponential moving average (EMA) with decay rate \num{0.999}. For MD17 we use the loss function from Eq. \ref{eq:loss_md} with force weight $\rho = 100$, like previous models \citet{schutt_schnet:_2017}. Note that $\rho$ presents a trade-off between energy and force accuracy. It should be chosen rather high since the forces determine the dynamics of the chemical system \citep{unke_physnet:_2019}. We use early stopping on the validation loss. On QM9 we train for at most \num{3000000} and on MD17 for at most \num{100000} steps.
+\section{Summary statistics}
+\label{app:sum}
+
+We summarize the results across different targets using the mean standardized MAE
+\begin{equation}
+    \text{std. MAE} = \frac{1}{M} \sum_{m=1}^M \left(  \frac{1}{N} \sum_{i=1}^{N} \frac{|f_\theta^{(m)}(\mX_i, \vz_i) - \hat{t}_i^{(m)}|}{\sigma_m} \right),
+\end{equation}
+and the mean standardized logMAE
+\begin{equation}
+    \text{logMAE} = \frac{1}{M} \sum_{m=1}^M \log \left(  \frac{1}{N} \sum_{i=1}^{N} \frac{|f_\theta^{(m)}(\mX_i, \vz_i) - \hat{t}_i^{(m)}|}{\sigma_m} \right),
+\end{equation}
+with target index $m$, number of targets $M = 12$, dataset size $N$, ground truth values $\hat{\vt}^{(m)}$, model $f_\theta^{(m)}$, inputs $\mX_i$ and $\vz_i$, and standard deviation $\sigma_m$ of $\hat{\vt}^{(m)}$. Std. MAE reflects the average error compared to the standard deviation of each target. Since this error is dominated by a few difficult targets (e.g. $\epsilon_\text{HOMO}$) we also report logMAE, which reflects every relative improvement equally but is sensitive to outliers, such as SchNet's result on $\left< R^2 \right>$.
+\section{DimeNet filters}
+\label{app:filters}
+
+To illustrate the filters learned by DimeNet we separate the spatial dependency in the interaction function $f_\text{int}$ via
+\begin{equation}
+    f_\text{int}(\vm, d_{ji}, d_{kj}, \alpha_{(kj,ji)}) = \sum_n \left[ \sigma(\mW \vm + \vb) \right]_n f_{\text{filter1}, n}(d_{ji}) f_{\text{filter2}, n}(d_{kj}, \alpha_{(kj,ji)}).
+\end{equation}
+The filters $f_{\text{filter1}, n}: \R^+ \rightarrow \R$ and $f_{\text{filter2}, n}: \R^+ \times[0, 2\pi] \rightarrow \R^F$ are given by
+\begin{align}
+    f_{\text{filter1}, n}(d) = (\mW_\text{RBF} \ve_\text{RBF}(d))_n,\\
+    f_{\text{filter2}, n}(d, \alpha) = (\mW_\text{SBF} \va_\text{SBF}(d, \alpha))^T  \tW_n,
+\end{align}
+where $\mW_\text{RBF}$, $\mW_\text{SBF}$, and $\tW$ are learned weight matrices/tensors, $\ve_\text{RBF}(d)$ is the radial basis representation, and $\va_{\text{SBF}}(d, \alpha)$ is the 2D spherical Fourier-Bessel representation. Fig. \ref{fig:filters} shows how the first 15 elements of $f_{\text{filter2}, n}(d, \alpha)$ vary with $d$ and $\alpha$ when choosing the tensor slice $n = 1$ (with $\alpha = 0$ at the top of the figure).
+\section{Multi-target results}
+\label{app:mt}
+
+\begin{table}[h!]
+    \centering
+    \caption{MAE on QM9 with multi-target learning. Single-target learning significantly improves performance on all targets. Using a separate output block per target slightly reduces this difference with little impact on training time.}
+    \begin{tabular}{llccc}
+Target &                                             Unit &  Multi-target & Sep. output blocks & Single-target \\
+\hline
+$\mu$                        &                                      \si{\debye} &  \num{0.0775} &       \num{0.0815} &  \num{0.0286} \\
+$\alpha$                     &                                     \si{\bohr^3} &  \num{0.0649} &       \num{0.0616} &  \num{0.0469} \\
+$\epsilon_\text{HOMO}$       &                         \si{\milli\electronvolt} &    \num{45.1} &         \num{45.5} &    \num{27.8} \\
+$\epsilon_\text{LUMO}$       &                         \si{\milli\electronvolt} &    \num{41.1} &         \num{33.9} &    \num{19.7} \\
+$\Delta\epsilon$             &                         \si{\milli\electronvolt} &    \num{59.2} &         \num{63.6} &    \num{34.8} \\
+$\left< R^2 \right>$         &                                     \si{\bohr^2} &   \num{0.345} &        \num{0.348} &   \num{0.331} \\
+ZPVE                         &                         \si{\milli\electronvolt} &    \num{2.87} &         \num{1.44} &    \num{1.29} \\
+$U_0$                        &                         \si{\milli\electronvolt} &    \num{12.9} &         \num{10.6} &    \num{8.02} \\
+$U$                          &                         \si{\milli\electronvolt} &    \num{13.0} &         \num{10.5} &    \num{7.89} \\
+$H$                          &                         \si{\milli\electronvolt} &    \num{13.0} &         \num{10.4} &    \num{8.11} \\
+$G$                          &                         \si{\milli\electronvolt} &    \num{13.8} &         \num{10.8} &    \num{8.98} \\
+$c_\text{v}$ \vspace{1pt}    &  \si[per-mode=fraction]{\cal\per\mol\per\kelvin} &  \num{0.0309} &       \num{0.0283} &  \num{0.0249} \\
+\hline
+std. MAE \rule{0pt}{1em-1pt} &                                    \si{\percent} &    \num{1.92} &         \num{1.90} &    \num{1.05} \\
+logMAE                       &                                                - &   \num{-5.07} &        \num{-5.21} &   \num{-5.57} \\
+\end{tabular}
+    \label{tab:qm9_mt}
+\end{table}

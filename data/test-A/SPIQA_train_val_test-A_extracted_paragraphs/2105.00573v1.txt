@@ -1,0 +1,368 @@
+\section{Introduction}
+\label{sec:intro}
+
+The principle of compositionality loosely states that a complex whole is composed of its parts and the rules by which those parts are combined \cite{lake2018generalization}. This principle is present in engineering, where task decomposition of a complex system is required to assess and optimize task allocations \cite{taskdecomp}, and in natural language, where paragraph coherence and discourse analysis rely on decomposition into sentences \cite{johnson1992, kuo1995} and sentence level semantics relies on decomposition into lexical units \cite{Liu2020}. 
+
+Similarly, many sequence-to-sequence tasks that convert one sequence into another \cite{sutskever2014sequence} can be decomposed to simpler sequence sub-tasks in order to reduce the overall complexity. 
+For example, speech translation systems, which seek to process speech in one language and output text in another language, can be naturally decomposed into the transcription of source language audio through automatic speech recognition (ASR) and translation into the target language through machine translation (MT). Such cascaded approaches have been widely used to build practical systems for a variety of sequence tasks like hybrid ASR \cite{hinton2012deep}, phrase-based MT \cite{koehn-etal-2007-moses}, and cascaded ASR-MT systems for speech translation (ST)~\cite{Pham2019TheI2}.
+
+End-to-end sequence models like encoder-decoder models \cite{bahdanau2014neural, vaswani2017attention}, are attractive in part due to their simplistic design and the reduced need for hand-crafted features. However, studies have shown mixed results compared to cascaded models particularly for complex sequence tasks like speech translation \cite{inaguma-etal-2020-espnet-st} and spoken language understanding \cite{coucke2018snips}. Although direct target sequence prediction avoids the issue of error propagation from one system to another in cascaded approaches \cite{tzoukermann-miller-2018-evaluating-error}, there are many attractive properties of cascaded systems, missing in end-to-end approaches, that are useful in complex sequence tasks. 
+
+In particular, we are interested in (1) the strong search capabilities of the cascaded systems that compose the final task output from individual system predictions \cite{mohri2002weighted, kumar2006weighted, beck-etal-2019-neural-lattice}, (2) the ability to incorporate external models to re-score each individual system \cite{och2002discriminative, huang2007forest}, (3) the ability to easily adapt individual components towards out-of-domain data \cite{koehn2007experiments, peddinti2015jhu}, and finally (4) the ability to monitor performance of the individual systems towards the decomposed sub-task \cite{tillmann2003word, meyer2016performance}.
+
+In this paper, we seek to incorporate these properties of cascaded systems into end-to-end sequence models. We first propose a generic framework to learn \textit{searchable hidden intermediates} using an auto-regressive encoder-decoder model for any decomposable sequence task (\Sref{sec:methods}). We then apply this approach to speech translation, where the intermediate stage is the output of ASR, by passing continuous hidden representations of discrete transcript sequences from the ASR sub-net decoder to the MT sub-net encoder. By doing so, we gain the ability to use beam search with optional external model re-scoring on the hidden intermediates, while maintaining end-to-end differentiability. Next, we suggest mitigation strategies for the error propagation issues inherited from decomposition. 
+
+We show the efficacy of \textit{searchable intermediate representations} in our proposed model, called the Multi-Decoder, on speech translation with a 5.4 and 2.8 BLEU score improvement over the previous state-of-the-arts for Fisher and CallHome test sets respectively (\Sref{sec:results}). We extend these improvements by an average of 0.5 BLEU score through the aforementioned benefit of re-scoring the intermediate search with external models trained on the same dataset. We also show a method for monitoring sub-net performance using oracle intermediates that are void of search errors (\Sref{sec:benefits}). Finally, we show how these models can adapt to out-of-domain speech translation datasets, how our approach can be generalized to other sequence tasks like speech recognition, and how the benefits of decomposition persist even for larger corpora like MuST-C (\Sref{sec:gen}).
+\section{Background and Motivation}
+\label{sec:background}
+
+\begin{figure*}
+\centering
+\includegraphics[width=\linewidth]{images/multi-decoder-fig.pdf}
+\caption{The left side present the schematics and the information flow of our proposed framework applied to ST, in a model we call the Multi-Decoder. Our model decomposes ST into ASR and MT sub-nets, each of which consist of an encoder and decoder. The right side displays a Multi-Sequence Attention variant of the $\textsc{decoder}_{\textsc{st}}$ that is conditioned on both speech information via the $\textsc{encoder}_{\textsc{asr}}$ and transcription information via the $\textsc{encoder}_{\textsc{st}}$.}
+\label{fig:model}
+\end{figure*}
+\subsection{Compositionality in Sequences Models}
+The probabilistic space of a sequence is combinatorial in nature, such that a sentence of $L$ words from a fixed vocabulary $\mathcal{V}$ would have an output space $\mathcal{S}$ of size $|\mathcal{V}|^L$. In order to deal with this combinatorial output space, an output sentence is decomposed into labeled target tokens, $\mathbf{y} = (y_1, y_2,\ldots,y_L)$, where $y_l \in \mathcal{V}$. 
+\begin{align*}
+P(\mathbf{y} \mid \mathbf{x}) = \prod_{i=1}^{L} P(y_i \mid \mathbf{x}, y_{1:i\shortminus1})
+\end{align*}
+An auto-regressive encoder-decoder model uses the above probabilistic decomposition in sequence-to-sequence tasks to learn next word prediction,
+which outputs a distribution over the next target token $y_l$ given the previous tokens $y_{1:l\shortminus1}$ and the input sequence $\mathbf{x} = (\mathbf{x}_1,\mathbf{x}_t,\ldots,\mathbf{x}_T)$, where $T$ is the input sequence length. In the next sub-section we detail the training and inference of these models.
+\subsection{Auto-regressive Encoder-Decoder Models}
+\label{sec:autoregressive}
+\mypar{Training:} In an auto-regressive encoder-decoder model, the \textsc{Encoder} maps the input sequence $\mathbf{x}$ to a sequence of continuous hidden representations $\mathbf{h}^E = (\mathbf{h}_1^E,\mathbf{h}_t^E,\ldots,\mathbf{h}_T^E)$, where $\mathbf{h}_t^E \in \mathbb{R}^{d}$. The \textsc{Decoder} then auto-regressively maps $\mathbf{h}^E$ and the preceding ground-truth output tokens, $\hat{y}_{1:l\shortminus1}$, to $\mathbf{h}_l^D$, where $\mathbf{h}_l^D \in \mathbb{R}^{d}$. The sequence of decoder hidden representations form $\mathbf{h}^D = (\mathbf{h}_1^D,\mathbf{h}_l^D,\ldots,\mathbf{h}_L^D)$ and the likelihood of each output token ${y}_l$ is given by \textsc{SoftmaxOut}, which denotes an affine projection of $\mathbf{h}_l^D$ to $\mathcal{V}$ followed by a softmax function.
+\begin{align}
+\mathbf{h}^E &= \textsc{Encoder}(\mathbf{x}) \nonumber \\
+\mathbf{\hat{h}}_l^D &= \textsc{Decoder}(\mathbf{h}^E, \hat{y}_{1:l\shortminus1}) \label{dec_eq1}\\
+P(y_l \mid \hat{y}_{1:l\shortminus1}, \mathbf{h}^E) &= \textsc{SoftmaxOut}(\mathbf{\hat{h}}_l^D) \label{dec_softmax}
+\end{align}
+During training, the \textsc{Decoder} performs token classification for next word prediction by considering only the ground truth sequences for previous tokens $\mathbf{\hat{y}}$. We refer to this $\mathbf{\hat{h}}^D$ as \textit{oracle} decoder representations, which will be discussed later.
+
+\mypar{Inference:} During inference, we can maximize the likelihood of the entire sequence from the output space $\mathcal{S}$ by composing the conditional probabilities of each step for the $L$ tokens in the sequence.
+\begin{align}
+\mathbf{h}_l^{D} &= \textsc{Decoder}(\mathbf{h}^E, y_{1:l\shortminus1}) \label{dec_eq2}\\
+P(y_l \mid \mathbf{x}, y_{1:l\shortminus1}) &= \textsc{SoftmaxOut}(\mathbf{h}_l^{D}) \nonumber \\
+\mathbf{\tilde{y}} = &\argmax_{\mathbf{y} \in \mathcal{S}} \prod_{i=1}^{L} P(y_i \mid \mathbf{x}, y_{1:i\shortminus1}) \label{inf_search}
+\end{align}
+This is an intractable search problem and it can be approximated by either greedily choosing $\argmax$ at each step or using a search algorithm like beam search to approximate $\mathbf{\tilde{y}}$. Beam search \cite{reddy1988foundations} generates candidates at each step and prunes the search space to a tractable beam size of $B$ most likely sequences. As $B \rightarrow \infty$, the beam search result would be equivalent to equation \ref{inf_search}. 
+\begin{align*}
+\textsc{GreedySearch} &\coloneqq \argmax_{y_l} P(y_l \mid \mathbf{x}, y_{1:l\shortminus1}) \\
+\textsc{BeamSearch} &\coloneqq \textsc{Beam}(P(y_l \mid \mathbf{x}, y_{1:l\shortminus1}))
+\end{align*}
+In approximate search for auto-regressive models, like beam search, the \textsc{Decoder} receives alternate candidates of previous tokens to find candidates with a higher likelihood as an overall sequence. This also allows for the use of external models like Language Models (LM) or Connectionist Temporal Classification Models (CTC) for re-scoring candidates \cite{hori2017advances}.
+\section{Proposed Framework}
+\label{sec:methods}
+In this section, we present a general framework to exploit natural decompositions in sequence tasks which seek to predict some output $\mathcal{C}$ from an input sequence $\mathcal{A}$. If there is an intermediate sequence $\mathcal{B}$ for which $\mathcal{A} \rightarrow \mathcal{B}$ sequence transduction followed by $\mathcal{B} \rightarrow \mathcal{C}$ prediction achieves the original task, then the original $\mathcal{A} \rightarrow \mathcal{C}$ task is decomposable. 
+
+In other words, if we can learn $P(\mathcal{B} \mid \mathcal{A})$ then we can learn the overall task of $P(\mathcal{C} \mid \mathcal{A})$ through $\max_{\mathcal{B}}(P(\mathcal{C} \mid \mathcal{A}, ~\mathcal{B}) P(\mathcal{B} \mid \mathcal{A}))$, approximated using Viterbi search. We define a first encoder-decoder $\textsc{Sub}_{\mathcal{A} \to \mathcal{B}}\textsc{Net}$ to map an input sequence $\mathcal{A}$ to a sequence of decoder hidden states, $\mathbf{h}^{D_\mathcal{B}}$. Then we define a subsequent $\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$ to map $\mathbf{h}^{D_\mathcal{B}}$ to the final probabilistic output space of $\mathcal{C}$. Therefore, we call $\mathbf{h}^{D_\mathcal{B}}$ \textit{hidden intermediates}. The following equations shows the two sub-networks of our framework, $\textsc{Sub}_{\mathcal{A} \to \mathcal{B}}\textsc{Net}$ and $\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$, which can be trained end-to-end while also exploiting compositionality in sequence tasks.~\footnote{Note that this framework does not use locally-normalized softmax distributions but rather the hidden representations, thereby avoiding label bias issues when combining multiple sub-systems \cite{bottou1997global, wiseman2016sequence}.}
+
+\paragraph{$\textsc{Sub}_{\mathcal{A} \to \mathcal{B}}\textsc{Net}$:}
+\begin{align}
+\mathbf{h}^E &= \textsc{Encoder}_\mathcal{A}(\mathcal{A}) \nonumber \\
+\mathbf{\hat{h}}_l^{D_\mathcal{B}} &= \textsc{Decoder}_\mathcal{B}(\mathbf{h}^E, \mathbf{\hat{y}}^{\mathcal{B}}_{1:l\shortminus1}) \nonumber \\
+P(y^{\mathcal{B}}_{l} \mid \mathbf{\hat{y}}^{\mathcal{B}}_{1:l\shortminus1}, \mathbf{h}^E) &= \textsc{SoftmaxOut}(\mathbf{\hat{h}}_l^{D_\mathcal{B}}) \label{intermediate_eq}
+\end{align}
+\paragraph{$\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$:}
+\begin{equation}
+P(\mathcal{C} \mid \mathbf{\hat{h}}_l^{D_\mathcal{B}}) = \textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}(\mathbf{\hat{h}}_l^{D_\mathcal{B}}) \label{generic_final}
+\end{equation}
+\noindent Note that the final prediction, given by equation \ref{generic_final}, does not need to be a sequence and can be a categorical class like in spoken language understanding tasks. Next we will show how the \textit{hidden intermediates} become \textit{searchable} during inference.
+\subsection{Searchable Hidden Intermediates}
+As stated in section \Sref{sec:autoregressive}, approximate search algorithms maximize the likelihood, $P(\mathbf{y}\mid\mathbf{x})$, of the entire sequence by considering different candidates  $y_l$ at each step. Candidate-based search, particularly in auto-regressive encoder-decoder models, also affects the decoder hidden representation, $\mathbf{h}^{D}$, as these are directly dependent on the previous candidate (refer to equations \ref{dec_eq1} and \ref{dec_eq2}). This implies that by searching for better approximations of the previous predicted tokens, $\mathbf{y}_{l \shortminus 1} = (\mathbf{y}_{\textsc{beam}})_{l \shortminus 1}$, we also improve the decoder hidden representations for the next token, $\mathbf{h}^{D}_l = (\mathbf{h}_{\textsc{beam}}^{D})_{l}$. As $\mathbf{y}_{\textsc{beam}} \to \mathbf{\hat{y}}$, the decoder hidden representations tend to the \textit{oracle} decoder representations that have only errors from next word prediction, $\mathbf{h}^{D}_{\textsc{beam}} \to \mathbf{\hat{h}}^D$. A perfect search is analogous to choosing the ground truth $\hat{y}$ at each step, which would yield $\mathbf{\hat{h}}^{D}$. 
+
+We apply this beam search of hidden intermediates, thereby approximating $\mathbf{\hat{h}}^{D_\mathcal{B}}$ with $\mathbf{h}_{\textsc{beam}}^{D_\mathcal{B}}$. This process is illustrated in algorithm \ref{alg:asr_beam}, which shows beam search for $\mathbf{h}_\textsc{beam}^{D_\mathcal{B}}$ that are subsequently passed to the $\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$.\footnote{The algorithm shown only considers a single top approximation of the search; however, with added time-complexity, the final task prediction improves with the n-best $\mathbf{h}^{D_\mathcal{B}}_{\textsc{beam}}$ for selecting the best resultant $\mathcal{C}$.}
+In line \ref{op_ext}, we show how an external model like an LM or a CTC model can be used to generate an alternate sequence likelihood, $P_\textsc{ext}(\mathbf{y}^{\mathcal{B}}_l)$, which can be combined with the $\textsc{Sub}_{\mathcal{A} \to \mathcal{B}}\textsc{Net}$ likelihood, $P_\mathcal{B}(\mathbf{y}^{\mathcal{B}}_l \mid \mathbf{x})$ , with a tunable parameter $\lambda$. 
+
+\begin{algorithm}[h]
+\caption{Beam Search for Hidden Intermediates: We perform beam search to approximate the most likely sequence for the sub-task $\mathcal{A} \to \mathcal{B}$, $\mathbf{y}^{\mathcal{B}}_{\textsc{beam}}$, while collecting the corresponding $\textsc{Decoder}_{\mathcal{B}}$ hidden representations, $\mathbf{h}^{D_\mathcal{B}}_{\textsc{beam}}$. The output $\mathbf{h}^{D_\mathcal{B}}_{\textsc{beam}}$, is passed to the final sub-network to predict final output $\mathcal{C}$ and $\mathbf{y}^{\mathcal{B}}_{\textsc{beam}}$ is used for monitoring performance on predicting $\mathcal{B}$.}
+\label{alg:asr_beam}
+\begin{algorithmic}[1]
+\STATE \textbf{Initialize:} $\textsc{beam} \gets$ \{sos\}; k $\gets$ beam size;
+\STATE $\mathbf{h}^{E_{\textsc{A}}}\gets \textsc{Encoder}_{\mathcal{A}}(\mathbf{x})$
+\FOR{$l$=$1$ \textbf{to} $\max_{\textsc{steps}}$}
+    \FOR{$\mathbf{y}^{\mathcal{B}}_{l\shortminus1} \in \textsc{beam}$}
+        \STATE $\mathbf{h}^{D_\mathcal{B}}_{l} \gets \textsc{Decoder}_{\mathcal{B}}(\mathbf{h}^{E_{\mathcal{A}}}, \mathbf{y}^{\mathcal{B}}_{l\shortminus1})$
+        \FOR{$\mathbf{y}^{\mathcal{B}}_{l} \in \mathbf{y}^{\mathcal{B}}_{l\shortminus1} + \{\mathcal{V}\}$}
+            \STATE $s_{l} \gets P_{\mathcal{A} \to \mathcal{B}}(\mathbf{y}^{\mathcal{B}}_l \mid \mathbf{x})^{1 \shortminus \lambda} P_\textsc{ext}(\mathbf{y}^{\mathcal{B}}_l)^\lambda$ \label{op_ext}
+            \STATE $\mathcal{H} \gets $ ($s_{l}$, $\mathbf{y}^{\mathcal{B}}_{l}$ , $\mathbf{h}^{D_\mathcal{B}}_{l}$)
+        \ENDFOR
+    \ENDFOR
+    \STATE $\textsc{beam} \gets \topk(\mathcal{H})$
+\ENDFOR
+\STATE $(s^{\mathcal{B}}, \mathbf{y}^{\mathcal{B}}_{\textsc{beam}}, \mathbf{h}^{D_\mathcal{B}}_{\textsc{beam}}) \gets \argmax(\textsc{beam})$
+\STATE \textbf{Return} $\mathbf{y}^{\mathcal{B}}_{\textsc{beam}} \rightarrow $  $\textsc{Sub}_{\mathcal{A} \to \mathcal{B}}\textsc{Net}$ Monitoring
+\STATE \textbf{Return} $\mathbf{h}^{D_\mathcal{B}}_{\textsc{beam}} \rightarrow$ Final $\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$
+\end{algorithmic}
+\end{algorithm}
+\noindent We can monitor the performance of the $\textsc{Sub}_{\mathcal{A} \to \mathcal{B}}\textsc{Net}$ by comparing the decoded intermediate sequence $\mathbf{y}^{\mathcal{B}}_{\textsc{beam}}$ to the ground truth $\mathbf{\hat{y}}^{\mathcal{B}}$. 
+We can also monitor the $\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$ performance by using the aforementioned \textit{oracle} representations of the intermediates, $\mathbf{\hat{h}}^{D_\mathcal{B}}$, which can be obtained by feeding the ground truth $\mathbf{\hat{y}}^{\mathcal{B}}$ to $\textsc{Decoder}_\mathcal{B}$. By passing $\mathbf{\hat{h}}^{D_\mathcal{B}}$ to $\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$, we can observe its performance in a vacuum, i.e. void of search errors in the hidden intermediates.
+\subsection{Multi-Decoder Model}
+In order to show the applicability of our end-to-end framework we propose our Multi-Decoder model for speech translation. This model predicts a sequence of text translations $\mathbf{y}^{\textsc{st}}$ from an input sequence of speech $\mathbf{x}$ and uses a sequence of text transcriptions $\mathbf{y}^{\textsc{asr}}$ as an intermediate. In this case, the $\textsc{Sub}_{\mathcal{A} \to \mathcal{B}}\textsc{Net}$ in equation \ref{intermediate_eq} is specified as the ASR sub-net and the $\textsc{Sub}_{\mathcal{B} \to \mathcal{C}}\textsc{Net}$ in equation \ref{generic_final} is specified as the MT sub-net. Since the MT sub-net is also a sequence prediction task, both sub-nets are encoder-decoder models in our architecture~\cite{bahdanau2014neural, vaswani2017attention}. In Figure \ref{fig:model} we illustrate the schematics of our transformer based Multi-Decoder ST model which can also be summarized as follows:
+\begin{align}
+&\mathbf{h}^{E_{\textsc{asr}}} = \textsc{Encoder}_{\textsc{asr}}(\mathbf{x}) \label{eq_md_asr1}\\
+&\mathbf{\hat{h}}_l^{D_\textsc{asr}} = \textsc{Decoder}_{\textsc{asr}}(\mathbf{h}^{E_{\textsc{asr}}}, \hat{y}^{\textsc{asr}}_{1:l\shortminus1}) \label{eq_md_asr2} \\
+&\mathbf{h}^{E_\textsc{st}} = \textsc{Encoder}_{\textsc{st}}(\mathbf{\hat{h}}^{D_\textsc{asr}}) \label{eq_md1}\\
+&\mathbf{\hat{h}}_l^{D_\textsc{st}} = \textsc{Decoder}_{\textsc{st}}(\mathbf{h}^{E_\textsc{st}}, \hat{y}^{\textsc{st}}_{1:l\shortminus1}) \label{eq_md2}
+\end{align}
+\noindent As we can see from Equations \ref{eq_md1} and \ref{eq_md2}, the MT sub-network attends only to the decoder representations, $\mathbf{\hat{h}}^{D_\textsc{asr}}$, of the ASR sub-network, which could lead to the error propagation issues from the ASR sub-network to the MT sub-network similar to the cascade systems, as mentioned in \Sref{sec:intro}. To alleviate this problem, we modify equation \ref{eq_md2} 
+such that $\textsc{Decoder}_{\textsc{st}}$ attends to both $\mathbf{h}^{E_\textsc{st}}$ and $\mathbf{h}^{E_\textsc{asr}}$:
+\begin{align}
+\mathbf{\hat{h}}_l^{D^{\textsc{sa}}_\textsc{st}} = \textsc{Decoder}^{\textsc{sa}}_{\textsc{st}}(\mathbf{h}^{E_\textsc{st}}, \mathbf{h}^{E_\textsc{asr}}, \hat{y}^{\textsc{st}}_{1:l\shortminus1}) \label{eq_md_sa}
+\end{align}
+We use the multi-sequence cross-attention discussed by \citet{helcl-etal-2018-cuni}, shown on the right side of Figure \ref{fig:model}, to condition the final outputs generated by $\mathbf{\hat{h}}_l^{D_\textsc{st}}$ on both speech and transcript information in an attempt to allow our network to recover from intermediate mistakes during inference. We call this model the Multi-Decoder w/ Speech-Attention.
+\section{Baseline Encoder-Decoder Model}
+\label{sec:baseline}
+For our baseline model, we use an end-to-end encoder-decoder (Enc-Dec) ST model with ASR joint training \cite{inaguma-etal-2020-espnet-st} as an auxiliarly loss to the speech encoder. In other words, the model consumes speech input using the $\textsc{Encoder}_\textsc{ASR}$, to produce $\mathbf{h}^{E_\textsc{asr}}$, which is used for cross-attention by $\textsc{Decoder}_\textsc{ASR}$ and the $\textsc{Decoder}_\textsc{ST}$. Using the decomposed ASR task as an auxiliary loss also helps the baseline Enc-Dec model and provide strong baseline performance, as we will see in Section \ref{sec:results}.
+\section{Data and Experimental Setup}
+\label{sec:data_prep}
+\paragraph{Data:} We demonstrate the efficacy of our proposed approach on ST in the Fisher-CallHome corpus~\cite{postfisher} which contains 170 hours of Spanish conversational telephone speech, transcriptions, and English translations. All punctuations except apostrophes were removed and results are reported in terms of detokenized case-insensitive BLEU \cite{papineni-etal-2002-bleu, post-2018-call}. We compute BLEU using the 4 references in Fisher (dev, dev2, and test) and the single reference in CallHome (dev and test) \cite{postfisher, kumar2014, weiss2017}. We use a joint source and target vocabulary of 1K byte pair encoding (BPE) units \cite{kudo2018sentencepiece}.
+
+We prepare the corpus using the ESPnet library and we follow the standard data preparation, where inputs are globally mean-variance normalized log-mel filterbank and pitch features from up-sampled 16kHz audio \cite{watanabe2018espnet}. We also apply speed perturbations of 0.9 and 1.1 and the SS SpecAugment policy \cite{specaug}.
+
+\paragraph{Baseline Configuration:} 
+All of our models are implemented using the ESPnet library and trained on 3 NVIDIA Titan 2080Ti GPUs for $\approx$12 hours. For the Baseline Enc-Dec baseline, discussed in \Sref{sec:baseline}, we use an $\textsc{Encoder}_{\textsc{asr}}$ consisting of a convolutional sub-sampling by a factor of 4 \cite{watanabe2018espnet} and 12 transformer encoder blocks with 2048 feed-forward dimension, 256 attention dimension, and 4 attention heads. The $\textsc{Decoder}_{\textsc{asr}}$ and $\textsc{Decoder}_{\textsc{st}}$ both consist of 6 transformer decoder blocks with the same configuration as $\textsc{Encoder}_{\textsc{asr}}$. There are 37.9M trainable parameters. We apply dropout of 0.1 for all components, detailed in the Appendix (\ref{sec:appendix}).
+
+We train our models using an effective batch-size of 384 utterances and use the Adam optimizer \cite{kingma2014adam} with inverse square root decay learning rate schedule. We set learning rate to 12.5, warmup steps to 25K, and epochs to 50. We use joint training with hybrid CTC/attention ASR \cite{watanabe2017} by setting mtl-alpha to $0.3$ and asr-weight to $0.5$ as defined by \citet{watanabe2018espnet}. During inference, we perform beam search \cite{Seki2019VectorizedBS} on the ST sequences, using a beam size of 10, length penalty of 0.2, max length ratio of 0.3 \cite{watanabe2018espnet}. 
+
+\paragraph{Multi-Decoder Configuration:}
+For the Multi-Decoder ST model, discussed in \Sref{sec:methods}, we use the same transformer configuration as the baseline for the $\textsc{Encoder}_{\textsc{asr}}$, $\textsc{Decoder}_{\textsc{asr}}$, and $\textsc{Decoder}_{\textsc{st}}$. Additionally, the Multi-Decoder has an $\textsc{Encoder}_{\textsc{st}}$ consisting of 2 transformer encoder blocks with the same configuration as $\textsc{Encoder}_{\textsc{asr}}$, giving a total of 40.5M trainable parameters. The training configuration is also the same as for the baseline. For the Multi-Decoder w/ Speech-Attention model (42.1M trainable parameters), we increase the attention dropout of the ST decoder to 0.4 and dropout on all other components of the ST decoder to 0.2 while keeping dropout on the remaining components at 0.1. We verified that increasing the dropout does not help the vanilla multi-decoder ST model.
+
+During inference, we perform beam search on both the ASR and ST output sequences, as discussed in \Sref{sec:methods}. The ST beam search is identical to that of the baseline. For the intermediate ASR beam search, we use a beam size of 16, length penalty of 0.2, max length ratio of 0.3. In some of our experiments, we also include fusion of a source language LM with a 0.2 weight and CTC with a 0.3 weight to re-score the intermediate ASR beam search~\cite{watanabe2017}. For the Speech-Attention variant, we increase LM weight to 0.4.
+
+Note that the ST beam search configuration remains constant across our baseline and Multi-Decoder experiments as our focus is on improving overall performance through searchable intermediate representations. Thus, the various re-scoring techniques applied to the ASR beam search are options newly enabled by our proposed architecture and are not used in the ST beam search. 
+
+
+\begin{table*}[t]
+  \centering
+    \include{tables/main_table}
+    \caption{Results presenting the overall performance (BLEU) of our proposed multi-decoder model. Cascade and Enc-Dec results from previous papers and our own implementation of the Enc-Dec are shown for comparison. The best performing models are \textbf{highlighted}. $^{\diamondsuit}$Implemented with LSTM, while all others are Transformer-based.}
+    \label{tab:main_results}
+\end{table*}
+\section{Results}
+\label{sec:results}
+
+
+\Tref{tab:main_results} presents the overall ST performance (BLEU) of our proposed Multi-Decoder model. Our model improves by +2.9/+0.3 (Fisher/CallHome) over the best cascaded baseline and by +5.6/+1.5 BLEU over the best published end-to-end baselines. With Speech-Attention, our model improves by +3.4/+1.6 BLEU over the cascaded baselines and +7.1/+2.8 BLEU over encoder-decoder baselines. Both the Multi-Decoder and Multi-Decoder w/ Speech-Attention on average are further improved by +0.9/+0.4 BLEU through ASR re-scoring.\footnote{We also evaluate our models using other MT metrics to supplement these results, as shown in the Appendix (\ref{sec:other_metrics}).}
+
+\Tref{tab:main_results} also includes our implementation of the Baseline Enc-Dec model discussed in \Sref{sec:baseline}. In this way, we are able to make a fair comparison with our framework as we control the model and inference configurations to be analagous. For instance, we keep the same search parameters for the final output in the baseline and the Multi-Decoder to demonstrate impact of the intermediate beam search.
+\subsection{Benefits}
+\label{sec:benefits}
+\subsubsection{Sub-network performance monitoring}
+\label{sec:pm}
+An added benefit of our proposed approach over the Baseline Enc-Dec is the ability to monitor the individual performances of the ASR (\% WER) and MT (BLEU) sub-nets as shown in \Tref{tab:subnet_results}. The Multi-Decoder w/ Speech-Attention shows a greater MT sub-net performance than the Multi-Decoder as well as a slight improvement of the ASR sub-net, suggesting that ST can potentially help ASR. 
+\begin{table}[t]
+  \centering
+    \include{tables/subnet_table}
+    \caption{Results presenting the overall ST performance (BLEU) of our Multi-Decoder models, along with their sub-net ASR (\% WER) and MT (BLEU) performances. All results are from the Fisher dev set.}
+    \label{tab:subnet_results}
+\end{table}
+\subsubsection{Beam search for better intermediates}
+\label{sec:beam}
+The overall ST performance improves when a higher beam size is used in the intermediate ASR search, and this increase can be attributed to the improved ASR sub-net performance. \Fref{alg:asr_beam} shows this trend across ASR beam sizes of 1, 4, 8, 10, 16 while fixing the ST decoding beam size to 10. A beam size of 1, which is a greedy search, results in lower ASR sub-net and overall ST performances. As beam sizes become larger,  gains taper off as can be seen between beam sizes of 10 and 16.
+
+\begin{figure}[t]
+\resizebox{\linewidth}{!}{
+
+\begin{tikzpicture}
+	\begin{axis}[
+		xlabel=ASR Beam Size,
+		ylabel=ST BLEU Score ($\uparrow$),
+		axis y line*=left,
+		xtick=data,
+	    every axis plot/.append style={thick},
+		]
+	\addplot[color=red,mark=triangle, mark options={scale=1.5}] coordinates {
+	    (1,  51.55)
+	    (4,  52.54)
+	    (8,  52.63)
+	    (10, 52.64)
+	    (16, 52.66)
+	}; \label{plot_one}
+	\end{axis}
+	
+	\begin{axis}[
+		axis y line*=right,
+		axis x line=none,
+		xtick=data,
+		ylabel=ASR \% WER ($\downarrow$),
+		legend cell align={right},
+		legend style={at={(0.98,0.80)},anchor=north east},
+	    every axis plot/.append style={thick},
+		]
+		\addlegendimage{empty legend}\addlegendentry{\hspace{-.6cm}\underline{Multi-Decoder}}
+		\addlegendimage{/pgfplots/refstyle=plot_one}\addlegendentry{BLEU}
+	\addplot[color=blue,mark=x, mark options={scale=1.5}] coordinates {
+		(1,  23.7)
+	    (4,  22.8)
+	    (8,  22.7)
+	    (10, 22.6)
+	    (16, 22.6)
+	}; \addlegendentry{\% WER}
+	\end{axis}
+\end{tikzpicture}
+}
+  \caption{Results studying the effect of the different ASR beam sizes in the intermediate representation search on the overall ST performance (BLEU) and the ASR sub-net performance (\%~WER) for our multi-decoder model. Beam of 1 is same as greedy search.}
+  \label{fig:beam_exp}
+
+\end{figure}
+\subsubsection{External models for better search}
+\label{sec:external}
+External models like CTC acoustic models and language models are commonly used for re-scoring encoder-decoder models \cite{hori2017advances}, due to the difference in their modeling capabilities. CTC directly models transcripts while being conditionally independent on the other outputs given the input, and LMs predict the next token in a sequence.
+
+Both variants of the Multi-Decoder improve due to improved ASR sub-net performance using external CTC and LM models for re-scoring, as shown in \Tref{tab:rescoring_results}. We use a recurrent neural network LM trained on the Fisher-CallHome Spanish transcripts with a dev perplexity of 18.8 and the CTC model from joint loss applied during training. Neither external model incorporates additional data. Although the impact of the LM-only re-scoring is not shown in the ASR \% WER, it reduces substitution and deletion rates in the ASR and this is observed to help the overall ST performance. 
+\begin{table}[t]
+  \centering
+    \include{tables/external_table}
+    \caption{Results presenting the overall ST performance (BLEU) and the sub-net ASR (\% WER) of our Multi-Decoder models with external CTC and LM re-scoring in the ASR intermediate representation search. All results are from the Fisher dev set.}
+    \label{tab:rescoring_results}
+\end{table}
+\subsubsection{Error propagation avoidance}
+\label{sec:error_prop}
+As discussed in \Sref{sec:methods}, our Multi-Decoder model inherits the error propagation issue as can be seen in \Fref{fig:error_propagation}. For the easiest bucket of utterances with $<40\%$ WER in Multi-Decoder's ASR sub-net, our model's ST performance, as measured by the corpus BLEU of the bucket, exceeds that of the Baseline Enc-Dec. The inverse is true for the more difficult bucket of $[40,80)\%$, showing that error propagation is limiting the performance of our model; however, we show that multi-sequence attention can alleviate this issue. For extremely difficult utterances in the $\geq80\%$ bucket, ST performance for all three approaches is suppressed. We also provide qualitative examples of error propagation avoidance in the Appendix (\ref{sec:qual_examples}).
+
+\begin{figure}[t]
+\resizebox{\linewidth}{!}{
+    \begin{tikzpicture}
+        \begin{axis}[
+            ybar,
+            ymax=40,
+            enlarge x limits=0.25,
+            bar width=18pt,
+            ylabel={ST BLEU Score ($\uparrow$)},
+            xlabel={ASR \% WER ($\downarrow$)},
+            symbolic x coords={$<40\%$,{$[40,80)\%$}, $\geq80\%$},
+            xtick=data,
+            nodes near coords,
+            nodes near coords align={vertical},
+            legend cell align={left},
+            xlabel near ticks,
+            ylabel near ticks,
+            ytick align=outside,
+            ytick pos=left,
+            xtick align=inside,
+            xtick style={draw=none},
+            ]
+            \addplot coordinates {($<40\%$,29.9) ({$[40,80)\%$},20.1) ($\geq80\%$,5.4)};
+            \addplot coordinates {($<40\%$,32.1) ({$[40,80)\%$},19.1) ($\geq80\%$,5.8)};
+            \addplot coordinates {($<40\%$,33.2) ({$[40,80)\%$},21.2) ($\geq80\%$,5.6)};
+            \legend{Baseline Enc-Dec,Multi-Decoder,Multi-Decoder w/ SA}
+        \end{axis}
+    \end{tikzpicture}
+    }
+    \caption{Results comparing the ST performances (BLEU) of our Baseline Enc-Dec, Multi-Decoder, and Multi-Decoder w/ Speech-Attention across different ASR difficulties measured using \% WER on the Fisher dev set (1-ref). The buckets on the x-axis are determined using the utterance level \% WER using the Multi-Decoder ASR sub-net performance.}
+    \label{fig:error_propagation}
+\end{figure}
+\begin{table}[t]
+  \centering
+    \include{tables/robust_table}
+    \caption{Results presenting the overall ST performance (BLEU) and the sub-net ASR (\% WER) of our Multi-Decoder models when tested on out-of-domain data. All models were trained on the Fisher-CallHome Es$\to$En corpus and tested on CoVost2 Es$\to$En corpus. $^\diamondsuit$Pretrained with 364 hours of in-domain ASR data.}
+    \label{tab:robustness_results}
+\end{table}
+\subsection{Generalizability}
+\label{sec:gen}
+In this section, we discuss the generalizability of our framework towards out-of-domain data. We also extend our Multi-Decoder model to other sequence tasks like speech recognition. Finally, we apply our ST models to a larger corpus with more language pairs and a different domain of speech.
+\subsubsection{Robustness through Decomposition}
+\label{sec:robust_decomp}
+Like cascaded systems, searchable intermediates provide our model adaptability in individual sub-systems towards out-of-domain data using external in-domain language model, thereby giving access to more in-domain data. Specifically for speech translation systems, this means we can use in-domain language models in both source and target languages. We test the robustness of our Multi-Decoder model trained on Fisher-CallHome conversational speech dataset on read speech CoVost-2 dataset \cite{wang2020covost}. In \Tref{tab:robustness_results} we show that re-scoring the ASR sub-net with an in-domain LM improves ASR with around 10.0\% lower WER, improving the overall ST performance by around +2.5 BLEU. Compared to an in-domain ST baseline \cite{Wang2020fairseqSF}, our out-of-domain Multi-Decoder with in-domain ASR re-scoring demonstrates the robustness of our approach.
+\subsubsection{Decomposing Speech Transcripts}
+\label{sec:asr_decomp}
+
+We apply our generic framework to another decomposable sequence task, speech recognition, and show the results of various levels of decomposition in \Tref{tab:asr_results}. We show that with phoneme, character, or byte-pair encoding (BPE) sequences as intermediates, the Multi-Decoder presents strong results on both Fisher and CallHome test sets. We also observe that the BPE intermediates perform better than phoneme/character variants, which could be attributed to the reduced search capabilities of encoder-decoder models using beam search on longer sequences \cite{sountsov-sarawagi-2016-length} like in phoneme/character sequences.
+
+\begin{table}[t]
+  \centering
+    \include{tables/asr_table}
+    \caption{Results presenting the \% WER ASR performance when using the Multi-Decoder model on decomposed ASR task with phoneme, character, and BPE100 as intermediates. All results are from the Fisher-CallHome Spanish corpus.~$^\diamondsuit$\cite{weiss2017}}
+    \label{tab:asr_results}
+\end{table}
+\subsubsection{Extending to MuST-C Language Pairs}
+\label{sec:must_c}
+
+In addition to our results using the 170 hours of the Spanish-English Fisher-CallHome corpus, in \Tref{tab:mustc_results} we show that our decompositional framework is also effective on larger ST corpora. In particular, we use 400 hours of English-German and 500 hours of English-French ST from the MuST-C corpus \cite{di2019must}.
+Our Multi-Decoder model improves by +2.7 and +1.5 BLEU, in German and French respectively, over end-to-end baselines from prior works that do not use additional training data. We show that ASR re-scoring gives an additional +0.1 and +0.4 BLEU improvement.~\footnote{Details of the MuST-C data preparation and model parameters are detailed in Appendix (\ref{sec:mustc_data}).}
+
+By extending our Multi-Decoder models to this MuST-C study, we show the generalizability of our approach across several dimensions of ST tasks. 
+First, our approach consistently improves over baselines across multiple language-pairs. 
+Second, our approach is robust to the distinct domains of telephone conversations from Fisher-CallHome and the TED-Talks from MuST-C. 
+Finally, by scaling from 170 hours of Fisher-CallHome data to 500 hours of MuST-C data, we show that the benefits of decomposing sequence tasks with searchable hidden intermediates persist even with more data.
+
+Furthermore, the performance of our Multi-Decoder models trained with only English-German or English-French ST data from MuST-C is comparable to other methods which incorporate larger external ASR and MT data in various ways. For instance, \citet{zheng2021fused} use 4700 hours of ASR data and 2M sentences of MT data for pretraining and multi-task learning. Similarly, \citet{bahar2021tight} use 2300 hours of ASR data and 27M sentences of MT data for pretraining. Our competitive performance without the use of any additional data highlights the data-efficient nature of our proposed end-to-end framework as opposed to the baseline encoder-decoder model, as pointed out by \citet{sperber2020speech}. 
+
+
+\begin{table}[t]
+  \centering
+    \include{tables/mustc_table}
+    \caption{Results presenting the overall ST performance (BLEU) of our Multi-Decoder w/ Speech-Attention models with ASR re-scoring across two language-pairs, English-German (En$\rightarrow$De) and English-French (En$\rightarrow$Fr). All results are from the MuST-C tst-COMMON sets. All models use speech transcripts.}
+    \label{tab:mustc_results}
+\end{table}
+\section{Discussion and Relation to Prior Work}
+\label{sec:related}
+
+\paragraph{Compositionality:}
+A number of recent works have constructed composable neural network modules for tasks such as visual question answering \cite{andreas2016neural}, neural MT \cite{raunak2019compositionality}, and synthetic sequence-to-sequence tasks \cite{lake2019compositional}.
+Modules that are first trained separately can subsequently be tightly integrated into a single end-to-end trainable model by passing differentiable soft decisions instead of discrete decisions in the intermediate stage \cite{bahar2021tight}. 
+Further, even a single encoder-decoder model can be decomposed into modular components where the encoder and decoder modules have explicit functions \cite{sdalmia}.  
+
+\paragraph{Joint Training with Sub-Tasks:}
+End-to-end sequence models been shown to benefit from introducing joint training with sub-tasks as auxiliary loss functions for a variety of tasks like ASR \cite{kim2017joint}, ST \cite{salesky, liu2019synchronous, dong2020sdst, le2020dualdecoder}, SLU \cite{haghani2018audio}. They have been shown to induce structure \cite{belinkov2020linguistic} and improve the model performance \cite{toshniwal2017multitask}, but this joint training may reduce data efficiency if some sub-nets are not included in the final end-to-end model \cite{Sperber2019AttentionPassingMF, Wang_Wu_Liu_Yang_Zhou_2020}. Our framework avoids this sub-net waste at the cost of computational load during inference.
+
+\paragraph{Speech Translation Decoders:}
+Prior works have used ASR/MT decoding to improve the overall ST decoding through synchronous decoding \cite{liu2019synchronous}, dual decoding \cite{le2020dualdecoder}, and successive decoding \cite{dong2020sdst}. These works partially or fully decode ASR transcripts and use discrete intermediates to assist MT decoding. \citet{tu2017neural} and \citet{anastasopoulos-chiang-2018-tied} are closest to our multi-decoder ST model, however the benefits of our proposed framework are not entirely explored in these works.
+
+\paragraph{Two-Pass Decoding:}
+Two-pass decoding involves first predicting with one decoder and then re-evaluating with another decoder \cite{geng2018adaptive, sainath2019two, hu2020deliberation,rijhwani2020ocr}. The two decoders iterate on the same sequence, so there is no decomposition into sub-tasks in this method. On the other hand, our approach provides the subsequent decoder with a more structured representation than the input by decomposing the complexity of the overall task. Like two-pass decoding, our approach provides a sense of the future to the second decoder which allows it to correct mistakes from the previous first decoder. 
+
+\paragraph{Auto-Regressive Decoding:} As auto-regressive decoders inherently learn a language model along with the task at hand, they tend to be domain specific \cite{samarakoon2018domain, muller-etal-2020-domain}. 
+This can cause generalizability issues during inference \cite{murray-chiang-2018-correcting, yang2018breaking}, impacting the performance of both the task at hand and any downstream tasks. 
+Our approach alleviates these problems through intermediate search, external models for intermediate re-scoring, and multi-sequence attention.
+\section{Conclusion and Future Work}
+\label{sec:conc}
+We present searchable hidden intermediates for end-to-end models of decomposable sequence tasks. 
+We show the efficacy of our Multi-Decoder model on the Fisher-CallHome Es$\rightarrow$En and MuST-C En$\rightarrow$De and En$\rightarrow$Fr speech translation corpora, achieving state-of-the-art results. 
+We present various benefits in our framework, including sub-net performance monitoring, beam search for better hidden intermediates, external models for better search, and error propagation avoidance. 
+Further, we demonstrate the flexibility of our framework towards out-of-domain tasks with the ability to adapt our sequence model at intermediate stages of decomposition. 
+Finally, we show generalizability by training Multi-Decoder models for the speech recognition task at various levels of decomposition. 
+
+We hope insights derived from our study stimulate research on tighter integrations between the benefits of cascaded and end-to-end sequence models. Exploiting searchable intermediates through beam search is just  the tip of the iceberg for search algorithms, as numerous approximate search techniques like diverse beam search \cite{diverse_beam_search} and best-first beam search \cite{meister2020best} have been recently proposed to improve diversity and approximation of the most-likely sequence. Incorporating differentiable lattice based search \cite{hannun2020differentiable} can also allow the subsequent sub-net to digest n-best representations.
+\section{Acknowledgements}
+This work started while Vikas Raunak was a student at CMU, he is now working as a Research Scientist at Microsoft. We thank Pengcheng Guo, Hirofumi Inaguma, Elizabeth Salesky, Maria Ryskina, Marta M\'endez Sim\'on and Vijay Viswanathan for their helpful discussion during the course of this project. We also thank the anonymous reviewers for their valuable feedback. This work used the Extreme Science and Engineering Discovery Environment (XSEDE) \cite{xsede}, which is supported by National Science Foundation grant number ACI-1548562. Specifically, it used the Bridges system \cite{bridges}, which is supported by NSF award number ACI-1445606, at the Pittsburgh Supercomputing Center (PSC). The work was supported in part by an AWS Machine Learning Research Award. This research was also supported in part the DARPA KAIROS program from the Air Force Research Laboratory under agreement number FA8750-19-2-0200. The U.S. Government is authorized to reproduce and distribute reprints for Governmental purposes not withstanding any copyright notation there on. The views and conclusions contained herein are those of the authors and should not be interpreted as necessarily representing the official policies or endorsements, either expressed or implied, of the Air Force Research Laboratory or the U.S. Government.
+\bibliography{multi_decoder}
+\bibliographystyle{acl_natbib}
+
+\newpage
+\appendix
+\section{Appendix}
+\definecolor{cfred}{HTML}{e9a3c9}
+\definecolor{cfgreen}{HTML}{a1d76a}
+
+\begin{table*}[t]
+  \centering
+    \include{tables/qualitative_table}
+    \caption{Examples where the Multi-Decoder and Multi-Decoder w/ Speech-Attention models make errors in the ASR portion of Spanish-English ST. In these cases the Speech-Attention component alleviates ASR error propagation, producing correct translations despite mistakes in transcription. Words that are transcribed/translated correctly are highlighted in \colorbox{cfgreen}{green} and those that are incorrect are in \colorbox{cfred}{pink}. }
+    \label{tab:qual_results}
+\end{table*}
+\begin{table*}[t]
+  \centering
+    \include{tables/metrics_table}
+    \caption{Results presenting the performance of our Baseline Enc-Dec implementation and our Multi-Decoder models as evaluated by three metrics: BLEU, METEOR, and Translation Edit Rate (TER). These are the same models as in \Tref{tab:main_results}, which uses BLEU. All results are from the Fisher-CallHome Spanish-English test corpus.}
+    \label{tab:metrics_results}
+\end{table*}
+\subsection{Training and Inference hyperparameters}
+\label{sec:appendix}
+We tune training and inference hyperparameters using only the dev sets. We first determined the best hyperparameters for our baseline Enc-Dec implementation and fixed all settings not pertaining to the unique searchable hidden intermediates of our Multi-Decoder. Then, we find the best hyperparameters for our proposed models under these constraints to demonstrate a true comparison against the baseline. For our Speech-Attention variant, we found that increasing attention dropout in the ST sub-net decoder to 0.4 improved performance, which we verified was not true for the vanilla Multi-Decoder model. For our external model re-scoring, we found that a CTC weight of 0.3 is best for all Multi-Decoder and Multi-Decoder w/ Speech-Attention. The best LM weight for the Multi-Decoder was 0.2, while the best LM weight for the Multi-Decoder w/ Speech-Attention was 0.4. For both of these re-scoring hyperparameters, we tried $[0.2, 0.3, 0.4]$. For deciding the beam size, we use the experiment demonstrated in \Fref{fig:beam_exp} which uses beam sizes of $[1, 4, 8, 10, 16]$.
+\subsection{Multi-Decoder ST Performance across other automatic MT Metrics}
+\label{sec:other_metrics}
+To supplement our overall ST results on the Fisher/CallHome corpus in \Tref{tab:main_results}, which shows BLEU scores, we also evaluated the same Multi-Decoder and Baseline Enc-Dec (Our Implementation) models on two additional metrics: METEOR \cite{banerjee2005meteor} and Translation Edit Rate (TER) \cite{snover2006study}. Performance across all three metrics show consistent trends, with the Multi-Decoder outperforming the Baseline Enc-Dec model on all metrics. We see that both the Multi-Decoder and Multi-Decoder w/ Speech-Attention models are improved through ASR Re-scoring. Further, the models with Speech-Attention perform better than those without.
+\subsection{Qualitative Examples of Error Propagation Avoidance}
+\label{sec:qual_examples}
+To supplement our qualitative analysis of the error propagation avoidance of the Multi-Decoder with Speech-Attention model in \Sref{sec:error_prop}, we also show four qualitative examples in \Tref{tab:qual_results}. In the first three examples, the Multi-Decoder and Multi-Decoder with Speech-Attention models both make the same mistakes in the ASR portion of Spanish-English translation, but the model with Speech-Attention recovers by producing correct English translations despite mistakes in the Spanish transcription. On the other hand, the model without Speech-Attention propagates the Spanish transcription errors into English translation errors. In the fourth example only the Multi-Decoder w/ Speech-Attention makes a mistake in Spanish transcription, but the English translation still recovers.
+\subsection{MuST-C Data Setup and Model Details}
+\label{sec:mustc_data}
+\paragraph{Data:} We extend our approach to other language pairs from the MuST-C speech translation corpus \cite{di2019must}. These are recordings of TED talks in English with translations in various target languages. In our experiments we show results on two language pairs, namely, English-German and English-French. We use the provided dev set for deciding the training and inference hyperparameters, as mentioned in Appendix (\ref{sec:appendix}). We report detokenized case-sensitive BLEU \cite{post-2018-call} on the tst-COMMON set. We apply the same text processing as done in \cite{inaguma-etal-2020-espnet-st} and use a joint source and target vocabulary of 8K byte pair encoding (BPE) units \cite{kudo2018sentencepiece}. Similar to \Sref{sec:data_prep}, we use the ESPnet library to prepare the corpus, and apply the same data preparation and augmentations.
+
+\paragraph{Multi-Decoder Configuration:} For the MuST-C experiments, we scaled our Multi-Decoder w/ Speech-Attention config from the Fisher-CallHome experiments by increasing the $\textsc{Encoder}_{\textsc{st}}$ to contain 4 transformer encoder blocks. We increased the attention dim and attention heads of the $\textsc{Encoder}_{\textsc{asr}}$ and $\textsc{Decoder}_{\textsc{asr}}$ to 512 dimension and 8 heads respectively, while only increasing the attention dimension to 512 for $\textsc{Encoder}_{\textsc{st}}$ and $\textsc{Decoder}_{\textsc{st}}$. This increased the total trainable parameters to 135M, which we trained on 4 NVIDIA V-100 GPUs for $\approx$3 days. We also found that increasing the attention dropout of ASR decoder to 0.2 helped with the increased parameters. We kept the remaining dropout parameters the same as our previous experiments. We also keep the remaining training configurations the same like the effective batch-size, learning rate and warmup steps, loss weighting and SpecAugment policy.
+
+During inference, we use the same beam sizes from our Fisher-CallHome experiments and we perform a search across the length penalty and max length ratio settings using the MuST-C dev sets.
+In the intermediate ASR beam search we use a length penalty of 0.1 and 0.2 for English-German and English-French respectively. In the ST beam search we use a max length ratio of 0.3 and length penalties of 0.6 and 0.5 for English-German and English-French respectively. For our experiments with ASR re-scoring, we use a LM weight of 0.1 and a CTC weight of 0.1. In these re-scoring experiments we also set the ASR length penalty to 0.6 and the ST length penalty to 0.5, while increasing the ST max length ratio to 0.5. 
+The LMs used were trained on the English transcripts of the MuST-C English-German and English-French corpora, with dev perplexities of 32.7 and 23.2 respectively.

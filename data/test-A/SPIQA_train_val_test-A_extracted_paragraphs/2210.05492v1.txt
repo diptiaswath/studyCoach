@@ -1,0 +1,1159 @@
+\section{Introduction}
+\vspace{-0.05in}
+In two-player zero-sum (2p0s) settings, principled self-play algorithms converge to a minimax equilibrium, which in a balanced game ensures that a player will not lose in expectation regardless of the opponent's strategy~\citep{neumann1928theorie}. This fact has allowed self-play, even without human data, to achieve remarkable success in 2p0s games like chess~\citep{silver2018general}, Go~\citep{silver2017mastering}, poker~\citep{bowling2015heads,brown2017superhuman}, and Dota 2~\citep{berner2019dota}.\footnote{Dota 2 is a two-team zero-sum game, but the presence of full information sharing between teammates makes it equivalent to 2p0s. Beyond 2p0s settings, self-play algorithms have also proven successful in highly adversarial games like six-player poker~\cite{brown2019superhuman}.} In principle, \emph{any} finite 2p0s game can be solved via self-play given sufficient compute and memory.
+However, in games involving \emph{cooperation}, self-play alone no longer guarantees good performance when playing with humans, even with \emph{infinite} compute and memory. This is because in complex domains there may be arbitrarily many conventions and expectations for how to cooperate, of which humans may use only a small subset~\citep{lerer2019learning}. The clearest example of this is language.
+A self-play agent trained from scratch without human data in a cooperative game involving free-form communication channels would almost certainly not converge to using English as the medium of communication. Obviously, such an agent would perform poorly when paired with a human English speaker.
+Indeed, prior work has shown that na\"ive extensions of self-play from scratch without human data perform poorly when playing with humans or human-like agents even in dialogue-free domains that involve cooperation rather than just competition, such as the benchmark games no-press Diplomacy~\citep{bakhtin2021no} and Hanabi~\citep{siu2021evaluation,cui2021k}. 
+
+Recently, \citep{jacob2022modeling} introduced piKL, which models human behavior in many games better than pure behavioral cloning  (BC) on human data by regularizing inference-time planning toward a BC policy.
+In this work, we introduce an extension of piKL, called \bqrealgo, that replaces piKL's single fixed regularization parameter~$\lambda$ with a probability distribution over~$\lambda$ parameters. We then show how \bqrealgo can be combined with self-play reinforcement learning, allowing us to train a strong agent that performs well with humans. We call this algorithm \textbf{\rlbqrealgo}.
+
+Using \rlbqrealgo we trained an agent, \botname, to play no-press Diplomacy, a difficult benchmark for multi-agent AI that has been actively studied in recent years~\citep{paquette2019no,anthony2020learning,gray2020human,bakhtin2021no,jacob2022modeling}.
+We conducted a 200-game no-press Diplomacy tournament with a diverse pool of human players, including expert humans, in which we tested two versions of \botname using different \rlbqrealgo settings, and other baseline agents. All games consisted of one bot and six humans, with all players being anonymous for the duration of the game. These two versions of \botname achieved the top two average scores in the tournament among all 48 participants who played more than two games, and ranked first and third overall among all participants according to an Elo ratings model.
+
+\vspace{-0.05in}
+\section{Background and Prior work}
+\vspace{-0.05in}
+\label{sec:related_diplomacy}
+
+Diplomacy is a benchmark 7-player mixed cooperative/competitive game featuring simultaneous moves and a heavy emphasis on negotiation and coordination. In the no-press variant of the game, there is no cheap talk communication. Instead, players only implicitly communicate through moves.
+
+In the game, seven players compete for majority control of 34 ``supply centers'' (SCs) on a map. On each turn, players simultaneously choose actions consisting of an order for each of their units to hold, move, support or convoy another unit. If no player controls a majority of SCs and all remaining players agree to a draw or a turn limit is reached then the game ends in a draw. In this case, we use a common scoring system in which the score of player~$i$ is $C_i^2 /\sum_{i'}C_{i'}^2$, where $C_i$ is the number of SCs player~$i$ owns. A more detailed description of the rules is provided in \cref{appendix:rules_diplomacy}.
+
+Most recent successes in no-press Diplomacy use deep learning to imitate human behavior given a corpus of human games. The first Diplomacy agent to leverage deep imitation learning was~\cite{paquette2019no}.
+Subsequent work on no-press Diplomacy have mostly relied on a similar architecture with some modeling improvements~\citep{gray2020human,anthony2020learning,bakhtin2021no}. 
+
+\cite{gray2020human} proposed an agent that plays an improved policy via one-ply search. It uses policy and value functions trained on human data to to conduct search using regret minimization. 
+
+Several works explored applying self-play to compute improved policies. \citet{paquette2019no} applied an actor-critic approach and found that while the agent plays stronger in populations of other self-play agents, it plays worse against a population of human-imitation agents.
+\citet{anthony2020learning} used a self-play approach based on a modification of fictitious play in order to reduce drift from human conventions.
+The resulting policy is stronger than pure imitation learning in both 1vs6 and 6vs1 settings but weaker than agents that use search. Most recently, \citet{bakhtin2021no} combined one-ply search based on equilibrium computation with value iteration to produce an agent called DORA.
+DORA achieved superhuman performance in a 2p0s version of Diplomacy without human data, but in the full 7-player game plays poorly with agents other than itself.
+
+\citet{jacob2022modeling} showed that regularizing inference-time search techniques can produce agents that are not only strong but can also model human behaviour well. In the domain of no-press Diplomacy, they show that regularizing hedge (an equilibrium-finding algorithm) with a KL-divergence penalty towards a human imitation learning policy can match or exceed the human action prediction accuracy of imitation learning while being substantially stronger. KL-regularization toward human behavioral policies has previously been proposed in various forms in single- and multi-agent RL algorithms~\citep{nair2018overcoming,siegel2020keep,nair2020accelerating}, and was notably employed in AlphaStar~\citep{vinyals2019grandmaster}, but this has typically been used to improve sample efficiency and aid exploration rather than to better model and coordinate with human play.
+
+
+An alternative line of research has attempted to build human-compatible agents without relying on human data~\citep{hu2020other,hu2021off,strouse2021collaborating}. These techniques have shown some success in simplified settings but have not been shown to be competitive with humans in large-scale collaborative environments.
+
+\vspace{-0.05in}
+\subsection{Markov Games}
+\vspace{-0.05in}
+In this work, we focus on multiplayer Markov games~\citep{shapley1953stochastic}. 
+\begin{definition*}
+An $n$-player Markov game $\Delta$ is a tuple $\langle S, A_1,\dots,A_n,r_1,\dots,r_n,p\rangle$ where $S$ is the state space, $A^i$ is the action space of player $i$ ($i=1,\dots,n$), $r_i : S \times A_1 \times \cdots \times A_n \rightarrow \mathbb{R}$ is the reward function for player~$i$, $f : S \times A_1 \times \cdots \times A_n \rightarrow S$ is the transition function.
+\end{definition*}
+
+The goal of each player $i$, is to choose a policy $\pi_i(s): S \rightarrow \Delta A_i$ that maximizes the expected reward for that player, given the policies of all other players. In case of $n=1$, a Markov game reduces to a Markov Decision Process (MDP) where an agent interacts with a fixed environment.
+
+At each state~$s$, each player~$i$ simultaneously chooses an action~$a_i$ from a set of actions $\mathcal{A}_i$.
+We denote the actions of all players other than~$i$ as $\vec{a}_{-i}$.
+Players may also choose a probability distribution over actions, where the probability of action~$a_i$ is denoted $\pi_i(s, a_i)$ or $\sigma_i(a_i)$ and the vector of probabilities is denoted $\vec{\pi}_i(s)$ or $\vx_i$.
+
+\vspace{-0.05in}
+\subsection{Hedge}
+\vspace{-0.05in}
+\textbf{Hedge}~\cite{littlestone1994weighted,freund1997decision} is an iterative algorithm that converges to an equilibrium. We use variants of hedge for planning by using them to compute an equilibrium policy on each turn of the game and then playing that policy.
+
+Assume that after player~$i$ chooses an action~$a_i$ and all other players choose actions~$a_{-i}$, player~$i$ receives a reward of $u_i(a_i, \vec{a}_{-i})$, where $u_i$ will come from our RL-trained value function. We denote the average reward in hindsight for action~$a_i$ up to iteration $t$ as $Q^t(a_i) = \frac{1}{t}\sum_{t' \le t} u_i(a_i, a^{t'}_{-i})$.
+
+On each iteration~$t$ of hedge, the policy $\vx^t_i(a_i)$ is set according to $\vx^{t}_i(a_i) \propto \exp\big(Q^{t-1}(a_i) / \temp_{t-1}\big)$
+where $\temp_t$ is a temperature parameter.\footnote{We use $\temp_t$ rather than $\eta$ used in \citet{jacob2022modeling} in order to clean up notation. $\temp_t = 1/(\eta \cdot t)$.}
+
+It is proven that if $\temp_t$ is set to $\frac{1}{\sqrt{t}}$ then as $t \rightarrow \infty$ the \emph{average} policy over all iterations converges to a coarse correlated equilibrium, though in practice it often comes close to a Nash equilibrium as well.
+In all experiments we set $\temp_t = \frac{3 \mathcal{S}_t}{10 \sqrt{t}}$ on iteration~$t$, where $\mathcal{S}_t$ is the observed standard deviation of the player's utility up to iteration~$t$, based on a heuristic from~\cite{brown2017dynamic}. A simpler choice is to set $\temp_t = 0$, which makes the algorithm equivalent to fictitious play~\citep{brown1951iterative}.
+
+\textbf{Regret matching (RM)}~\citep{blackwell1956analog,hart2000simple} is an alternative equilibrium-finding algorithm that has similar theoretical guarantees to hedge and was used in previously work on Diplomacy~\cite{gray2020human,bakhtin2021no}. We do not use this algorithm but we do evaluate baseline agents that use RM. 
+
+\vspace{-0.05in}
+\subsection{DORA: Self-play learning in Markov games}
+\vspace{-0.05in}
+\label{sec:dora}
+
+Our approach draws significantly from DORA~\citep{bakhtin2021no}, which we describe in more detail here. In this approach, the authors run an algorithm that is similar to past model-based reinforcement-learning methods such as AlphaZero \citep{silver2018general}, except in place of Monte Carlo tree search, which is unsound in simultaneous-action games such as Diplomacy or other imperfect information games, it instead uses an equilibrium-finding algorithm such as hedge or RM to iteratively approximate a Nash equilibrium for the current state (i.e., one-step lookahead search). A deep neural net trained to predict the policy is used to sample plausible actions for all players to reduce the large action space in Diplomacy down to a tractable subset for the equilibrium-finding procedure, and a deep neural net trained to predict state values is used to evaluate the results of joint actions sampled by this procedure. Beginning with a policy and value network randomly initialized from scratch, a large number of self-play games are played and the resulting equilibrium policies and the improved 1-step value estimates computed on every turn from equilibrium-finding are added to a replay buffer used for subsequently improving the policy and value. Additionally, a double-oracle~\citep{mcmahan2003doubleoracle} method was used to allow the policy to explore and discover additional actions, and the same equilibrium-finding procedure was also used at test time. 
+
+
+For the core update step, \citet{bakhtin2021no} propose Deep Nash Value Iteration~(DNVI), a value iteration procedure similar to Nash Q-Learning~\citep{hu2003nash}, which is a generalization of Q-learning~\citep{watkins1989learning} from MDPs to Stochastic games.
+The idea of Nash-Q is to compute equilibrium policies $\sigma$ in a subgame where the actions correspond to the possible actions in a current state and the payoffs are defined using the current approximation of the value function.
+\cite{bakhtin2021no} propose an equivalent update that uses a state value function $V(s)$ instead of a state-action value function $Q(s, a)$:
+\begin{equation}\label{eq:nashv}
+\myvector{V}(s) \leftarrow (1 - \alpha) \myvector{V}(s) + \alpha (\myvector{r} + \gamma \sum\limits_{\myvector{a'}} \sigma(\myvector{a'}) \myvector{V}(f(s, \myvector{a'})))
+\end{equation}
+where $\alpha$ is the learning rate, $\sigma(\cdot)$ is the probability of joint action in equilibrium, $\myvector{a'}$ is joint action, and $f$ is the transition function.
+For 2p0s games and certain other game classes, this algorithm converges to a Nash equilibrium in the original stochastic game under the assumption that an exploration policy is used such that each state is visited infinitely often .
+
+The tabular approach of Nash-Q does not scale to large games such as Diplomacy. 
+DNVI replaces the explicit value function table and update rule in~\ref{eq:nashv} with a value function parameterized by a neural network, $\myvector{V}(s;\theta_v)$ and uses gradient descent to update it using the following loss:
+\begin{equation}\label{eq:loss_value}
+\begin{aligned}
+&\text{ValueLoss}(\theta_v) = \frac{1}{2}\left(\myvector{V}(s;\theta_v) - \myvector{r}(s) - \gamma\sum\limits_{\myvector{a'}} \sigma(\myvector{a'}) \myvector{V}\left(f(s, \myvector{a'});\hat{\theta}_v\right)\right)^2
+\end{aligned}
+\end{equation}
+
+The summation used in~\ref{eq:loss_value} is not feasible in games with large action spaces as the number of joint actions grow exponentially with the number of players.
+\citet{bakhtin2021no} address this issue by considering only a subset of actions at each step.
+An auxiliary function, a policy proposal network $\pi_i(s, a_i; \theta_{{\pi}})$,  models the probability that an action $a_i$ of player $i$ is in the support of the equilibrium $\sigma$.
+Only the top-$k$ sampled actions from this distribution are considered when solving for the equilibrium policy $\sigma$ and computing the above value loss. Once the equilibrium is computed, the equilibrium policy is also used to further train the policy proposal network using cross entropy loss:
+
+\begin{equation}\label{eq:loss_policy}
+\begin{aligned}
+&\text{PolicyLoss}(\theta_\pi) = - \sum_i \sum_{a_i \in A_i} \sigma_i(a)\log\pi_i(s, a_i; \theta_{{\pi}}).
+\end{aligned}
+\end{equation}
+
+
+\cite{bakhtin2021no} report that the resulting agent DORA does very well when playing with other copies of itself.
+However, DORA performs poorly in games with 6 human human-like agents.
+
+\vspace{-0.05in}
+\subsection{piKL: Modeling humans with imitation-anchored planning}
+\vspace{-0.05in}
+\textit{Behavioral cloning (BC)} is the standard approach for modeling human behaviors given data. Behavioral cloning learns a policy that maximizes the likelihood of the human data by gradient descent on a cross-entropy loss. However, as observed and discussed in \cite{jacob2022modeling}, BC often falls short of accurately modeling or matching human-level performance, with BC models underperforming the human players they are trained to imitate in games such as Chess, Go, and Diplomacy. Intuitively, it might seem that initializing self-play with an imitation-learned policy would result in an agent that is both strong and human-like. Indeed, \cite{bakhtin2021no} showed improved performance against human-like agents when initializing the DORA training procedure from a human imitation policy and value, rather than starting from scratch. However, we show in \autoref{sec:ablations} that such an approach still results in policies that deviate from human-compatible equilibria.
+
+\citet{jacob2022modeling} found that an effective solution was to perform search with a regularization penalty proportional to the KL divergance from a human imitation policy. This algorithm is referred to as \textbf{piKL}.
+The form of piKL we focus on in this paper is a variant of hedge called piKL-hedge, in which each player~$i$ seeks to maximize expected reward, while at the same time playing ``close'' to a fixed \textbf{anchor policy}~$\vec{\tau}_i$. The two goals can be reconciled by defining a composite utility function that adds a penalty based on the ``distance'' between the player policy and their anchor policy, with coefficient $\lambda_i\in[0,\infty)$ scaling the penalty.
+
+For each player~$i$, we define $i$'s utility as a function of the agent policy $\vx_i \in \Delta(A_i)$ given policies $\vx_{-i}$ of all other agents:
+\begin{align}\label{eq:regularized C}
+\tilde u_{i,\lambda_i}(\vx_i, \vx_{-i}) &\defeq u_i(\vx_i, \vx_{-i}) - \lambda_i\,\KL{\vx_i}{\vec{\tau}_i}
+\end{align}
+
+This results in a modification of hedge such that on each iteration~$t$, $\vx^t_i(a_i)$ is set according to
+\begin{equation}\label{eq:pikl_hedge}
+    \vx^t_{i}(a_i) \propto \exp\mleft\{\frac{Q^{t-1}(a_i) + \lambda \,\log\tau_i(a_i)}{\temp_{t-1} + \lambda}\mright\}
+\end{equation}
+
+When $\lambda$ is large, the utility function is dominated by the KL-divergence term $\lambda_i\,\KL{\vx_i}{\vec{\tau}_i}$, and so the agent will naturally tend to play a policy $\vx_i$ close to the anchor policy $\vec{\tau}_i$. When $\lambda_i$ is small, the dominating term is the rewards $u_i(\vx_i, \vec{a}^t_{-i})$ and so the agent will tend to maximize reward without as closely matching the anchor policy $\vec{\tau}_i$.
+
+
+\vspace{-0.05in}
+\section{Distributional Lambda piKL (\bqrealgo)}
+\vspace{-0.05in}
+\label{sec:dilpikl}
+
+piKL trades off between the strength of the agent and the closeness to the anchor policy using a single fixed $\lambda$ parameter.
+In practice, we find that sampling $\lambda$ from a probability distribution each iteration produces better performance. In this section, we introduce \textbf{distributional lambda piKL (\bqrealgo)}, which replaces the single $\lambda$ parameter in \qrealgo{} with a probability distribution~$\beta$ over $\lambda$ values. On each iteration, each player~$i$ samples a $\lambda$ value from~$\beta_i$ and then chooses a policy based on Equation~\ref{eq:pikl_hedge} using that sampled $\lambda$. Figure~\ref{algo:noregret} highlights the difference between \qrealgo{} and \bqrealgo{}.
+
+\begin{figure}[t]
+\small
+\vspace{-0.05in}
+    \begin{minipage}{8cm}
+        \begin{figure}[H]
+        \SetInd{0.4em}{0.6em}
+        \scalebox{.9}{\begin{algorithm}[H]\caption{\textsc{\bqrealgo} (for Player~$i$)}\label{algo:noregret}
+            \DontPrintSemicolon
+            \KwData{\mbox{~\textbullet~} $A_i$ set of actions for Player~$i$;\newline
+                \mbox{~\textbullet~} $u_i$ reward function for Player~$i$;\newline
+                \HiLi \mbox{~\textbullet~} $\Lambda_i$ a set of $\lambda$ values to consider for Player~$i$;\newline
+                \HiLi \mbox{~\textbullet~} $\beta_i$ a belief distribution over $\lambda$ values for Player~$i$.
+                }
+            \BlankLine
+            \Fn{\normalfont\textsc{Initialize}()}{
+                $t \gets 0$\;
+
+                \For{\normalfont\textbf{each} action $a_i \in A_i$}{
+                    $\mathsf{Q}^0_i(a_i) \gets 0$\;
+                }
+            }
+            \Hline{}
+            \Fn{\normalfont\textsc{Play}()}{
+                $t \gets t + 1$\;
+                \HiLi sample $\lambda \sim \beta_i$\;
+                let $\vec{\pi}^t_{i, \lambda}$ be the policy such that 
+                \label{line:distribution}
+                \[\small
+                    \displaystyle\vec{\pi}^t_{i,\lambda}(a_i) \propto \exp\mleft\{\frac{\,Q^{t-1}(a_i) + \lambda \,\log\tau_i(a_i)}{\temp_{t-1} + \lambda}\mright\}
+                \]\;\vspace{-5mm}
+                \label{line:pick a}                
+                sample an action $a^t_i \sim \vec{\pi}^t_{i, \lambda}$\;
+                play $a^t_i \in A_i$ and observe actions $\vec{a}^t_{-i}$ played by the opponents\;
+                
+                \For{\normalfont\textbf{each} $a_i \in A_i$}{
+                    $Q^{t}(a_i) \gets \frac{t-1}{t} Q^{t-1}(a_i) + \frac{1}{t} u_i(a_i, \vec{a}^t_{-i})$\;
+                }
+            }
+        \end{algorithm}}
+        \vspace{-0.03in}
+        \caption{\small \bqrealgo{} algorithm. Lines with highlights show the main differences between this algorithm and piKL-Hedge algorithm proposed in~\cite{jacob2022modeling}.}
+        \end{figure}
+\end{minipage}\quad
+\begin{minipage}{5.8cm}
+\vspace{-1cm}
+    \begin{figure}[H]
+    \hspace{-1.5cm}
+\includegraphics[scale=.26]{figs/dil_pikl_spectrum_square_small2.png}
+\vspace{-0.3in}
+\caption{\small $\lambda_{\textit{pop}}$ represents the common-knowledge belief about the $\lambda$ parameter or distribution used by all players. $\lambda_{\textit{agent}}$ represents the $\lambda$ value actually used by the agent to determine its policy. By having $\lambda_{\textit{agent}}$ differ from $\lambda_{\textit{pop}}$, DiL-piKL interpolates between an equilibrium under the utility function~$u_i$, behavioral cloning and best response to behavioral cloning policies. piKL assumed a common $\lambda$, which moved it along one axis of the space. Our agent models and coordinates with high-$\lambda$ players while playing a lower $\lambda$ itself.}
+\label{fig:dil_pikl_spectrum}
+    \end{figure}
+\end{minipage}
+\vspace{-0.05in}
+\label{bqre_algo}
+\end{figure}
+
+
+One interpretation of \bqrealgo{} is that each choice of $\lambda$ is an agent \textbf{type}, where agent types with high $\lambda$ choose policies closer to $\vec{\tau}$ while agent types with low $\lambda$ choose policies that are more ``optimal'' and less constrained to a common-knowledge anchor policy. A priori, each player is randomly sampled from this population of agent types, and the distribution $\beta_i$ represents the common-knowledge uncertainty about which of the agent types player~$i$ may be. Another interpretation is that piKL assumed an exponential relation between action EV and likelihood, whereas \bqrealgo{} results in a fatter-tailed distribution that may more robustly model different playing styles or game situations.
+\subsection{Coordinating with piKL policies}
+While piKL and DiL-piKL are intended to model human behavior, an optimal policy in cooperative environments should be closer to a \textit{best response} to this distribution. Selecting different $\lambda$ values for the common-knowledge population versus the policy the agent actually plays allows us to interpolate between BC, best response to BC, and equilibrium policies (Figure \ref{fig:dil_pikl_spectrum}). 
+In practice, our agent samples from $\beta_i$ during equilibrium computation but ultimately plays a low $\lambda$ policy, modeling the fact that other players are unaware of our agent's true type.
+\subsection{Theoretical Properties of \bqrealgo}
+\bqrealgo{} can be understood as a \emph{sampled} form of follow-the-regularized-leader (FTRL). Specifically, one can think of Algorithm~\ref{algo:noregret} as an instantiation of FTRL over the Bayesian game induced by the set $\Lambda_i = \supp \beta_i$ of types $\lambda_i$ 
+and the regularized utilities $\tilde u_\ili$ of each player $i$.
+In the appendix
+we show that when a player~$i$ learns using \bqrealgo{}, the distributions $\vec{\pi}_{i,\lambda}^t$ for any type $\lambda_i\in\Lambda_i$ are no-regret with respect to the regularized utilities $\tilde u_\ili$ defined in~\eqref{eq:regularized C}.
+Formally:
+\begin{theorem}[abridged]\label{thm:log regret main}
+    Let $\bdU$ be a bound on the maximum absolute value of any payoff in the game, and $\bdT \defeq \frac{1}{n_i}\sum_{a\in A_i} \log \vec\tau_i(a)$. Then, for any player $i$, type $\lambda_i\in\Lambda_i$, and number of iterations $T$, the regret cumulated can be upper bounded as
+    \[
+        \max_{\vec\pi\in\Delta(A_i)}\mleft\{\sum_{t=1}^T \tilde u_\ili(\vec\pi, \vec{a}_{-i}^t) - \tilde u_\ili(\vec\pi_{i,\lambda_i}^t, \vec{a}_{-i}^t)\mright\} \le \frac{\bdU^2}{4} \min\mleft\{\frac{2\log T}{\lambda_i}, T\eta \mright\} + \frac{\log n_i}{\eta} + \rho_\ili,
+    \]
+    where the game constant $\rho_\ili$ is defined as $\rho_\ili \defeq \lambda_i(\log n_i + \bdT)$.
+\end{theorem}
+The traditional analysis of FTRL is not applicable to \bqrealgo{} because
+the utility functions, as well as their gradients, can be unbounded due to the nonsmoothness of the regularization term $-\lambda_i \KL{\vx}{\vec\tau_i}$ that appears in the regularized utility function $\tilde u_\ili$, and therefore a more sophisticated analysis needs to be carried out. Furthermore, even in the special case of a single type (\emph{i.e.}, a singleton set $\Lambda_i$), where \bqrealgo{} coincides with \qrealgo{}, the above guarantee significantly refines the analysis of \qrealgo{} in two ways. First, it holds no matter the choice of stepsize $\eta > 0$, thus implying a $O(\log T/(T\lambda_i))$ regret bound without assumptions on $\eta$ other than $\eta = \Omega(1)$. Second, in the cases in which $\lambda_i$ is tiny, by choosing $\eta = \Theta(1/\sqrt{T})$ we recover a sublinear guarantee (of order $\sqrt{T}$) on the regret.
+
+In 2p0s games, the logarithmic regret of~\cref{thm:log regret main} immediately implies that the \emph{average policy} $\bar\vx^T_\ili \defeq \frac{1}{T}\sum_{t=1}^T \vx^t_\ili$ of each player $i$ is a $\frac{C\log T}{T}$-approximate Bayes-Nash equilibrium strategy. In fact, a strong guarantee on the \textit{last-iterate} convergence of the algorithm can be obtained too:
+\begin{theorem}[abridged; Last-iterate convergence of \pikl in 2p0s games]\label{thm:last iterate convergence main}
+    When both players in a 2p0s game learn using \dilpikl for $T$ iterations, their policies converge almost surely to the unique Bayes-Nash equilibrium $(\vx^*_{i,\lambda_i})$ of the regularized game defined by utilities $\tilde u_\ili$~\eqref{eq:regularized C}.
+\end{theorem}
+The last-iterate guarantee stated in \cref{thm:last iterate convergence main} crucially relies on the strong convexity of the regularized utilities, and conceptually belongs with related efforts in showing last-iterate convergence of online learning methods. However, a key difficulty that sets apart~\cref{thm:last iterate convergence main} is the fact that the learning agents observe \emph{sampled} actions from the opponents, which makes the proof of the result (as well as the obtained convergence rate) different from prior approaches.
+For the core update step, \citet{bakhtin2021no} propose Deep Nash Value Iteration~(DNVI), a value iteration procedure similar to Nash Q-Learning~\citep{hu2003nash}, which is a generalization of Q-learning~\citep{watkins1989learning} from MDPs to Stochastic games.
+The idea of Nash-Q is to compute equilibrium policies $\sigma$ in a subgame where the actions correspond to the possible actions in a current state and the payoffs are defined using the current approximation of the value function.
+\cite{bakhtin2021no} propose an equivalent update that uses a state value function $V(s)$ instead of a state-action value function $Q(s, a)$:
+\begin{equation}\label{eq:nashv}
+\myvector{V}(s) \leftarrow (1 - \alpha) \myvector{V}(s) + \alpha (\myvector{r} + \gamma \sum\limits_{\myvector{a'}} \sigma(\myvector{a'}) \myvector{V}(f(s, \myvector{a'})))
+\end{equation}
+where $\alpha$ is the learning rate, $\sigma(\cdot)$ is the probability of joint action in equilibrium, $\myvector{a'}$ is joint action, and $f$ is the transition function.
+For 2p0s games and certain other game classes, this algorithm converges to a Nash equilibrium in the original stochastic game under the assumption that an exploration policy is used such that each state is visited infinitely often .
+
+The tabular approach of Nash-Q does not scale to large games such as Diplomacy. 
+DNVI replaces the explicit value function table and update rule in~\ref{eq:nashv} with a value function parameterized by a neural network, $\myvector{V}(s;\theta_v)$ and uses gradient descent to update it using the following loss:
+\begin{equation}\label{eq:loss_value}
+\begin{aligned}
+&\text{ValueLoss}(\theta_v) = \frac{1}{2}\left(\myvector{V}(s;\theta_v) - \myvector{r}(s) - \gamma\sum\limits_{\myvector{a'}} \sigma(\myvector{a'}) \myvector{V}\left(f(s, \myvector{a'});\hat{\theta}_v\right)\right)^2
+\end{aligned}
+\end{equation}
+
+The summation used in~\ref{eq:loss_value} is not feasible in games with large action spaces as the number of joint actions grow exponentially with the number of players.
+\citet{bakhtin2021no} address this issue by considering only a subset of actions at each step.
+An auxiliary function, a policy proposal network $\pi_i(s, a_i; \theta_{{\pi}})$,  models the probability that an action $a_i$ of player $i$ is in the support of the equilibrium $\sigma$.
+Only the top-$k$ sampled actions from this distribution are considered when solving for the equilibrium policy $\sigma$ and computing the above value loss. Once the equilibrium is computed, the equilibrium policy is also used to further train the policy proposal network using cross entropy loss:
+
+\begin{equation}\label{eq:loss_policy}
+\begin{aligned}
+&\text{PolicyLoss}(\theta_\pi) = - \sum_i \sum_{a_i \in A_i} \sigma_i(a)\log\pi_i(s, a_i; \theta_{{\pi}}).
+\end{aligned}
+\end{equation}
+
+
+\vspace{-0.05in}
+\section{Description of \botname}
+\vspace{-0.05in}
+\label{sec:results_diplomacy}
+
+By replacing the equilibrium-finding algorithm used in DORA with \bqrealgo{}, we hypothesize that we can learn a strong and human-compatible policy as well as a value function that can accurately evaluate game states, assuming strong and human-like continuation policies. We call this self-play algorithm \rlbqrealgo{}. We use \rlbqrealgo{} to train value and policy proposal networks and use \bqrealgo{} during test-time search.
+\subsection{Training}
+Our training algorithm closely follows that of DORA, described in Section~\ref{sec:dora}. The loss functions used are identical to DORA and the training procedure is largely the same, except in place of RM to compute the equilibrium policy $\sigma$ on each turn of a game during self-play, we use DiL-piKL with a $\lambda$ distribution and human imitation anchor policy $\tau$ that is fixed for all of training.
+See Appendix \ref{app:rltraining} for a detailed description of differences between DORA and \rlbqrealgo.
+\subsection{Test-Time Search}
+Following~\cite{bakhtin2021no}, at evaluation time we perform 1-ply lookahead where on each turn we sample up to 30 of the most likely actions for each player from the RL policy proposal network. However, rather than using RM to compute the equilibrium $\sigma$, we apply DiL-piKL.
+
+As also mentioned previously in Section \ref{sec:dilpikl}, while our agent samples $\lambda_i$ from the probability distribution $\beta_i$ when computing the DiL-piKL equilibrium, the agent chooses its own action to actually play using a fixed low $\lambda$.
+For all experiments, including all ablations, the agent uses the same BC anchor policy. 
+For \bqrealgo{} experiments for each player~$i$ we set
+$\beta_i$ to be uniform over $\{10^{-4}, 10^{-3}, 10^{-2}, 10^{-1}\}$ and play according to $\lambda = 10^{-4}$, except for the first turn of the game. On the first turn we instead sample from $\{10^{-2}, 10^{-1.5}, 10^{-1}, 10^{-0.5}\}$ and play according to $\lambda = 10^{-2}$, so that the agent plays more diverse openings, which more closely resemble those that humans play.
+
+\vspace{-0.05in}
+\section{Experiments}
+\vspace{-0.05in}
+\label{sec:mainresult}
+
+We first compare the performance of two variants of \botname in a population of prior agents and other baseline agents. We then report results of \botname playing in a tournament with humans.
+\subsection{Experimental setup}
+\label{sec:experimentalsetup}
+
+In order to measure the ability of agents to play well against a diverse set of opponents, we play many games between AI agents where each of the seven players are sampled randomly from a population of baselines (listed in~\autoref{app:population}) or the agent to be tested. We report scores for each of the following algorithms against the baseline population:
+
+    \textbf{\botname-Low} and \textbf{\botname-High} are the proposed agents that use \rlbqrealgo{} during training with 2 player types $\{10^{-4}, 10^{-1}\}$ and $\{10^{-2}, 10^{-1}\}$, respectively.\\
+    \textbf{DORA} is an agent that is trained via self-play and uses RM as the search algorithm during training and test-time. Both the policy and the value function are randomly initialized at the start of training.\\
+    \textbf{DNVI} is similar to DORA, but the policy proposal and value networks are initialized from human BC pretraining.\\
+    \textbf{DNVI-NPU} is similar to DNVI, but during training only the RL value network is updated. The policy proposal network is still trained but never fed back to self-play workers, to limit self-play drift from human conventions. The final RL policy proposal network is only used at the end, at test time (along with the RL value network).\\
+    \textbf{BRBot} is an approximate best response to the BC policy.
+    It was trained the same as \botname, except that during training the agent plays one distinguished player each game with $\lambda = 0$ while all other players use $\lambda \approx \infty$. \\
+    \textbf{SearchBot}, a one-step lookahead equilibrium search agent from \citep{gray2020human}, evaluated using their published model.\\ %
+\url{https://github.com/facebookresearch/diplomacy_searchbot}}.\\
+    \textbf{HedgeBot} is an agent similar to SearchBot~\citep{gray2020human} but using our latest architecture and using hedge rather than RM as the equilibrium-finding algorithm.\\
+    \textbf{FPPI-2} and \textbf{SL} are two agents from \citep{anthony2020learning}, evaluated using their published model. 
+
+
+After computing these population scores, as a final evaluation we organized a tournament where we evaluated four agents for 50 games each in a population of online human participants. We evaluated two baseline agents, BRBot and DORA, and two of our new agents, \botname-Low and \botname-High.
+
+In order to limit the duration of games to only a few hours, these games used a time limit of 5 minutes per turn and a stochastic game-end rule where at the beginning of each game year between 1909 and 1912 the game ends immediately with 20\% chance per year, increasing in 1913 to a 40\% chance.
+Players were not told which turn the game would end on for a specific game, but were told the distribution it was sampled from. Our agents were also trained based on this distribution.\footnote{Games were run by a third-party contractor. In contradiction of the criteria we specified, the contractor ended games artificially early for the first $\sim$80 games played in the tournament, with end dates of 1909-1911 being more common than they should have been. We immediately corrected this problem once it was identified.}
+Players were recruited from Diplomacy mailing lists and from \url{webdiplomacy.net}. In order to mitigate the risk of cheating by collusion, players were paid hourly rather than based on in-game performance. Each game had exactly one agent and six humans. The players were informed that there was an AI agent in each game, but did not know which player was the bot in each particular game. In total 62 human participants played 200 games with 44 human participants playing more than two games and 39 human participants playing at least 5 games.
+\subsection{Experimental Results}
+\begin{table}[t]
+    \centering
+\begin{tabular}{lr}
+\toprule
+\textbf{Agent} & {\textbf{ Score against population}} \\
+\midrule
+
+\botname-Low & {29\% $\pm$ 1\%}  \\
+\botname-High & 28\% $\pm$ 1\%  \\
+DNVI-NPU~(retrained)~\citep{bakhtin2021no} & 20\% $\pm$ 1\%  \\
+BRBot & 18\% $\pm$ 1\%  \\
+DNVI~(retrained)~\citep{bakhtin2021no} & 15\% $\pm$ 1\% \\
+HedgeBot~(retrained)~\citep{jacob2022modeling}  & 14\% $\pm$ 1\% \\
+DORA~(retrained)~\citep{bakhtin2021no} & 13\% $\pm$ 1\%  \\
+\midrule
+FPPI-2~\citep{anthony2020learning} & 9\% $\pm$ 1\% \\
+SearchBot~\citep{gray2020human} & 7\% $\pm$ 1\% \\
+SL~\citep{anthony2020learning}  & 6\% $\pm$ 1\% \\
+\bottomrule
+\end{tabular}
+\vspace{-0.05in}
+\caption{\small
+    \label{tab:pop_all}Performance of different agents in a population of various agents. Agents above the line were trained using identical neural network architectures. Agents below the line were evaluated using the models and the parameters provided by the authors.
+    The $\pm$ shows one standard error.
+    }
+\vspace{-0.05in}
+\end{table}
+
+We first report results for our agents
+in the fixed population described in Appendix~\ref{app:population}.
+The results, shown in Table~\ref{tab:pop_all}, show \botname-Low and \botname-High perform the best by a wide margin. 
+
+We next report results for the human tournament in Table~\ref{tab:main_result}. For each listed player, we report their average score, Elo rating, and rank within the tournament based on Elo among players who played at least 5 games.
+Elo ratings were computed using a standard generalization of BayesElo~\citep{coulom2005bayeselo} to multiple players~\citep{hunter2004mmbt} (see~\autoref{app:bayes_elo} for details).
+This gives similar rankings as average score, but also attempts to correct for both the average strength of the opponents, since some games may have stronger or weaker opposition, as well as for which of the seven European powers a player was assigned in each game, since some starting positions in Diplomacy are advantaged over others. To regularize the model, a weak Bayesian prior was applied such that each player's rating was normally distributed around 0 with a standard deviation of around 350 Elo.
+
+The results show that \botname-High performed best among all the humans by both Elo and average score. \botname-Low followed closely behind, ranking second according to average score and third by Elo. BRBot performed relatively well, but ended ranked below that of both DiL-piKL agents and several humans. DORA performed relatively poorly.
+
+Two participants achieved a higher average score than the \botname agents, a player averaging 35\% but who only played two games, and a player with a score of 29\% who played only one game.
+
+We note that given the large statistical error margins, the results in Table~\ref{tab:main_result} do not conclusively demonstrate that \botname outperforms the best human players, nor do they alone demonstrate an unambiguous separation between \botname and BRBot. However, the results do indicate that \botname performs at least at the level of expert players in this population of players with diverse skill levels. Additionally, the superior performance of both \botname agents compared to BRBot is consistent with the results from the agent population experiments in Table \ref{tab:pop_all}.
+
+
+\begin{table}[t]
+    \centering
+\begin{tabular}{lrrrr}
+\toprule
+        &  {\textbf{Rank}} &  \textbf{Elo} &       \textbf{Avg Score} &  \textbf{\# Games} \\
+\midrule
+\textbf{\botname-High} &      1 &  181 & 27\% $\pm$ 4\% &     50 \\
+      Human &      2 &  162 & 25\% $\pm$ 6\% &     13 \\
+\textbf{\botname-Low} &      3 &  152 & 26\% $\pm$ 4\% &     50 \\
+      Human &      4 &  138 & 22\% $\pm$ 9\% &      7 \\
+      Human &      5 &  136 & 22\% $\pm$ 3\% &     57 \\
+         \textbf{BRBot} &      6 &  119 & 23\% $\pm$ 4\% &     50 \\
+      Human &      7 &  102 & 18\% $\pm$ 8\% &     8 \\
+      Human &      8 &  96 & 17\% $\pm$ 3\% &     51 \\
+$\cdots$ & $\cdots$ & $\cdots$ & $\cdots$ & $\cdots$ \\
+       \textbf{DORA} &     32 &  -20 & 13\% $\pm$ 3\% &     50 \\
+$\cdots$ & $\cdots$ & $\cdots$ & $\cdots$ & $\cdots$ \\
+      Human &     43 & -187 &  1\% $\pm$ 1\% &      7 \\
+\bottomrule
+\end{tabular}
+\vspace{-0.05in}
+\caption{\small
+    \label{tab:main_result}Performance of four different agents in a population of human players, ranked by Elo, among all 43 participants who played at least 5 games. The $\pm$ shows one standard error. %
+    }
+\vspace{-0.05in}
+\end{table}
+
+In addition to the tournament, we asked three expert human players to evaluate the strength of the agents in the tournament games based on the quality of their actions. Games were presented to these experts with anonymized labels so that the experts were \emph{not} aware of which agent was which in each game when judging that agent's strategy.
+All the experts picked a \botname agent as the strongest agent, though they disagreed about whether \botname-High or \botname-Low was best.
+Additionally, all experts indicated one of the \botname agents as the one they would most like to cooperate with in a game. We provide detailed responses in Appendix~\ref{sec:app:experts}.
+\subsection{RL training comparison}
+\label{sec:ablations}
+
+Figure \ref{fig:biasing} compares different RL agents across the course of training. To simplify the comparison, we vary the training methods for the value and policy proposal networks, but use the same search setting at evaluation time.
+
+As a proxy for agent strength, we measure the average score of an agent vs 6 copies of HedgeBot. 
+As a proxy for modeling humans, we compute prediction accuracy of human moves on a validation dataset of roughly 630 games held out from training of the human BC model, i.e., how often the most probable action under the policy corresponds to the one chosen by a human.
+Similar to~\cite{bakhtin2021no}, we found that agents without biasing techniques (DORA and DNVI) diverge from human play as training progress.
+By contrast, \botname-High achieves significant improvement in score while keeping the human prediction accuracy high.
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=0.45]{figs/main_sos_training_combined.pdf}
+    \vspace{-0.2cm}
+    \caption{\small Performance of different agents as a function of the number of RL training steps. \textbf{Left:} Scores against 6 human-like HedgeBot agents. The gray dotted line at score $1/7 \approx 14.3\% $ corresponds to tying HedgeBot. The error bars show one standard error. \textbf{Right:} Order prediction accuracy of each agent's raw RL policy on a held-out set of human games. The gray dotted line corresponds to the behavioral cloning policy. \textbf{Overall:} \botname-High achieves a high score while also maintaining high prediction accuracy. Unregularized agents DNVI and DORA do far worse on both metrics.
+    }
+    \label{fig:biasing}
+\end{figure}
+
+\vspace{-0.05in}
+\section{Discussion}
+\vspace{-0.05in}
+
+In this work we describe \rlbqrealgo and use it to train an agent for no-press Diplomacy that placed first in a human tournament. We ascribe \botname's success in Diplomacy to two ideas.
+
+First, DiL-piKL models a population of player types with different amounts of regularization to a human policy while ultimately playing a strong (low-$\lambda$) policy itself. This improves upon simply playing a best response to a BC policy by accounting for the fact that humans are less likely to play highly suboptimal actions and by reducing overfitting of the best response to the BC policy.
+Second, incorporating DiL-piKL in self-play allows us to learn an accurate value function in a diversity of situations that arise from strong and human-like players. Furthermore, this value assumes a human continuation policy that makes fewer blunders than the BC policy, allowing us to correctly estimate the values of positions that require accurate play (such as stalemate lines).
+
+In conclusion, combining human imitation, planning, and RL presents a promising avenue for building agents for complex cooperative and mixed-motive environments. Further work could explore regularized search policies that condition on more complex human behavior, including dialogue.
+
+\bibliography{references}
+\bibliographystyle{iclr2023_conference}
+
+\appendix
+\section{Author Contributions}
+A. Bakhtin primarily contributed to RL, infrastructure, experimentation, and direction. D. J. Wu primarily contributed to RL and infrastructure. A. Lerer primarily contributed to \bqrealgo{}, infrastructure, and direction. J. Gray primarily contributed to infrastructure. A. P. Jacob primarily contributed to \bqrealgo{} and experimentation. G. Farina primarily contributed to theory and \bqrealgo{}. A. H. Miller primarily contributed to experimentation. N. Brown primarily contributed to \bqrealgo{}, experimentation, and direction.
+\section{Description of Diplomacy}
+\label{appendix:rules_diplomacy}
+The rules of no-press Diplomacy are complex; a full description is provided by~\citet{paquette2019no}.
+No-press Diplomacy is a seven-player zero-sum board game in which a map of Europe is divided into 75 provinces. 34 of these provinces contain supply centers (SCs), and the goal of the game is for a player to control a majority (18) of the SCs. Each players begins the game controlling three or four SCs and an equal number of units.
+
+The game consists of three types of phases: movement phases in which each player assigns an order to each unit they control, retreat phases in which defeated units retreat to a neighboring province, and adjustment phases in which new units are built or existing units are destroyed.
+
+During a movement phase, a player assigns an order to each unit they control. A unit's order may be to hold (defend its province), move to a neighboring province, convoy a unit over water, or support a neighboring unit's hold or move order. Support may be provided to units of any player. We refer to a tuple of orders, one order for each of a player's units, as an \textbf{action}. That is, each player chooses one action each turn. There are an average of 26 valid orders for each unit~\citep{paquette2019no}, so the game's branching factor is massive and on some turns enumerating all actions is intractable.
+
+Importantly, all actions occur simultaneously. In live games, players write down their orders and then reveal them at the same time. This makes Diplomacy an imperfect-information game in which an optimal policy may need to be stochastic in order to prevent predictability.
+
+Diplomacy is designed in such a way that cooperation with other players is almost essential in order to achieve victory, even though only one player can ultimately win.
+
+A game may end in a draw on any turn if all remaining players agree. Draws are a common outcome among experienced players because players will often coordinate to prevent any individual from reaching 18 centers. The two most common scoring systems for draws are \textbf{draw-size scoring (DSS)}, in which all surviving players equally split a win, and \textbf{sum-of-squares scoring (SoS)}, in which player~$i$ receives a score of $\frac{C_i^2}{\sum_{j \in \mathcal{N}} C_j^2}$, where $C_i$ is the number of SCs that player~$i$ controls~\citep{fogel2020whom}. Throughout this paper we use SoS scoring except in anonymous games against humans where the human host chooses a scoring system.
+\section{Expert evaluation of the agents}
+\label{sec:app:experts}
+
+The anonymous format of the tournament aimed at reducing possible biases of players towards the agent, e.g., trying to collectively eliminate the agents as targeting the agent is a simple way to break the symmetry.
+At the same time a significant property of Diplomacy is knowing the play styles of different players and using this knowledge to make decision of whom to trust and whom to chose as an ally.
+To evaluates this aspect of the game play we asked for qualitative feedback from three Diplomacy experts.
+Each player was given 7 games (one per power) from each of the 4 different agents that played in the tournament. The games evaluated by each expert were disjoint from the games evaluated by the other experts.
+The games were anonymized such that the experts were not able to tell which agent played in the game based on the username or from the date.
+We asked a few questions about the game play of each agent independently and then asked the experts to choose the best agent for strength and human-like behavior.
+The experts referred to the agents as Agent1, ..., Agent4, but we de-anonymized the agents in the answers below.
+\subsection{Overall}
+
+\subsubsection*{What is the strongest agent?}
+\paragraph{Expert 1}
+I think \botname-Low was the strongest, then BRBot closely followed by \botname-High. DORA is a distant third.
+\paragraph{Expert 2}
+
+\botname-High.
+
+
+\paragraph{Expert 3}
+\botname-Low. This feels stronger than a human in certain ways while still being very human-like.
+\subsubsection*{What is the most human-like/bot-like agent?}
+\paragraph{Expert 1}
+Most human-like is \botname-High. A boring human, but a human nonetheless. \botname-Low is not far behind, then BRBot and DORA both of which are very non-human albeit in very different ways.
+
+\paragraph{Expert 2}
+
+\botname-High.
+
+
+\paragraph{Expert 3}
+\botname-Low.
+\subsubsection*{What is the agent you’d like to cooperate with?}
+\paragraph{Expert 1}
+This is the most interesting question. I think \botname-Low, because I like how it plays - we’d “vibe” - but also because I think it is quite predictable in what motivates it to change alliances. That’s potentially exploitable, even with the strong tactics it has. I’d least like to work with \botname-High as it seems to be very much in it for itself. I suspect it would be quite unpleasant to play against as it is tactically excellent and seems hard to work with.
+
+I’d love to be on a board with DORA, as I’d expect my chances to solo to go up dramatically! It would be a very fun game so long as you weren’t on the receiving end of some of its play.
+
+\paragraph{Expert 2}
+\botname-High.
+
+\paragraph{Expert 3}
+\botname-Low. \botname-High is also strong, but seems much less interesting to play with, because of the way it commits to alliances without taking into account who is actually willing to work with it. This limits what a human can do to change their situation quite a lot and would be fairly frustrating in the position of a neighbour being attacked by it.
+
+BRBot and DORA feel too weak to be particularly interesting.
+\subsection{DORA}
+
+\subsubsection*{How would you evaluate the overall strength of the agent?}
+\paragraph{Expert 1}
+Not great. There’s a lot to criticize here - from bad opening play (Russia = bonkers), to poor defense (Turkey) and just generally bad tactics and strategy compared to the other agents (France attacking Italy when Italy is their only ally was an egregious example of this). 
+
+\paragraph{Expert 2}
+Very weak. Seemed to invite its own demise with the way it routinely picked fights in theaters it had no business being in and failing to cooperate with neighbors
+
+\paragraph{Expert 3}
+Poor. It is bad at working with players, and it makes easily avoidable blunders even when working alone.
+\subsubsection*{How would you evaluate the ability of the agent to cooperate?}
+\paragraph{Expert 1}
+It seems to make efforts, but it also seems to misjudge what humans are likely to do. There’s indicative support orders and they’re pretty good, but it also doesn’t seem to understand or account for vindictiveness over always playing best. The Turkey game where it repeatedly seems to expect Russia to not attack is an example of this.
+
+\paragraph{Expert 2}
+Poor. Seemed to pick fights without seeing or soliciting support necessary to win, failed to support potential allies in useful ways to take advantage of their position.
+
+\paragraph{Expert 3}
+Middling to Poor. It very occasionally enters good supports but it often enters bad ones, and has a habit of attacking too many people at once (and not considering that attacking those people will turn them against it). It has a habit of annoying many players and doing badly as a result.
+\subsection{BRBot}
+
+\subsubsection*{How would you evaluate the overall strength of the agent?}
+\paragraph{Expert 1}
+The agent has solid, at least human level tactics and clearly sees opportunities to advance and acts accordingly. Sometimes this is to the detriment of the strategic position, but the balance is fair given the gunboat nature of the games. Overall, the bot feels naturally to be in the “better than average human” range rather than super-human, but the results indicate that it performs at a higher level than the “feeling” it gives. It has a major opportunity for improvement, discussed in the next point.
+\paragraph{Expert 2}
+Overall, seemed fairly weak and seemed to be able to succeed most frequently when benefiting from severe mistakes from neighboring agents. That being said it was able to exploit those mistakes somewhat decently in some cases and at least grow to some degree off of it.
+
+\paragraph{Expert 3}
+Middling. It is tactically strong when not having to work with other players and when it has a considerable number of units, but is quite weak when attempting to cooperate with other players. Its defensive strength varies quite significantly too, possibly also based on unit count - when it had relatively few units it missed very obvious defensive tactics.
+\subsubsection*{How would you evaluate the ability of the agent to cooperate?}
+\paragraph{Expert 1}
+The bot is hyperactively trying to coordinate and signal to the other players that it wants to work with them. Sometimes this is in the form of ridiculous orders that probably indicate desperation more than a mutually beneficial alliance, and this backfires as you may expect. At its best it makes exceptional signaling moves (RUSSIA game\footnote{DOUBLE BLIND }:
+War - Mos in Fall 1901 is exceptional) but at worst it is embarrassingly bad and leads to it getting attacked (TURKEY game\footnote{DOUBLE BLIND }:
+supporting convoys from Gre - Smy or supporting other powers moving to Armenia). The other weakness is that it tends to make moves like these facing all other powers - this is not optimal as indicating to all other powers that you want to work with them is equivalent to not indicating anything at all - if anything it seems a little duplicitous. This is especially true when the bot is still inclined to stab when the opportunity presents itself, which means the signaling is superficial and unlikely to work repeatedly.
+Overall, the orders show the ability to cooperate, signal, and work together, but the hyperactivity of the bot is limiting the effectiveness of the tools to achieve the best results.
+
+\paragraph{Expert 2}
+Poor. Random support orders seemed to be thrown without an overarching strategy behind them. Moves didn’t seem to suggest long term thoughts of collaboration.
+
+\paragraph{Expert 3}
+Poor. When attempting to work with another player, it almost always gives them the upper hand, and even issues supports that suggest it is okay with that player taking its SCs when it should not be.
+It sometimes matches supports to human moves, but does not seem to do this very often. The nonsensical supports are much more common.
+\subsection{\botname-High}
+
+\subsubsection*{How would you evaluate the overall strength of the agent?}
+\paragraph{Expert 1}
+The tactics are unadventurous and sometimes seem below human standards (for example, the train of army units in the Italy game; the whole Turkey game) but conversely they also have a longer view of the game (see also: Italy game - the trained bounces don’t matter strategically). There’s less nonsense too; if I were to sum the bot up in two words it would be “practical” and “boring”.
+
+\paragraph{Expert 2}
+Seemed to be strong. Wrote generally good tactical orders, showed generally good strategic sense. Showed discipline and a willingness to let allies survive in weak positions while having units that could theoretically stab for dots with ease remaining right next to that weak ally.
+
+There were some highly questionable moments as both Italy and France early on in 1901 strategy which seemed to heavily harm their ability to get out of the box.
+
+The Austrian game was particularly impressive in terms of its ability to handle odd scenarios and achieve the solo despite receiving pressure on multiple occasions on multiple fronts.
+
+\paragraph{Expert 3}
+Generally strong. It is good at signalling and forming alliances, is tactically strong when in its favoured alliance, and is especially strong when ahead. Its main weakness seems to be an inability to adapt - if its favoured alliance is declined, it will often keep trying to ‘pitch’ that same alliance instead of working towards alternatives.
+\subsubsection*{How would you evaluate the ability of the agent to cooperate?}
+\paragraph{Expert 1}
+Low. It doesn’t put much effort into this. The French game, for example, the bot just seems to accept it is being attacked and fight through it. It’s so boring and tactical and shows little care for cooperation. Many great gunboat players do this but it will not hold up in press games. What it does seem to do is capitalize on other player’s mistakes - see the Austrian game where it sneaks into Scandinavia and optimizes to get to 18 (there can’t be a lot of training data for that!).
+
+\paragraph{Expert 2}
+Very strong ability to cooperate as seen in the Turkish game, but in other games seemed to try and pick fights against the entire world in ways that were ultimately self-defeating.
+
+\paragraph{Expert 3}
+Good. It can work well with human players, matching supports and even using signalling supports in ways humans would. It frequently attempts to side with a player who is attacking it, though, so it seems to have a problem with identifying which player to work with.
+\subsection{\botname-Low}
+
+\subsubsection*{How would you evaluate the overall strength of the agent?}
+\paragraph{Expert 1}
+Exceptional. Very strong tactics and a clear directionality to what it does - it seems to understand what the strategic value of a position is and it acts with efficiency to achieve the strategic goals. It has great results (time drawn out of a few wins!) but also fights back from “losing” positions extremely well which makes it quantifiably strong, but it also just plays a beautiful and effective game. Very strong indeed. 
+It does sometimes act too aggressively for tournament play (Austria is the example where this came home to roost) - the high risk/reward plays are generally but not always correct in single games, but for tournament play it goes for broke a bit too much (This is outside the scope of the agent I suspect, as it is playing to scoring system not tournament scoring system). Against human players who may not see the longer term impact of their play, it results in games like this one… which is ugly both for Austria and for everyone else except Turkey. 
+
+\paragraph{Expert 2}
+Very weak. Seemed to abandon its own position in many cases to pursue questionable adventures. Sometimes they worked out but generally they failed, resulting in things like a Germany under siege holding Edi while they as England are off in Portugal and are holding onto their home centers only because FG were under siege by the south.
+
+\paragraph{Expert 3}
+Very strong. It can signal alliances very well and generally chooses the correct allies, seems strong tactically even on defence, and makes some plays you would not expect from a human player but which are outright stronger than a human player would make.
+\subsubsection*{How would you evaluate the ability of the agent to cooperate?}
+\paragraph{Expert 1}
+Pretty good. It sends signaling moves and makes efforts to support other players quite a lot (see in particular Russia). I particularly like the skills being shown to work together tactically and try and support other units - this is both effective and quite human. This is my favorite bot by some distance when it comes to cooperating with the other players.
+There is a weakness in that it does seem to reassess alliances every turn, which means sometimes the excellent work indicating and supporting is undone without getting the chance to realize the gains (Examples with Russia and Italy). 
+
+\paragraph{Expert 2}
+Poor. Didn’t seem to give meaningful support orders when they would have helped and gave plenty of meaningless signaling supports and some questionable ones like supporting the English into SKA in F1901 as Germany among other oddities
+
+\paragraph{Expert 3}
+Good. It signals alliances in very human ways, through clear signalling builds, accurate support moves where it makes sense, and support holds otherwise. It also seems to match supports with its allies well.
+\section{Population based evaluation}
+\label{app:population}
+
+In general-sum games like Diplomacy, winrate in head-to-head matches against a previous version of an agent may not be as informative because of nontransitivity between agents. For example, exploitative agents such as best-response-to-BC may do particularly well against BC or other pure imitation-learning agents, and less well against all other agents. Additionally, \cite{bakhtin2021no} found that a pair of independently and equally-well-trained RL agents may each appear very weak in a population composed of the other due to converging to incompatible equilibria. Many agents also varied significantly in how well they performed against other search-based agents.
+
+Therefore, we resort to playing against a population of previously training agents as was done in~\cite{jacob2022modeling}, intended to measure more broadly how well an agent does on average against a wider suite of various human-like agents. 
+
+More precisely, we define a fixed set of baseline agents as a population. To determine an agent's average population score, we add that agent into the population and then play games where in each game, all 7 players are uniformly randomly sampled from the population with replacement, keeping only games where the agent to be tested was sampled at least once. Note that unlike \cite{jacob2022modeling}, we run a separate population test for each new agent to be tested, rather than combining all agents to be tested within a single population.
+
+For the experiments in \autoref{tab:pop_all} and \autoref{sec:experimentalsetup} we used the following 8 baseline agents:
+\begin{itemize}
+    \item An single-turn BR agent that assumes everyone else plays the BC policy.
+    \item An agent doing RM search with BC policy and value functions. We use 2 copies of this agent trained on different subsets of data.
+    \item \bqrealgo agent with BC policy and value functions. We use 4 different versions of this data with different training data and model architecture.
+    \item \bqrealgo agent where the policy and value functions are trained with self-play with Reinforced-PiKL with high lambda ($\lambda=3\times 10^{-2}$).
+\end{itemize}
+
+For the experiments in this paper we used 1000 games for each such population test.
+\section{Theoretical Properties of DiL-piKL}
+\newcommand{\regut}{\tilde{u}^t}
+
+In this section we study the last-iterate convergence of \dilpikl, establishing that in two-player zero-sum games \dilpikl converges to the (unique) Bayes-Nash equilibrium of the regularized Bayesian game. As a corollary (in the case in which each player has exactly one type), we conclude that \pikl converges to the Nash equilibrium of the regularized game in two-player zero-sum games.
+We start from a technical result. In all that follows, we will always let $\vu_i^t$ be a shorthand for the vector $(u_i(a, \vec{a}_{-i}^t))_{a\in A_i}$.
+
+\begin{lemma}\label{lem:ftrl to omd}
+    Fix any player $i$, $\lambda_i \in \Lambda_i$, and $t \ge 1$. For all $\vx,\vx' \in \Delta(A_i)$, the iterates $\vx_\ili^t$ and $\vx_\ili^{t+1}$ defined in Line~\ref{line:distribution} of Algorithm~\ref{algo:noregret} satisfy
+    \[
+        \mleft\langle \frac{ \eta }{\eta\lambda_i t + 1}\mleft(-\vu_i^t + \lambda_i \nabla\regu(\vx_\ili^{t}) -     \lambda_i\nabla\regu(\vec\tau_i) \mright) + \nabla \regu(\vx_\ili^{t+1}) - \nabla \regu(\vx_\ili^t), \vx - \vx'\mright\rangle = 0.
+    \]
+\end{lemma}
+\begin{proof}
+    If $t=1$, then the results follows from direct inspection: $\vx_\ili^1$ is the uniform policy (and so $\langle \nabla \regu(\vx^1_\ili), \vx - \vx'\rangle = 0$ for any $\vx,\vx' \in \Delta(A_i)$, and so the statement reduces to the first-order optimality conditions for the problem $\vx^2_\ili = \argmax_{\vx\in\Delta(A_i)}\{-\regu(\vx)/\eta + \langle \vu_i^1, \pi\rangle - \lambda_i \KL{\vx}{\vec\tau_i}\}$. So, we now focus on the case $t \ge 2$.
+    The iterates $\vx_\ili^{t+1}$ and $\vx_\ili^t$ produced by \dilpikl are respectively the solutions to the optimization problem
+    \begin{align*}
+        \vx^{t+1}_\ili &= \argmax_{\vx \in \Delta(A_i)} \mleft\{ -\frac{\regu(\vx)}{\eta t} + \langle\bar\vU_i^t, \vx\rangle -  \lambda_i\, \KL{\vx}{\vec\tau_i} \mright\},\\
+          \vx^{t}_\ili &= \argmax_{\vx \in \Delta(A_i)} \mleft\{ -\frac{\regu(\vx)}{\eta (t-1)} + \langle\bar\vU_i^{t-1}, \vx\rangle - \lambda_i\, \KL{\vx}{\vec\tau_i} \mright\},
+    \end{align*}
+    where we let the averages utility vectors be
+    \[
+        \bar\vU_i^{t-1} \defeq \frac{1}{t-1}\sum_{t'=1}^{t-1} \vu_i^{t'}, \qquad
+        \bar\vU_i^t \defeq \frac{1}{t}\sum_{t'=1}^t \vu_i^{t'}.
+    \]
+
+    Since the regularizing function negative entropy $\regu$ is Legendre, the policies $\vx_\ili^{t+1}$ and $\vx_\ili^t$ are in the relative interior of the probability simplex, and therefore the first-order optimality conditions for $\vx_\ili^{t+1}$ and $\vx_\ili^t$ are respectively
+    \begin{align*}
+        \mleft\langle -\bar\vU_i^t + \lambda_i \nabla \regu(\vx_\ili^{t+1}) - \lambda_i \nabla \regu(\vec\tau_i) + \frac{1}{\eta t}\nabla\regu(\vx_\ili^{t+1}), \vx - \vx' \mright\rangle &= 0~~~ \forall \vx,\vx'\in\Delta(A_i),\numberthis{eq:vi for t plus 1}
+    \\
+        \mleft\langle -\bar\vU_i^{t-1} + \lambda_i \nabla \regu(\vx_\ili^{t}) - \lambda_i \nabla \regu(\vec\tau_i) + \frac{1}{\eta (t-1)}\nabla\regu(\vx_\ili^{t}), \vx - \vx' \mright\rangle &= 0~~~ \forall \vx,\vx'\in\Delta(A_i).
+    \end{align*}
+    Taking the difference between the equalities, we find
+    \[
+        \mleft\langle -\bar\vU_i^t + \bar\vU_i^{t-1} + \mleft(\lambda_i + \frac{1}{\eta t}\mright) \nabla \regu(\vx_\ili^{t+1}) - \mleft(\lambda_i + \frac{1}{\eta(t-1)}\mright) \nabla \regu(\vx_\ili^t), \vx - \vx'\mright\rangle = 0
+    \]
+    
+    We now use the fact that
+    \[
+        \bar\vU_i^t - \bar\vU_i^{t-1} = -\frac{1}{t-1}\bar\vU_i^t + \frac{1}{t-1}\vu_i^t.
+    \]
+    to further write
+    \[
+        \mleft\langle \frac{1}{t-1}\mleft(-\vu_i^t + \bar\vU_i^t\mright) + \mleft(\lambda_i + \frac{1}{\eta t}\mright) \nabla \regu(\vx_\ili^{t+1}) - \mleft(\lambda_i + \frac{1}{\eta (t-1)}\mright) \nabla \regu(\vx_\ili^t) , \vx - \vx'\mright\rangle = 0
+        \numberthis{eq:diff of vis}
+    \]
+    From \cref{eq:vi for t plus 1} we find
+    \[
+        \langle \bar\vU_i^t, \vx - \vx'\rangle = \mleft\langle \lambda_i \nabla\regu(\vx_\ili^{t+1}) -     \lambda_i\nabla\regu(\vec\tau_i) + \frac{1}{\eta t}\nabla\regu(\vx_\ili^{t+1}), \vx - \vx'
+        \mright\rangle
+    \]
+    and so, plugging back the previous relationship in \cref{eq:diff of vis} we can write, for all $\vx,\vx'\in\Delta(A_i)$, 
+    \begin{align*}
+        0
+        &= \mleft\langle \frac{1}{t-1}\mleft(-\vu_i^t + \lambda_i \nabla\regu(\vx_\ili^{t+1}) -     \lambda_i\nabla\regu(\vec\tau_i) + \frac{1}{\eta t}\nabla\regu(\vx_\ili^{t+1})\mright) + \mleft(\lambda_i + \frac{1}{\eta t}\mright) \nabla \regu(\vx_\ili^{t+1})\mright. \\[1mm]
+        &\hspace{8cm} \mleft. - \mleft(\lambda_i + \frac{1}{\eta (t-1)}\mright) \nabla \regu(\vx_\ili^t), \vx - \vx'\mright\rangle\\[3mm]
+        &= \mleft\langle \frac{1}{t-1}\mleft(-\vu_i^t + \lambda_i \nabla\regu(\vx_\ili^{t+1}) -     \lambda_i\nabla\regu(\vec\tau_i) \mright) + \mleft(\lambda_i + \frac{1}{\eta (t-1)}\mright) \nabla \regu(\vx_\ili^{t+1})\mright. \\[1mm]
+        &\hspace{8cm} \mleft. - \mleft(\lambda_i + \frac{1}{\eta (t-1)}\mright) \nabla \regu(\vx_\ili^t), \vx - \vx'\mright\rangle\\
+        &= \mleft\langle \frac{1}{t-1}\mleft(-\vu_i^t + \lambda_i \nabla\regu(\vx_\ili^{t}) -     \lambda_i\nabla\regu(\vec\tau_i) \mright) + \frac{\eta \lambda_i t + 1}{\eta (t-1)} \nabla \regu(\vx_\ili^{t+1})\mright. \\[1mm]
+        &\hspace{9cm} \mleft. - \frac{\eta \lambda_i t + 1}{\eta (t-1)} \nabla \regu(\vx_\ili^t), \vx - \vx'\mright\rangle.
+    \end{align*}
+    Dividing by $(\eta\lambda_i t + 1)/(\eta (t-1))$ yields the statement.
+\end{proof}
+
+\begin{corollary}\label{cor:prox step}
+    Fix any player $i$, $\lambda_i \in \Lambda_i$, and $t \ge 1$. For all $\vx \in \Delta(A_i)$, the iterates $\vx_\ili^t$ and $\vx_\ili^{t+1}$ defined in Line~\ref{line:distribution} of Algorithm~\ref{algo:noregret} satisfy
+    \[
+        &\mleft\langle
+            -\vu_i^t + \lambda_i \nabla\regu(\vx_\ili^{t}) - \lambda_i\nabla\regu(\vec\tau_i),
+            \vx - \vx_\ili^{t+1}
+        \mright\rangle \\[2mm] &\hspace{2.5cm} = \mleft(\lambda_i t + \frac{1}{\eta}\mright)\Big(\KL{\vx}{\vx_\ili^{t+1}} - \KL{\vx}{\vx_\ili^t} + \KL{\vx_\ili^{t+1}}{\vx_\ili^t}\Big).
+    \]
+\end{corollary}
+\begin{proof}
+    Since \cref{lem:ftrl to omd} holds for all $\vx,\vx'\in\Delta(A_i)$, we can in particular set $\vx' = \vx_\ili^{t+1}$, and obtain
+    \[
+        &\frac{ \eta }{\eta\lambda_i t + 1} \mleft\langle -\vu_i^t + \lambda_i \nabla\regu(\vx_\ili^{t}) - \lambda_i\nabla\regu(\vec\tau_i), \vx - \vx_\ili^{t+1}\mright\rangle \\
+        &\hspace{6.2cm}+ \mleft\langle \nabla \regu(\vx_\ili^{t+1}) - \nabla \regu(\vx_\ili^t), \vx - \vx_\ili^{t+1}\mright\rangle = 0.\numberthis{eq:pre threepoint}
+    \]
+    Using the three-point identity
+    \[
+        \mleft\langle \nabla \regu(\vx_\ili^{t+1}) - \nabla \regu(\vx_\ili^t), \vx - \vx_\ili^{t+1}\mright\rangle = \KL{\vx}{\vx_\ili^t} - \KL{\vx}{\vx_\ili^{t+1}} - \KL{\vx_\ili^{t+1}}{\vx_\ili^t}
+    \]
+    in \cref{eq:pre threepoint} yields
+    \[
+        \KL{\vx}{\vx_\ili^{t+1}} &= \KL{\vx}{\vx_\ili^t} - \KL{\vx_\ili^{t+1}}{\vx_\ili^t} \\[2mm] &\hspace{2cm} + \frac{ \eta }{\eta\lambda_i t + 1}
+        \mleft\langle
+            -\vu_i^t + \lambda_i \nabla\regu(\vx_\ili^{t}) - \lambda_i\nabla\regu(\vec\tau_i),
+            \vx - \vx_\ili^{t+1}
+        \mright\rangle.
+    \]
+    Multiplying by $\lambda_i t + 1/\eta$ yields the statement.
+\end{proof}
+\subsection{Regret Analysis}
+Let $\regut_\ili$ be the regularized utility of agent type $\lambda_i\in\Lambda_i$
+\[
+    \regut_\ili : \Delta(A_i) \ni \vx \mapsto \langle \vu^t_i, \vx \rangle - \lambda_i\,\KL{\vx}{\vec\tau_i}.
+\]
+
+\begin{observation} We note the following:
+    \begin{itemize}
+        \item For any $i\in\{1,2\}$ and $\lambda_i \in \Lambda_i$, the function $\regut_\ili$ satisfies
+            \[
+                \regut_\ili(\vx) = \regut_\ili(\vx') + \langle \nabla \regut_\ili(\vx'), \vx - \vx'\rangle - \lambda_i\,\KL{\vx}{\vx'} \qquad\forall\,\vx,\vx'\in\Delta(A_i).
+            \]
+        \item Furthermore,
+            \[
+                -\nabla \regut_\ili(\vx^t_\ili) = -\vu^t_i + \lambda_i\nabla\regu(\vx^t) - \lambda_i \nabla\regu(\vec\tau_i).
+            \]
+    \end{itemize}
+\end{observation}
+
+Using \cref{cor:prox step} we have the following
+\begin{lemma}\label{lem:regret potential}
+For any player $i$ and type $\lambda_i \in \Lambda_i$,
+\[
+\regut_\ili(\vx) - \regut_\ili(\vx^t_\ili) &\le \frac{\|\vu_i^t\|_\infty^2}{4\lambda_i t + 4/\eta} + \lambda_i\Big(\KL{\vx^{t}_\ili}{\vec\tau_i}  - \KL{\vx^{t+1}_\ili}{\vec\tau_i}\Big) 
+        \\&\hspace{.5cm}- \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx}{\vx^{t+1}_\ili} + \mleft(\lambda_i (t-1) + \frac{1}{\eta}\mright) \KL{\vx}{\vx^t_\ili}.
+\]
+\end{lemma}
+\begin{proof}
+From \cref{lem:ftrl to omd},
+\[
+        0 &= \mleft(\lambda_i t + \frac{1}{\eta}\mright) \Big(-\KL{\vx}{\vx^{t+1}_\ili} + \KL{\vx}{\vx^t_\ili} - \KL{\vx^{t+1}_\ili}{\vx^t_\ili}\Big) + \langle -\nabla \regut_\ili(\vx^t_\ili), \vx - \vx^{t+1}_\ili\rangle\\
+        &= \mleft(\lambda_i t + \frac{1}{\eta}\mright) \Big(-\KL{\vx}{\vx^{t+1}_\ili} + \KL{\vx}{\vx^t_\ili} - \KL{\vx^{t+1}_\ili}{\vx^t_\ili}\Big)  
+            \\&\hspace{5cm}+ \langle \nabla \regut_\ili(\vx^t_\ili), \vx^{t}_\ili + \vx^{t+1}_\ili\rangle + \langle -\nabla \regut_\ili(\vx^t_\ili), \vx - \vx^{t}_\ili\rangle \\
+        &= \mleft(\lambda_i t + \frac{1}{\eta}\mright) \Big(-\KL{\vx}{\vx^{t+1}_\ili} + \KL{\vx}{\vx^t_\ili} - \KL{\vx^{t+1}_\ili}{\vx^t_\ili}\Big)  
+            \\&\hspace{3cm}+ \langle -\nabla \regut_\ili(\vx^t_\ili), \vx^{t}_\ili - \vx^{t+1}_\ili\rangle - \regut_\ili(\vx) + \regut_\ili(\vx^t_\ili) - \lambda_i\,\KL{\vx}{\vx^t_\ili}.
+    \]
+    Rearranging, we find
+    \[
+         \regut_\ili(\vx) - \regut_\ili(\vx^t_\ili) &= 
+         - \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx}{\vx^{t+1}_\ili} + \mleft(\lambda_i (t-1) + \frac{1}{\eta}\mright) \KL{\vx}{\vx^t_\ili}\\
+         &\hspace{1cm} - \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx^{t+1}_\ili}{\vx^t_\ili}+ \underbrace{\langle -\nabla \regut_\ili(\vx^t_\ili), \vx^{t}_\ili - \vx^{t+1}_\ili\rangle}_{\UBnumberthis{eq:increment term}}.
+         \numberthis{eq:pre flip}
+    \]
+    We now upper bound the term in \eqref{eq:increment term} using convexity of the function $\vx \mapsto \KL{\vx}{\vec\tau_i}$, as follows:
+    \[
+        \langle -\nabla \regut_\ili(\vx^t_\ili), \vx^{t}_\ili - \vx^{t+1}_\ili\rangle &= \langle -\vu_i^t, \vx^{t}_\ili - \vx^{t+1}_\ili\rangle + \lambda_i\langle \nabla\regu(\vx^t_\ili) - \nabla\regu(\vec\tau_i), \vx^{t+1}_\ili - \vx^{t}_\ili\rangle\\
+            &\le \langle -\vu_i^t, \vx^{t}_\ili - \vx^{t+1}_\ili\rangle + \lambda_i\Big(\KL{\vx^{t+1}_\ili}{\vec\tau_i}  - \KL{\vx^t_\ili}{\vec\tau_i}\Big).
+    \]
+    Substituting the above bound into~\eqref{eq:pre flip} yields
+    \[
+        \regut_\ili(\vx) - \regut_\ili(\vx^t_\ili)
+        &\le \langle -\vu_i^t, \vx^t_\ili - \vx^{t+1}_\ili\rangle - \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx^{t+1}_\ili}{\vx^t_\ili}
+        \\&\hspace{1cm}+ \lambda_i\Big(\KL{\vx^{t}_\ili}{\vec\tau_i}  - \KL{\vx^{t+1}_\ili}{\vec\tau_i}\Big) 
+        \\&\hspace{1cm}- \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx}{\vx^{t+1}_\ili} + \mleft(\lambda_i (t-1) + \frac{1}{\eta}\mright) \KL{\vx}{\vx^t_\ili}       \\
+        &\le \frac{\|\vu_i^t\|_\infty^2}{4\lambda_i t + 4/\eta} + \mleft(\lambda_i t + \frac{1}{\eta}\mright)\|\vx^t_\ili - \vx^{t+1}_\ili\|_1^2 - \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx^{t+1}_\ili}{\vx^t_\ili}
+        \\&\hspace{1cm}+ \lambda_i\Big(\KL{\vx^{t}_\ili}{\vec\tau_i}  - \KL{\vx^{t+1}_\ili}{\vec\tau_i}\Big) 
+        \\&\hspace{1cm}- \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx}{\vx^{t+1}_\ili} + \mleft(\lambda_i (t-1) + \frac{1}{\eta}\mright) \KL{\vx}{\vx^t_\ili},
+    \]
+    where the second inequality follows from Young's inequality.
+    Finally, by using the strong convexity of the KL divergence between points $\vx^t_\ili$ and $\vx^{t+1}_\ili$, that is,
+    \[
+        \KL{\vx^{t+1}_\ili}{\vx^t_\ili} \ge \|\vx^{t+1}_\ili - \vx^t_\ili\|^2_1,
+    \]
+    yields the statement.
+\end{proof}
+
+Noting that the right-hand side of~\cref{lem:regret potential} is telescopic, we immediately have the following.
+\begin{theorem}
+    For any player $i$ and type $\lambda_i \in \Lambda_i$, and policy $\vx\in\Delta(A_i)$, the following regret bound holds at all times $T$:
+    \[
+        \sum_{t=1}^T \regut_\ili(\vx) - \regut_\ili(\vx^t_\ili) \le \frac{\bdU^2}{4}\min\mleft\{\frac{2\log T}{\lambda_i}, T\eta\mright\} + \frac{\log n_i}{\eta} + \lambda_i (\log n_i + \bdT).
+    \]
+\end{theorem}
+\begin{proof}
+    From \cref{lem:regret potential} we have that
+    \[
+        \sum_{t=1}^T \regut_\ili(\vx) - \regut_\ili(\vx^t_\ili) &\le \mleft(\frac{\bdU^2}{4}\sum_{t=1}^T \frac{1}{\lambda_i t + 1/\eta}\mright) + \lambda_i \KL{\vx^1_\ili}{\vec\tau_i} + \frac{\KL{\vx}{\vx^1_\ili}}{\eta}\\
+        &\le \frac{\bdU^2}{4}\mleft(\sum_{t=1}^T\min\mleft\{\frac{1}{\lambda_i t}, \eta\mright\}\mright) + \lambda_i (\log n_i + Q_i) + \frac{\log n_i}{\eta}\\
+        &\le \frac{\bdU^2}{4}\min\mleft\{\frac{2\log T}{\lambda_i}, \eta T\mright\} + \lambda_i (\log n_i + Q_i) + \frac{\log n_i}{\eta},
+    \]
+    where the second inequality follows from the fact that $\lambda_i t + 1/\eta \ge \max\{\lambda_i t, 1/\eta\}$ and the fact that $\vx^1_\ili$ is the uniform strategy.
+\end{proof}
+\subsection{Last-Iterate Convergence in Two-Player Zero-Sum Games}
+In two-player game with payoff matrix $\vec{A}$ for Player~$1$, a Bayes-Nash equilibrium to the regularized game is a collection of policies $(\vx^*_\ili)$ such that for any supported type $\lambda_i$ of Player~$i\in\{1,2\}$, the policy $\vx^*_\ili$ is a best response to the average policy of the opponent. In symbols, 
+\[
+    \vx^*_{1,\lambda_1} &\in \argmax_{\vx \in \Delta(A_1)} \Big\{\langle \vec{A} \, \avg2 { \vx^*_{2,\lambda_2} }, \vx \rangle + \lambda_1 \KL{\vx}{\vec\tau_1} \Big\} & \forall\, \lambda_1 \in\Lambda_1, \\
+    \vx^*_{2,\lambda_2} &\in \argmax_{\vx \in \Delta(A_2)} \Big\{\langle -\vec{A}^\top \, \avg1 { \vx^*_{1,\lambda_1} }, \vx \rangle + \lambda_2 \KL{\vx}{\vec\tau_2}\Big\} & \forall\, \lambda_2 \in\Lambda_2.
+\]
+
+Denoting $\bar\vx^*_1 \defeq \avg1 { \vx^*_{1,\lambda_1} }, \bar\vx^*_2 \defeq \avg2 {\vx^*_{2,\lambda_2}}$, the first-order optimality conditions for the best response problems above are
+\[
+    \langle
+        \vec{A}\, \bar\vx^*_{2} + \lambda_1 \nabla\regu(\vx^*_{1,\lambda_1}) - \lambda_1 \nabla \regu(\vec\tau_1), \vx^*_{1,\lambda_1} - \vx'_{1, \lambda_1}
+    \rangle \ge 0 & \qquad \forall\, \vx'_{1,\lambda_1} \in \Delta(A_1),\\
+    \langle
+        -\vec{A}^\top\, \bar\vx^*_{1} + \lambda_2 \nabla\regu(\vx^*_{2,\lambda_2}) - \lambda_2 \nabla \regu(\vec\tau_2), \vx^*_{2,\lambda_2} - \vx'_{2, \lambda_2}
+    \rangle \ge 0 & \qquad \forall\, \vx'_{2,\lambda_2} \in \Delta(A_2).
+\]
+
+We also mention the following standard lemma.
+\begin{lemma}\label{lem:sc}
+    Let $(\vx^*_\ili)_{i\in\{1,2\},\lambda_1\in\Lambda_i}$ be the unique Bayes-Nash equilibrium of the regularized game. Let policies $\vx'_\ili$ be arbitrary, and let:
+    \begin{itemize}
+        \item $\bar\vx'_1 \defeq \avg1{\vx'_{1,\lambda_1}},\quad \bar\vx'_2 \defeq \avg2{ \vx'_{2,\lambda_2} }$;
+        \item $\alpha \defeq \displaystyle \avg1{ \langle -\vec{A}\bar\vx'_{2} + \lambda_1\nabla\regu(\vx'_{1,\lambda_1}) - \lambda_1\nabla\regu(\vec\tau_1) , \vx^*_{1,\lambda_1} - \vx'_{1,\lambda_1} \rangle }$;
+        \item $\beta \defeq \displaystyle\avg2 { \langle \vec{A}^\top\bar\vx'_{1} + \lambda_2\nabla\regu(\vx'_{2,\lambda_2}) - \lambda_2\nabla\regu(\vec\tau_2) , \vx^*_{2,\lambda_2} - \vx'_{2,\lambda_2} \rangle }$.
+    \end{itemize}
+    Then,
+    \[
+        \alpha + \beta \le -\sum_{i\in\{1,2\}}\avg{i}{ \lambda_i\,\KL{\vx'_\ili}{\vx^*_{i, \lambda_i}} + \lambda_i\,\KL{\vx^*_\ili}{\vx'_\ili} }.
+    \]
+\end{lemma}
+
+
+The following potential function will be key in the analysis:
+\renewcommand{\pot}{\Psi}
+    \[
+        \pot^t &\defeq \sum_{i\in\{1,2\}} \avg{i}{ \mleft(\lambda_i (t-1) + \frac{1}{\eta}\mright) \KL{\vx^*_\ili}{\vx^t_\ili} + \lambda_i\, \KL{\vx^t_\ili}{\vec\tau_i}},~\quad t\in\{1,2,\dots\}.
+    \]
+
+\begin{proposition}\label{prop:pot increase}
+    At all times $t \in \{1, 2, \dots\}$, let
+    \[
+        \bar\vx_{-i}^t \defeq \avg{-i}{\vx_{-i,\lambda_{-i}}^t} .
+    \]
+    The potential $\pot^t$ satisfies the inequality
+    \[
+        \pot^{t+1} \le \pot^t +\sum_{i\in\{1,2\}} \avg{i}{ \frac{\mleft\|\vu_i^t\mright\|^2_\infty}{4\lambda_i t + 4/\eta}  + \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle}.
+    \]
+\end{proposition}
+\begin{proof}\allowdisplaybreaks
+    By multiplying both sides of \cref{cor:prox step} for the choice $\vx = \vx^*_\ili$, taking expectations over $\lambda_i \sim \beta_i$, and summing over the player $i\in\{1,2\}$, we find
+    \[
+        &\sum_{i\in\{1,2\}} \avg{i}{ \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx^*_\ili}{\vx^{t+1}_\ili} } = \sum_{i\in\{1,2\}} \avg{i}{ \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx^*_\ili}{\vx^t_\ili} } \\[2mm]
+        &\hspace{3cm} - \sum_{i\in\{1,2\}} \avg{i}{ \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx^{t+1}_\ili}{\vx^t_\ili} } \\[2mm]
+        &\hspace{3cm} + \underbrace{\sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle -\vu_i^t + \lambda_i \nabla\regu(\vx^{t}_\ili) - \lambda_i\nabla\regu(\vec\tau_i), \vx^*_\ili - \vx^{t+1}_\ili \mright\rangle }}_{\UBnumberthis[$\clubsuit$]{eq:stepA}}\!.
+        \numberthis{eq:step0}
+    \]
+    We now proceed to analyze the last summation on the right-hand side. First,
+    \[
+        \eqref{eq:stepA} &= \underbrace{\sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle -\vec{A}_i \bar\vx^{t}_{-i} + \lambda_i \nabla\regu(\vx^{t}_\ili) - \lambda_i\nabla\regu(\vec\tau_i), \vx^*_\ili - \vx^{t}_\ili \mright\rangle }}_ {\UBnumberthis[$\spadesuit$]{eq:stepA1}}\\
+            &\hspace{2cm} + \underbrace{\sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle -\vu_i^t + \lambda_i \nabla\regu(\vx^{t}_\ili) - \lambda_i\nabla\regu(\vec\tau_i), \vx^{t}_\ili - \vx^{t+1}_\ili \mright\rangle }}_{ \UBnumberthis[$\heartsuit$]{eq:stepA3}}\\
+            &\hspace{2cm} + \sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }.\numberthis{eq:stepA decomposition}
+    \]
+    Using \cref{lem:sc} we can immediately write
+    \[
+        \eqref{eq:stepA1} &\le \sum_{i\in\{1,2\}}\avg{i}{ -\lambda_i \KL{\vx^*_\ili}{\vx^t_\ili} }.
+    \]
+    By manipulating the inner product in~\eqref{eq:stepA3}, we have 
+    \[
+        \eqref{eq:stepA3} &= \sum_{i\in\{1,2\}} \avg{i}{ \langle -\vu_i^t, \vx^t_\ili - \vx^{t+1}_\ili \rangle -\lambda_i \Big\langle \nabla\regu(\vx^t_\ili) - \regu(\vx^{t+1}_\ili), \vx^{t+1}_\ili - \vx^t_\ili\Big\rangle }\\
+        &\le \sum_{i\in\{1,2\}} \avg{i}{ \langle -\vu_i^t, \vx^t_\ili - \vx^{t+1}_\ili \rangle + \lambda_i\Big(\KL{\vx^{t+1}_\ili}{\vec\tau_i} - \KL{\vx^t_\ili}{\vec\tau_i}\Big) }\\
+        &\le \sum_{i\in\{1,2\}} \avg{i}{ \frac{\mleft\|\vu_i^t \mright\|^2_\infty}{4\lambda_i t + 4/\eta} + \mleft(\lambda_i t + \frac{1}{\eta}\mright) \mleft\|\vx^t_\ili - \vx^{t+1}_\ili\mright\|^2_1} \\
+            &\hspace{3.3cm}+ \sum_{i\in\{1,2\}} \avg{i}{\lambda_i\mleft(\KL{\vx^{t+1}_\ili}{\vec\tau_i} - \KL{\vx^t_\ili}{\vec\tau_i}\mright)},
+    \]
+    where the last inequality follow from the fact that $ab \le a^2/(4\rho) + \rho b^2$ for all choices of $a,b\ge 0$ and $\rho > 0$.
+    Substituting the individual bounds into~\eqref{eq:stepA decomposition} yields
+    \[
+        \eqref{eq:stepA} & \le \sum_{i\in\{1,2\}}\avg{i}{ \lambda_i \mleft(\KL{\vx^{t+1}_\ili}{\vec\tau_i} - \KL{\vx^t_\ili}{\vec\tau_i}\mright) } \\
+        &\hspace{1.5cm} + \sum_{i\in\{1,2\}} \avg{i}{ \frac{\mleft\|\vu_i^t\mright\|^2_\infty}{4\lambda_i t + 4/\eta} + \mleft(\lambda_i t + \frac{1}{\eta}\mright) \mleft\|\vx^t_\ili - \vx^{t+1}_\ili\mright\|^2_1}\\
+        &\hspace{1.5cm} + \sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }.
+    \]
+    Finally, plugging the above bound into \eqref{eq:step0} and rearranging terms yields
+    \[
+        \pot^{t+1} &\le \pot^t + \sum_{i\in\{1,2\}} \avg{i}{ - \mleft(\lambda_i t + \frac{1}{\eta}\mright) \KL{\vx^{t+1}_\ili}{\vx^t_\ili}}\\
+            &\hspace{1.5cm} + \sum_{i\in\{1,2\}} \avg{i}{ \frac{\mleft\|\vu_i^t\mright\|^2_\infty}{4\lambda_i t + 4/\eta} + \mleft(\lambda_i t + \frac{1}{\eta}\mright) \mleft\|\vx^t_\ili - \vx^{t+1}_\ili\mright\|^2_1}\\
+            &\hspace{1.5cm} + \sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }.\\
+        &\le \pot^t + \sum_{i\in\{1,2\}} \avg{i}{ - \mleft(\lambda_i t + \frac{1}{\eta}\mright) \mleft\| \vx^{t+1}_\ili - \vx^t_\ili \mright\|_1^2}\\
+            &\hspace{1.5cm} + \sum_{i\in\{1,2\}} \avg{i}{ \frac{\mleft\|\vu_i^t\mright\|^2_\infty}{4\lambda_i t + 4/\eta} + \mleft(\lambda_i t + \frac{1}{\eta}\mright) \mleft\|\vx^t_\ili - \vx^{t+1}_\ili\mright\|^2_1}\\
+            &\hspace{1.5cm} + \sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }.\\
+        &\le \pot^t +\sum_{i\in\{1,2\}} \avg{i}{ \frac{\mleft\|\vu_i^t\mright\|^2_\infty}{4\lambda_i t + 4/\eta} + \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle },
+    \]
+    as we wanted to show.
+\end{proof}
+
+\begin{theorem}\label{thm:distance to nash}
+    As in \cref{prop:pot increase}, let
+    \[
+            \bar\vx_{-i}^t \defeq \avg{-i}{\vx_{-i,\lambda_{-i}}^t} .
+    \]
+    Let $\dsur{T}$ be the notion of distance defined as
+    \[
+        \dsur{T} \defeq \sum_{i\in\{1,2\}} \avg{i}{(\lambda_i + \temp_{T-1}) \KL{\vx^*_\ili}{\vx^T_\ili}}.
+    \]
+    At all times $T = 2,3,\dots$,
+    \[
+        &\dsur{T} \le \frac{1}{T}\mleft(\rho + \frac{\log n_i}{\eta} + \frac{\bdU^2}{2}\sum_{i\in\{1,2\}}\avg{i}{\min\mleft\{\frac{2 \log T}{\lambda_i}, \eta T \mright\}}\mright) \\&\hspace{5.5cm}+ \frac{2}{T} \sum_{t=1}^{T}\sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle },
+    \]
+    where
+    \[
+        \rho \defeq 2\sum_{i\in\{1,2\}} \avg{i}{\lambda_i}\, (\log n_i + \bdT).
+    \]
+\end{theorem}
+\begin{proof}\allowdisplaybreaks
+    Using the bound on $\pot^{t+1}-\pot^t$ given by \cref{prop:pot increase} we obtain
+    \[
+        \pot^T - \pot^1 &= \sum_{t=1}^{T-1} (\pot^{t+1} - \pot^t) \\
+        &\le \sum_{t=1}^{T-1} \sum_{i\in\{1,2\}} \avg{i}{ \frac{\mleft\|\vu_i^t\mright\|^2_\infty}{4\lambda_i t + 4/\eta} + \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }\\
+        &= \frac{1}{4}\sum_{i\in\{1,2\}} \avg{i}{ \sum_{t=1}^{T} \frac{\mleft\|\vu_i^t\mright\|^2_\infty}{\lambda_i t + 1/\eta}} + \sum_{t=1}^{T}\sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }\\
+        &\le \frac{1}{4}\sum_{i\in\{1,2\}} \avg{i}{ \sum_{t=1}^{T-1} \frac{\bdU^2}{\lambda_i t + 1/\eta}} + \sum_{t=1}^{T}\sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }.
+    \]
+    We can now bound 
+    \[
+        \sum_{t=1}^{T} \frac{\bdU^2}{\lambda_i t + 1/\eta} &\le \bdU^2 \sum_{t=1}^{T} \min\mleft\{\frac{1}{\lambda_i t}, \eta\mright\} \\
+        &\le \bdU^2 \min\mleft\{\sum_{t=1}^{T} \frac{1}{\lambda_i t}, \sum_{t=1}^{T} \eta\mright\}\\
+        &\le \bdU^2 \min\mleft\{\frac{2 \log T}{\lambda_i}, T\eta \mright\}.
+    \]
+    On the other hand, note that
+    \[
+        \pot^T - \pot^1 &= -\pot^1 + \sum_{i\in\{1,2\}} \avg{i}{ \mleft(\lambda_i(T-1) + \frac{1}{\eta}\mright) \KL{\vx^*_\ili}{\vx^T_\ili} + \lambda_i\, \KL{\vx^T_\ili}{\vec\tau_i}} \\
+            &\ge -\pot^1 + \sum_{i\in\{1,2\}} (T-1)\avg{i}{(\lambda_i + \temp_{T-1}) \KL{\vx^*_\ili}{\vx^T_\ili}} \\
+            &= (T-1)\dsur{T} - \sum_{i\in\{1,2\}} \avg{i}{\frac{\KL{\vx^*_\ili}{\vx^1_\ili}}{\eta} - \lambda_i \KL{\vx^1_\ili}{\vec\tau_i}} \\
+            &\ge (T-1)\dsur{T} - \sum_{i\in\{1,2\}} \avg{i}{\frac{\log n_i}{\eta} + \lambda_i (\log n_i + \bdT) }\\
+            &= (T-1)\dsur{T} - \rho,
+    \]
+    where the last inequality follows from expanding the definition of the KL divergence and using the fact that $\vx^1_\ili$ is the uniform strategy.
+    Combining the inequalities and dividing by $T-1$ yields
+    \[
+        &\dsur{T} \le \frac{\bdU^2}{4} \sum_{i\in\{1,2\}}\avg{i}{\min\mleft\{\frac{2 \log T}{(T-1)\lambda_i}, \frac{T}{T-1}\eta \mright\}} + \frac{\rho}{T-1} \\&\hspace{5cm}+ \frac{1}{T-1} \sum_{t=1}^{T}\sum_{i\in\{1,2\}} \avg{i}{ \mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle }.
+    \]
+    Finally, using the fact that $2(T-1) \ge T$ yields the statement.
+\end{proof}
+
+\begin{theorem}[Last-iterate convergence of \dilpikl in two-player zero-sum games]\label{thm:last iterate convergence} %
+    Let $\rho$ be as in the statement of \cref{thm:distance to nash}.
+    When both players in a zero-sum game learn using \dilpikl for $T$ iterations, their policies converge to the unique Bayes-Nash equilibrium $(\vx^*_1,\vx^*_2)$ of the regularized game defined by utilities~\eqref{eq:regularized C}, in the following senses:
+    \begin{enumerate}[(a)]
+        \item In expectation: for all $i\in\{1,2\}$ and $\lambda_i \in \Lambda_i$, at a rate of roughly $\log T / (\lambda_i T)$
+            \[
+                \E\Big[ \KL{\vx^*_\ili}{\vx^T_\ili} \Big] \le \frac{1}{\lambda_i T}\mleft(\rho + \frac{\log n_i}{\eta} + \frac{\bdU^2}{2}\sum_{j\in\{1,2\}}\avg{j}{\min\mleft\{\frac{2 \log T}{\lambda_j}, \eta T \mright\}}\mright).
+            \]
+            (We remark that for $\eta = 1/\sqrt{T}$ the convergence is never slower than $1/\sqrt{T}$).
+        \item With high probability, at a rate of roughly $1/\sqrt{T}$: for any $\delta \in (0,1)$ and Player $i\in\{1,2\}$,
+            \[
+                \Prob\mleft[ \forall\, \lambda_i \in \Lambda_i : \KL{\vx^*_\ili}{\vx^T_\ili} \le  \E\Big[ \KL{\vx^*_\ili}{\vx^T_\ili} \Big] + \frac{8\sqrt{2}\, W}{\lambda_i\sqrt{T}}\sqrt{\log \frac{|\Lambda_i|}{\delta}} \mright] \ge 1 - \delta.
+            \]
+            A n upper bound on $\E\Big[ \KL{\vx^*_\ili}{\vx^T_\ili} \Big]$ was given in the previous point.
+        \item Almost surely in the limit:
+            \[
+                \Prob\Big[\forall\, \lambda_i \in \Lambda_i : \KL{\vx^*_\ili}{\vx^T_\ili} \xrightarrow{T\to+\infty} 0\Big] = 1 \qquad\forall i \in \{1,2\}.
+            \]
+    \end{enumerate}
+\end{theorem}
+\begin{proof}
+    We prove the three statements incrementally.
+    \begin{enumerate}[(a)]
+        \item Let $\mathcal{F}_t$ be the $\sigma$-algebra generated by $\{\vec{u}^{t'}_i \mid t' = 1,\dots, t-1, i\in\{1,2\}\}$. We let $\E_t[\,\cdot\,] \defeq \E[\,\cdot\mid\mathcal{F}_t]$. Since \pikl is a deterministic algorithm, $\vx^t_\ili$ is $\mathcal{F}_t$-measurable. Hence, given that $\vec{u}_i^t$ is an unbiased estimator of $\vec{A}_i\bar\vx^t_{-i}$
+        we have that at all times $t$
+        \[
+            \E_t\mleft[\mleft\langle \vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i, \vx^*_\ili - \vx^{t}_\ili \mright\rangle\mright] &= \mleft\langle \E_t\mleft[\vec{A}_i \bar\vx^{t}_{-i} - \vec{u}^t_i\mright], \vx^*_\ili - \vx^{t}_\ili \mright\rangle = 0.\numberthis{eq:mds}
+        \]
+        Note that from the definition of $\dsur{T}$ given in \cref{thm:distance to nash}
+        \[
+            \KL{\vx^*_\ili}{\vx^T_\ili} \le \frac{1}{\lambda_i} \dsur{T}.\numberthis{eq:dist bounded by pot}
+        \]
+        Hence, taking expectations and using \eqref{eq:mds} yields the statement.
+        \item To prove high-probability convergence, we use the Azuma-Hoeffding concentration inequality. In particular,~\eqref{eq:mds} shows that the stochastic process
+        \[
+            \mleft(\sum_{j\in\{1,2\}} \avg{j}{\langle \vec{A}_j \bar\vx^{t}_{-j} - \vec{u}^t_j, \vx^*_j - \vx^{t}_j \rangle}\mright)_{t=1,2,\dots}
+        \]
+        is a martingale difference sequence adapted to the filtration $\mathcal{F}_t$. Furthermore, note that
+        \[
+            \mleft|\sum_{j\in\{1,2\}} \avg{j}{\langle\vec{A}_j \bar\vx^{t}_{-j} - \vec{u}^t_j, \vx^*_{j,\lambda_j} - \vx^{t}_{j,\lambda_j} \rangle} \mright| \le 4W
+        \]
+        for all $t$. Hence, using the Azuma-Hoeffding inequality for martingale difference sequences we obtain that for all $\delta\in(0,1)$,
+        \[
+            \Prob\mleft[\sum_{t=1}^{T} \sum_{j\in\{1,2\}} \avg{j}{\langle\vec{A}_j \bar\vx^{t}_{-j} - \vec{u}^t_j, \vx^*_j - \vx^{t}_j} \rangle \le 4W\sqrt{2T\log\frac{1}{\delta}} \mright] \ge 1-\delta.
+        \]
+        Plugging the above probability bound in the statement of \cref{thm:distance to nash} and using the union bound over $\lambda_i\in\Lambda_i$ yields the statement.
+        \item follows from (b) via a standard application of the Borel-Cantelli lemma.
+    \end{enumerate}
+\end{proof}
+\section{Model architecture}
+\label{app:modelarchitecture}
+Our model architecture closely resembles the architecture used in past work on no-press Diplomacy \citep{bakhtin2021no,jacob2022modeling,anthony2020learning,paquette2019no,gray2020human}.
+
+\begin{table*}[h]
+\center
+\begin{tabular}{llr}
+\toprule
+\bf Feature & \bf Type & \bf Number of Channels \\
+\midrule
+Presence of army/fleet? & Binary & 2 \\
+Army/fleet owner & One-hot (7 players), or all zero & 7 \\
+Build turn build/disband & Binary & 2 \\
+Dislodged army/fleet? & Binary & 2 \\
+Dislodged unit owner & One-hot (7 players), or all zero & 7 \\
+Land/coast/water & One-hot & 3 \\
+Supply center owner & One-hot (7 players), or all zero & 8 \\
+Home center & One-hot (7 players), or all zero & 7 \\
+\bottomrule
+\end{tabular}
+\caption{Per-location board state input features}
+\label{table:per-location-board-features}
+\end{table*}
+
+\begin{table*}[h]
+\center
+\begin{tabular}{llr}
+\toprule
+\bf Feature & \bf Type & \bf Number of Channels \\
+\midrule
+Number of builds allowed during winter & Float & 1 \\
+\bottomrule
+\end{tabular}
+\caption{Per-player board state input features}
+\label{table:per-player-board-features}
+\end{table*}
+
+\begin{table*}[h]
+\center
+\begin{tabular}{llr}
+\toprule
+\bf Feature & \bf Type & \bf Channels \\
+\midrule
+Season (spring/fall/winter) & One-hot & 3 \\
+Year (encoded as $(y - 1901)/10$) & Float & 1 \\
+Game has dialogue? & Binary & 1 \\
+Scoring system used & One-hot & 2 \\
+\bottomrule
+\end{tabular}
+\caption{Global board state input features}
+\label{table:global-board-features}
+\end{table*}
+
+\begin{figure*}[h]
+\centering
+\includegraphics[width=15cm]{figs/nopressmodelarchitecture.png}
+\vspace{-0.1in}
+\caption{\small Model architecture used for policy/value learning in no-press Diplomacy.}
+\label{fig:nopressmodelarchitecture}
+\end{figure*}
+
+Given a gamestate, to construct the input to the model, for each of the 81 possible locations and/or special coastal areas on the board that a unit can occupy, we encode the 38 feature channels described in \autoref{table:per-location-board-features} for that location. We also encode the previous board state in this way, as well using an encoding of the order history as described in \cite{gray2020human} provides an additional 202 channels per board location indicating the prior orders at that location. 
+
+Separately, we also encode per-player and global features of the gamestate into additional tensors (\autoref{table:per-player-board-features},\autoref{table:global-board-features}). Each of these tensors (per-location, per-player, global) is passed through a linear layer with 224 output channels, and then all three are concatenated to a single (81+7+1) x 224 tensor. Thereafter, following \cite{bakhtin2021no}, we apply a learnable positional bias and pass the result to a to a standard transformer encoder architecture with 10 layers, channel width 224, 8 dot-product-self-attention heads per layer, and GeLU activation.
+
+Finally we decode the policy via the same LSTM decoder head as \cite{gray2020human}, and predict the game values of all 7 players using a value head that applies softmax attention to the encoder output, followed by a linear layer with 224 channels, GeLU activation, a linear layer with 7 channels, and a softmax. See Figure \ref{fig:nopressmodelarchitecture} for a graphical diagram of the model.
+\section{Human Imitation Anchor Policy Training}
+\label{app:ilanchortraining}
+
+Similar to prior work \citep{bakhtin2021no,jacob2022modeling,gray2020human}, to obtain a human imitation anchor policy with which to use for piKL regularization and to initialize the RL policy, we train the architecture described in \autoref{app:modelarchitecture} on a dataset of roughly 46000 online Diplomacy games provided by webdiplomacy.net. We train jointly on both games with full-press Diplomacy (i.e. where players were able to communicate via messages) and no-press Diplomacy and at inference time and/or during RL, condition the relevant global feature in \autoref{table:global-board-features} to indicate the model should predict for no-press Diplomacy. Also in common with the same prior work, we apply data filtering to skip training on actions where players missed the time limit and a default null action was inputted by the website, and to only train on actions played by the top half of rated players. We also adopt the method of \cite{jacob2022modeling} to augment the data by permuting the labels of the 7 players randomly during training, since the game's rules are fully equivariant to such permutations. See \autoref{tab:sl_train_hyperparams} for a list of other hyperparameters.
+
+\begin{table}[h]
+\center
+\begin{tabular}{l|r}
+\toprule
+Learning rate & $2 \times 10^{-3}$ \\
+Learning rate decay per epoch & 0.99 \\
+Linear LR warmup epochs & 10 \\
+Total epochs & 390 \\
+Gradient clip max norm & 0.5 \\
+Batch size & 16000 \\
+Batches per epoch & 270 \\
+Value loss weight & 0.7 \\
+Policy loss weight & 0.3 \\
+Optimizer & ADAM \\
+Transformer encoder dropout & 0.3 \\
+Policy head LSTM dropout & 0.3 \\
+
+\bottomrule
+\end{tabular}
+\caption{\small Hyper-parameter values used to train the IL anchor policy on human data.}
+\label{tab:sl_train_hyperparams}
+\end{table}
+\section{Self-play Training}
+\label{app:rltraining}
+
+\begin{figure}[ht]
+\small
+\vspace{-0.05in}
+    \begin{minipage}{\columnwidth}
+        \SetInd{0.4em}{0.6em}
+        \begin{algorithm}[H]\caption{RL Loop}\label{algo:rl_loop}
+            \DontPrintSemicolon
+            \Fn{\normalfont\textsc{DataGenerationLoop}()}{
+                \While{true}{
+                    $\mathsf{Game} \gets \textsc{NewGame}()$ \;
+                    $\theta_v \gets \textsc{GetNewValueFunction}()$\;
+                    $\theta_\pi \gets \textsc{GetNewPolicyFunction}()$  \tcp*{Not used for NPU algorithm}
+                    \While{not \textsc{IsDone}(Game)}{
+                     $s \gets \textsc{EncodeState}(\text{Game})$ \;
+                     $\myvector{A} \gets \textsc{GetPlausibleAction}(\theta_\pi)$ \;
+                     $\myvector{A} \gets \textsc{DoubleOracleActionExploration}(\myvector{A}, \theta_\pi, \theta_v)$ \tcp*{Only used for DORA}
+                     $\myvector{\sigma}, \myvector{u} \gets \textsc{RunSearch}(s, \myvector{A}, \theta_v, \tau)$ \tcp*{Regret Matching or \bqrealgo{}}
+                     $\textsc{SendToBuffer}(s, \myvector{\sigma}, \myvector{u})$ \;
+                     \tcp{Sample from the policy with possible $\eps$-exploration}
+                     $\myvector{a} \gets \textsc{SelectAction}(\myvector{\sigma})$\;
+                     $\text{Game} \gets \textsc{NextState}(\text{Game}, \myvector{a})$ \;
+                    }
+                }
+            }
+            \Hline{}
+            \Fn{\normalfont\textsc{TrainingLoop}()}{
+                $\theta_v \gets BCValue()$ \tcp*{Not used for DORA}  
+                $\theta_\pi \gets BCPolicy()$  \tcp*{Not used for DORA}      \While{true}{
+                     $s, \myvector{\sigma}, \myvector{u} \gets \textsc{ReadFromBuffer}()$ \;
+                     $Loss \gets \textsc{PolicyLoss}(s, \myvector{\sigma}, \theta_\pi) + \textsc{ValueLoss}(s, \myvector{u}, \theta_v)$ \;
+                     $\textsc{GradientStep}(Loss)$\;
+                     $\textsc{SaveNewValueFunction}(\theta_v)$\;
+                     $\textsc{SaveNewPolicyFunction}(\theta_\pi)$\;
+                }
+            }
+        \end{algorithm}
+\end{minipage}
+\caption{High-level description of DNVI-style algorithms. The DORA agent is initialized from scratch and requires a Double Oracle action exploration procedure to perform well. The NPU (no policy update) modification uses the behavioral cloning policy for the policy proposal network throughout the whole training. DORA, DNVI, and DNVI-NPU use RM as the search algorithm, while the other training methods use \bqrealgo{}. \label{alg:rl_loop}.}
+\end{figure}
+
+Our self-play training algorithm closely matches that of DORA from \cite{bakhtin2021no}, described in detail in Section \ref{sec:dora}. The overall self-play procedure (see~\autoref{alg:rl_loop}), the training data recorded, loss function used on that data, and sampling methods we use are all the same. The differences are:
+\begin{itemize}
+\item Although our model architecture is largely identical to that of past work, some minor details, including the precise encoding of input features, and the construction of the value head are different, see Appendix \ref{app:modelarchitecture} for description of our architecture.
+\item During RL training, we initialize the RL policy proposal and value functions from the human IL anchor policy and value function (\autoref{app:ilanchortraining}) instead of randomly from scratch, and during training, rather than using regret matching to compute the 1-step equilibrium $\sigma$ on each turn of the game, we use DiL-piKL. The distribution of $\lambda$ and the human IL anchor policy remain fixed through all of training.
+\item During training, the action chosen to explore in the self-play game uses a randomly chosen $\lambda$ from the DiL-piKL distribution. Similarly, the RL policy is trained to predict the policy of a random $\lambda$. This ensures that the RL policy, when used at test time to propose actions, samples both human IL-like actions from high $\lambda$, as well as more optimized actions from lower $\lambda$, and that gamestates resulting from the entire range of possible $\lambda$ are in-distribution for the RL policy and value models.
+\item Unlike DORA, double-oracle action exploration is \emph{not} used during training. We found that with the additional diversity and regularization of the human anchor policy, it was unnecessary.
+\item All models were also trained with the same stochastic game-end rules we used in evaluation games against human players described in Section \ref{sec:experimentalsetup}.
+\item Some hyperparameters we use may be different than that of past work. See Appendix \ref{app:hyperparams} for a list of hyperparameters.
+\end{itemize}
+\subsection{Hyper-parameters for RL training}
+\label{app:hyperparams}
+
+For the evaluation in this paper we trained \botname and BRBot agents and re-trained DNVI, DNVI-NPU, and DORA agents. We provide the hyper-parameters used in table~\ref{tab:rl_train_hyperparams}. We show parameters out of 3 agents from~\citet{bakhtin2021no} as they are the same.
+
+\begin{table}[h]
+\center
+\begin{tabular}{l|rrrr}
+\toprule
+ & \botname & \botname & BRBot & DORA  \\
+ & High & Low  & &   \\
+\midrule
+Learning rate & \multicolumn{4}{c}{$10^{-4}$}  \\
+Gradient clip max norm &   \multicolumn{4}{c}{0.5} \\
+Warmup updates & \multicolumn{4}{c}{10k} \\
+Batch size & \multicolumn{4}{c}{1024} \\
+Buffer size & \multicolumn{4}{c}{1,280,000}  \\
+Max train/generation ratio & \multicolumn{4}{c}{6} \\
+Optimizer & \multicolumn{4}{c}{ADAM} \\
+Transformer encoder dropout & \multicolumn{4}{c}{0} \\
+Policy head LSTM dropout & \multicolumn{4}{c}{0} \\
+\midrule
+Search algorithm & \bqrealgo & \bqrealgo & \bqrealgo & RM\\
+Type distribution (self) & $\{10^{-2}, 10^{-1}\}$ & $\{10^{-4}, 10^{-1}\}$ & $\{+\infty\}$ & $\{0\}$  \\
+Type distribution (other) & $\{10^{-2}, 10^{-1}\}$ & $\{10^{-4}, 10^{-1}\}$ & $\{0\}$ & $\{0\}$  \\
+Search iterations    & 256& 256 & 256 & 256 \\
+Number of candidate actions ($N_c$)    & 50& 50 & 50 & 50 \\
+Max candidate actions per unit   & 6& 6 & 6 & 6 \\
+Nash explore ($\varepsilon$)    & 0.1& 0.1 & 0.1 & 0.1 \\
+Nash explore, S1901M     & 0.1& 0.1 & 0.1 & 0.3 \\
+Nash explore, F1901M     & 0.1& 0.1 & 0.1 & 0.2 \\
+\bottomrule
+\end{tabular}
+\caption{\small Hyper-parameter values used to train RL agents.}
+\label{tab:rl_train_hyperparams}
+\end{table}
+\subsection{Inference time effect of \bqrealgo}
+In Figure \ref{fig:dil_pikl_inference} we show that running DiL-piKL at evaluation time alone is not enough to get the demonstrated performance improvement in population scores.
+Using DiL-piKL on top of human imitation-learned policy/value functions does not improve the population score compared to Hedge.
+However, applying this search method on top of policies/values that were trained via RL with DiL-piKL results in significant improvement in the scores.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/inference_dil_pikl.pdf}
+    \caption{Performance of different search algorithms at inference time for models trained with RL and IL. Applying DiL-piKL at inference time rather than Hedge only slightly improves an IL-based search agent, but greatly improves RL agents trained with DiL-piKL. 
+    }
+    \label{fig:dil_pikl_inference}
+\end{figure}
+\section{Bayes-ELO}
+\label{app:bayes_elo}
+BayesElo \citep{coulom2005bayeselo} models each player's expected share of the total score in a 2-player game as proportional to:
+$$\exp((r_i + b_{s(i)})/c)$$ 
+where $r_i$ is the Elo rating of player $i$, $b_1$ and $b_2$ are the advantage/disadvantage of playing first/second in Elo, $s(i) \in {1,2}$ indicates whether $i$ played first or second, and $c = 400 \log_{10}(e)$ is a fixed scaling constant that adjusts for the particular arbitrary numerical scale of ratings expected by users, in particular that 400 points in Elo systems generally corresponds to a 10-fold increase in expected winning odds or expected average score..
+
+It then finds joint maximum-a-posteriori values $r_i$, $b_i$ given all observed data and an optional prior to regularize the model. In some cases, the biases $b_i$ may also be hardcoded or provided as parameters rather than inferred from the data, in our work we infer them. In our application, we use a weak Bayesian prior such that each player's rating was a-priori normally distributed around 0 with a standard deviation of around 350 Elo.
+
+BayesElo generalizes naturally to more than 2 players simply by allowing $i$ and $s(i)$ to range over $\{1,...,n\}$ rather than $\{1,2\}$, and we straightforwardly apply this to Diplomacy. Since there are 7 players, we similarly jointly fit $b_1$,...$b_7$ on the data to model the asymmetric advantage/disadvantage of the 7 different starting positions. Computed Elo ratings closely reflect empirical winning percentages of players in a given population, but also take into account variability in the strength of opposition in a game, and the starting advantage/disadvantage $b_i$. For example, if a player achieved a high average score but was abnormally lucky in drawing advantageous starting countries across all their games, then the model would likely estimate a lower rating than if they achieved the same results with more difficult starting countries.
+
+In Diplomacy, on the 200 games of the human tournament in which we evaluated \botname and other agents, the empirical fitted $b_i$ values for the 7 different starting countries in the game are displayed in \autoref{tab:power_elos}.
+
+\begin{table}[h]
+\center
+\begin{tabular}{l|r}
+\toprule
+Starting Country & $b_i$ (Elo) \\
+\midrule
+Austria & -24 \\
+England & -43 \\
+France & 59 \\
+Germany & 18 \\
+Italy & -21 \\
+Russia & -16 \\
+Turkey & 27 \\
+\bottomrule
+\end{tabular}
+\caption{\small For each starting country, the empirical advantage/disadvantage of starting as that country measured in Elo rating equivalent units, fitted jointly with all players' Elo ratings on the 200 Diplomacy games of the tournament. The values roughly agree with common opinions among Diplomacy players, particularly that France is one of the best starting countries in no-press, while Austria and England are among the weaker starts.}
+\label{tab:power_elos}
+\end{table}

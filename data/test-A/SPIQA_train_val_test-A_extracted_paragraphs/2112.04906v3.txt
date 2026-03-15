@@ -1,0 +1,430 @@
+\section{Introduction}
+Branch-and-price is a widely-used exact method for solving combinatorial optimization problems~\citep{barnhart1998branch} in the general form of Dantzig–Wolfe reformulation~\citep{vanderbeck2000dantzig}. This formulation often provides a much stronger Linear-Programming relaxation (LP) bound than the more compact formulations of the same problem, which may lead to a significant reduction in the problem's search space. However, solving the LP can be challenging, because it typically has an exponential number of variables (or columns) that cannot be considered all at once.
+
+Column Generation~(CG) is an iterative method for solving large-scale LPs. As illustrated in Figure~\ref{fig:cg}, CG starts by solving a subproblem with a small fraction of the columns in an LP, commonly referred to as the Restricted Master Problem (RMP). Then, the optimal dual solution of the RMP is used to set up a pricing problem to search for the column with the least reduced cost. If that column has a negative reduced cost, the column is included in the RMP to further improve its solution. Otherwise, the RMP has captured all the columns with non-zero values in the optimal solution of the original LP. Since an optimal LP solution typically has only a small proportion of columns with non-zero values, CG is expected to solve the LP to optimality without the need to explicitly consider all the columns~\citep{lubbecke2010column}.
+
+\begin{figure}
+    \centering
+	\begin{tikzpicture}[shorten >=1pt,auto,node distance=0.5cm, thick,main node/.style={color = marine, rectangle, fill=gray!10, rounded corners, inner sep=6pt}, scale = 1.0]
+	\node[main node] (1) at (0,0) { \footnotesize Restricted Master Problem};
+	\node[main node] (2) at (4,0) { \footnotesize Pricing Problem};
+	
+	\path[every node/.style={color = marine}]
+	(1) [color = marine, line width = 0.30mm, ->, bend left = 20] edge node { \footnotesize Dual Solution} (2);
+	\path[every node/.style={color = marine}]
+	(2) [color = marine, line width = 0.30mm, ->, bend left = 20] edge node { \footnotesize  Columns} (1);
+
+	\end{tikzpicture}
+    \caption{Illustration of the iterative process of column generation.}
+    \label{fig:cg}
+\end{figure}
+
+
+
+
+In the CG approach, repeatedly solving the pricing problem is typically a bottleneck~\citep{lubbecke2005selected}, because the pricing problem is often NP-hard. To attain computational advantage, heuristic methods are often preferred to trade column quality for computational efficiency. An exact method is usually used only if a heuristic method failed to generate any column with a negative reduced cost~\cite{lubbecke2010column}. Existing studies have explored a variety of pricing heuristics, such as greedy search~\citep{mehrotra1996column, mourgaya2007column} and  metaheuristics~\citep{taillard1999heuristic, malaguti2011exact, beheshti2015novel}. Based on past computational experience, \citet{lubbecke2010column} notes that including multiple columns to the RMP at an iteration of CG can often speed up the progress of CG.
+
+In this paper, we propose a novel Machine-Learning-based Pricing Heuristic (MLPH) for efficiently solving pricing problems. Specifically, we train an ML model offline using a set of solved pricing problems with known optimal solutions. For an unseen pricing problem at an iteration of CG, we use this ML model to predict the optimal solution of the pricing problem, which is then used to guide the search method to generate high-quality columns. To gain efficiency, we employ a linear Support Vector Machine~\citep{boser1992training} for prediction and a sampling method for generating columns. As our method can potentially generate many columns, we introduce several column-selection strategies to form the new RMP to start the next iteration of CG.
+
+By harnessing the knowledge learned from historical data, our MLPH has several advantages over existing pricing methods: (1) compared to sampling-based methods~\citep{dorigo2006ant,cai2016fast}, MLPH can effectively generate columns with \emph{better} reduced costs; (2) compared to other pricing methods~\citep{gurobi2018gurobi, jiang2018two, wang2016two}, MLPH can efficiently generate \emph{many more} columns with negative reduced costs. As our MLPH can \textit{efficiently generate many high-quality columns}, it can help CG capture the columns in an optimal LP solution with a fewer number of iterations.
+
+We demonstrate the efficacy of our proposed MLPH on the graph coloring problem\replaced[id=yunzhuang]{.}{, but we note that our idea can be also applied to other combinatorial optimization problems.} Our experimental study shows that MLPH can significantly accelerate the progress of CG and substantially enhance the branch-and-price exact method.
+\section{Background}
+In this section, we first introduce different formulations of the Graph Coloring Problem~(GCP). Then, we use GCP to illustrate the solving process of CG.
+\subsection{Graph Coloring Problem}
+GCP aims to assign a minimum number of colors to vertices in a graph, such that every pair of the adjacent vertices does not share the same color~\cite{malaguti2010survey}. Let $G(\mathcal{V},\mathcal{E})$ denote a graph, where $\mathcal{V}$ is the set of vertices and $\mathcal{E}$ is the set of edges. GCP can be formulated as: 
+ \begin{align}
+    \min_{\bm{x},\bm{z}} \;& \sum_{c\in \mathcal{C}}z_c, & \text{(GCP-compact)}\\
+        s.t. \;& \sum_{c \in \mathcal{C}} x_{i,c} = 1, &  i \in \mathcal{V},  \\
+               & x_{i,c}+x_{j,c} \leq z_c, &  (i,j) \in \mathcal{E}; c \in \mathcal{C},  \\
+               & x_{i,c}\in \{0,1\}, \;&  i \in \mathcal{V}; c\in \mathcal{C}, \\
+               & z_c \in \{0,1\}, \;&  c\in \mathcal{C}.
+\end{align}
+\noindent The binary variable $z_c$ denotes whether a color $c \in \mathcal{C}$ is used to color the graph vertices; and $x_{i,c}$ denotes whether a certain color $c$ is used to color the vertex indexed at $i$. Since this formulation has a polynomial number of variables and constraints, it is commonly referred to as the compact formulation of the GCP, i.e., GCP-compact.
+
+
+
+Given that vertices with the same color must be part of an independent set, GCP-compact can be expressed as using a minimum number of Maximal Independent Sets~(MISs) to cover all the vertices in a graph such that every vertex is covered at least once~\citep{mehrotra1996column}, which can be  done systematically using Dantzig–Wolfe decomposition~\citep{vanderbeck2000dantzig,vanderbeck2006generic}. The reformulated problem is commonly referred to as the Set Covering formulation of the GCP~(GCP-SC), defined as:
+\begin{align}
+    \min_{\bm{x}} \;& \sum_{s \in \mathcal{S}} x_s, & \text{(GCP-SC)}\\
+        s.t. \;& \sum_{s \in \mathcal{S},i\in s} x_s \geq 1, &  i \in \mathcal{V},  \\
+               & x_s \in \{0,1\}, &s\in \mathcal{S}.
+\end{align}
+\noindent The binary variable~$x_s$ indicates whether a MIS~$s$ is used to cover a graph, and $\mathcal{S}$ is the set of all the possible MISs in that graph. While GCP-SC provides a much stronger LP than GCP-compact~\citep{mehrotra1996column}, it can contain an exponential number of variables (or columns) to represent all the MISs in a graph. Hence, solving the LP of such a large-scale problem is challenging.
+\subsection{Column Generation}
+Given the LP of GCP-SC, CG aims to capture the columns with non-zero values in the optimal LP solution, starting from a RMP with a tiny fraction of the columns in the original LP:
+\begin{align}
+    \min_{\bm{x_s}} \;& \sum_{s \in \mathcal{\overline{S}}} x_s, & \text{(RMP)}\\
+        s.t. \;& \sum_{s \in \mathcal{\overline{S}},i\in s} x_s \geq 1, &  i \in \mathcal{V}, \label{eq:at-least-one} \\
+               & 0 \leq x_s \leq 1, &s\in \mathcal{\overline{S}}.
+\end{align}
+\noindent Note that the integer constraints on $x_s$ are relaxed, and only a small number of MISs is considered initially, i.e., $\overline{\mathcal{S}} \subset \mathcal{S}$. 
+
+\added[id=yunzhuang]{
+The RMP can be efficiently solved using the simplex method or the interior point method~\citep{dantzig2016linear}, and its optimal dual solution $\bm{\pi}=[\pi_1,\cdots,\pi_{|V|}]$ associated to vertices (i.e., Constraint~\eqref{eq:at-least-one}) can be used to set up a pricing problem, to search for new MISs with the least reduced cost:
+\begin{align}
+    \min_{\bm{v}} \;& 1 - \sum_{i \in \mathcal{V}} \pi_i\cdot v_i, & \text{(MWISP)}\\
+        s.t. \;& v_i + v_j \leq 1, & (i,j)\in \mathcal{E} \\
+              & v_i \in \{0,1\}, & i \in \mathcal{V}.
+\end{align}
+\noindent The binary variable~$v_i$ denotes whether the vertex~$i$ is a part of the solution, i.e., a MIS according to constraints~(13) and (14). Note that the pricing problem for GCP-SC is the NP-hard Maximum Weight Independent Set Problem (MWISP), where the weight of a vertex $i$ is its dual solution $\pi_i$ to RMP.}
+
+To tackle MWISP, related studies~\cite{mehrotra1996column, malaguti2011exact} employ efficient heuristic methods. Only when a heuristic method fails to find any MIS with a Negative Reduced Cost~(NRC), an exact method is used to solve the MWISP to optimality and so generate the MIS with the least reduced cost. If there exist NRC MISs, they are selectively included in the RMP to further improve its solution, according to a pricing scheme~\citep{lubbecke2005selected}. Otherwise, the RMP has captured all the columns in the optimal solution of the original LP, and hence the original LP is optimally solved.
+\section{Machine Learning Based Pricing Heuristic}
+\label{sec:MLPH}
+Given the MWISP at a CG iteration, we employ an ML model to predict which vertices belong to the optimal MIS. This prediction is then used to guide a sampling method to generate high-quality MISs efficiently. Having many MISs, we introduce several strategies to select a subset of these to form the new RMP at the next CG iteration.
+\subsection{Optimal Solution Prediction}
+\label{subsec:osp}
+
+We train an ML model to predict the optimal MIS of the MWISP by solving a binary classification task. In our training data, a training example ($\bm{f}$, $y$) corresponds to a vertex in an optimally solved MWISP instance, where~$\bm{f}$ denotes the feature vector that summarizes the property of the corresponding vertex and~$y$ holds a binary value of $1$ (or $0$) indicating whether that vertex is in the optimal~MIS (or not). 
+
+We make use of several features that characterize a vertex of the MWISP, including vertex weight, vertex degree, and the upper bound of a vertex (defined by the sum of weights of that vertex and the vertices that are not adjacent to it). In addition, we adopt two statistical features~\citep{sun2019using} to further enhance the expressiveness of the feature representation for vertices. Given a sample of randomly generated MISs ($\bm{s}\in \mathcal{S}$), the first statistical feature measures the correlation between the presence of a vertex $i$ and the objective values of the sample MISs,
+\begin{equation}
+\label{eq:corr}
+    f_c(i) = \frac{\sum^{K}_{k=1} (\bm{s}^{k}_{i} - \overline{\bm{s}}_{i}) ({o}^{k} - \overline{o})}{\sum^{K}_{k=1} \sqrt{(\bm{s}^{k}_{i} - \overline{\bm{s}}_{i})^2} \sqrt{\sum^{K}_{k=1} ({o}^{k} - \overline{o})^2}},
+\end{equation}
+where $\bm{s}_i^k$ is a binary value, indicating whether the vertex $i$ is a part of the $k^{th}$ sample; $o^k$ denotes the objective value of that sample; $\overline{\bm{s}}_i$ and $\overline{o}$ respectively denote, the frequency of the vertex $i$ being in a sample and the mean objective value across all samples. A vertex with a high correlation score indicates that this vertex is likely to appear in the high-quality~MISs. 
+
+The second statistical measure uses the rank $r$ of the sample MISs with respect to their objective values,
+\begin{equation}
+\label{eq:rank}
+    f_r(i) = \sum^{K}_{k=1} \frac{\bm{s}^{k}_{i}}{r^{k}}.
+\end{equation}
+A vertex with a high ranking score indicates that this vertex appears frequently in the high-quality MISs. 
+
+To gain computational efficiency, we adopt Support Vector Machine with linear kernel (linear-SVM)~\citep{boser1992training} to best separate the positive examples (i.e., vertices in the optimal MIS) and negative ones (i.e., vertices not in the optimal MIS) in the training data. For a vertex $i$ in an unseen MWISP instance, the prediction $d_i \in \mathcal{R}$ of the trained linear-SVM is the distance of this vertex, in the feature space, from the optimal decision boundary. This indicates how confidently the linear-SVM classifies this vertex as either in the optimal solution or not according to the signed  distance.
+\subsection{Generating Columns via Sampling}
+\label{subsec:sampling}
+
+Based on the ML prediction, we can build a probabilistic model to sample multiple high-quality MISs. To generate a MIS, we start with a set containing a randomly selected vertex from the graph, and then iteratively add new vertices into the set until no new vertex can be added. We compute the probability of selecting a vertex via the ML prediction~$d_i$, $i \sim \frac{\sigma(d_i)}{\sum_{j \in \mathcal{C}}^{} \sigma(d_j)};\;i \in \mathcal{C}$, where $\sigma(d_i)$ denotes a logistic function to re-scale the prediction of a vertex into the range of~$[0,1]$, and $\mathcal{C}$ denotes the set of candidate vertices not  already adjacent to any vertex selected. The normalized value~$\sigma(d_i)$ can be interpreted as the `likelihood'  that vertex is in the optimal MIS. Note that we sample MISs starting from a random vertex, so as to increase the diversity of the generated MISs, which has an impact on the solving time of CG.
+\subsection{Columns Selection}
+\label{subsec:cs}
+ 
+ MLPH can potentially generate a large number of NRC columns for unseen MWISPs, and adding all of these to the RMP at early iterations of CG can slow down the solving process of the RMP in the successive CG iterations. However, selectively adding NRC columns may increase the chances of missing out the optimal columns. Therefore, we empirically investigate several strategies to form the RMP at the next CG iteration: 1) \textbf{add-all.} Add all the newly generated NRC columns to the RMP. 2) \textbf{add-partial.} From the newly generated NRC columns, select a proportion of them to add to the RMP in increasing order of their reduced cost. 3) \textbf{replace-existing.} \replaced[id=yunzhuang]{From all the columns, sequentially select columns for the next RMP in the increasing order of their reduced costs, while maintaining the diversity of the set of selected columns by skipping columns too similar to those already added. The algorithm is outlined in the Appendix.}{Replace some of the columns in the current RMP with some of the new columns. The columns with non-zero values in the current RMP solution remain to ensure the solution of the new RMP is no worse than the current. The rest of the columns are examined and included in the increasing order of their reduced cost. To maintain the diversity of the columns, a column is excluded if it was too similar to the columns already included in the new RMP.} 
+    
+        
+    
+
+At one end of the spectrum, the strategy~(1) adds all the columns to the RMP, resulting in the fastest growth of the size of the RMP. On the other hand, the strategy~(3) replaces some of the columns in the current RMP with newly generated columns, and it can maintain a fixed number of columns in the RMP. Due to this restriction, CG may require more iterations to capture all the optimal LP columns. The strategy~(2) is somewhere in between these two extremes, resulting in relatively slow growth of the size of the RMP.
+\section{Experiment Settings}
+\paragraph{Graph benchmarks and problem instance generation.} We use standard Graph Coloring Benchmarks\footnote{\url{https://sites.google.com/site/graphcoloring/files}}. Given a graph with~$n$ vertices, the goal is to find the columns with non-zero values in the optimal LP solution of GCP-SC, starting from a RMP initialized with $10n$ randomly generated columns. We note that reducing the number of samples can affect the performance of CG negatively. Among $136$ benchmark graphs, we remove those whose initial RMPs already contain all the optimal columns and whose initial RMPs cannot be solved by an LP solver within a reasonable time. For the remaining~$89$ graphs, we label $81$ of them as `small' and $8$ of them as `large', according to the computational time for solving their initial RMPs. For a graph, we can generate multiple RMPs by seeding the initial set of random columns, and these RMPs can be viewed as individual problem instances because solving them can result in different optimal dual solutions and hence different subsequent MWISPs. For training, we generate $10$ instances on $10$ small graphs with random seed $s=1314$. For testing, we generate $24$ instances on each graph using random seeds $s \in \{1,2,\cdots,24\}$, resulting in a total number of $1944$ small instances and $192$ large instances. 
+
+\paragraph{Data collection and training.} For each training instance, we run CG using an exact, specialized solver TSM~\citep{jiang2018two} to solve MWISPs to optimality. The MWISPs with optimal solutions are recorded every five CG iterations up to the $25^{th}$ iteration of CG. In the training data, the statistical features are computed from a set of $n$ MISs, randomly sampled uniformly, with all features normalized instance-wise~\citep{khalil2016learning}. The parameters for training SVM are set to the default values  of~\citep{chang2011libsvm}, except that the regularization term for misclassifying positive training examples is raised to the ratio between the negative training examples and the positive ones. For tuning the parameters in the logistic function, we employ Bayesian Optimization (BO)~\citep{snoek2012practical, nogueira2014bayesian}. Specifically, BO treats the MLPH as a black-box and attempts $300$ runs of MLPH using different sets of parameters in the logistic function to minimize the reduced cost of the best-found solution of the MWISP at the first CG iteration. 
+
+\paragraph{Compared pricing methods.} 
+\begin{itemize}
+    \item \textbf{Gurobi,} a state-of-the-art commercial Mixed-Integer-Programming (MIP) solver~\citep{gurobi2018gurobi}. Such a MIP solver is used as the pricing method for GCP by related work~\citep{malaguti2011exact}. By default, Gurobi aims to solve a MWISP to optimality, hence it spends most of its computational time on improving the duality bound. In addition to this default configuration, we include another setting, Gurobi-heur, that focuses on finding feasible solutions. This is done by setting the parameters `PoolSearchMode' to $2$, `PoolSolutions' to $10^8$, and `Heuristics' to $95\%$.
+    
+    \item \textbf{Ant Colony Optimization (ACO),} an efficient meta-heuristic that has been investigated for many combinatorial optimization problems~\citep{dorigo2006ant}. ACO maintains a probabilistic distribution during the solving process and constructs solutions by sampling from that distribution. We adopt the ACO variant as described in \citep{xu2007improved}.
+    
+    \item \textbf{Specialized methods.}  Since the optimal solution of a MWISP is the same as that of solving the Maximum Weight Clique Problem (MWCP) in its complementary graph, we also include three state-of-the-art MWCP solvers: 1) TSM~\citep{jiang2018two}, an exact solver based on the branch-and-bound framework with domain-specific knowledge for tightening the dual bounds; 2) LSCC~\citep{wang2016two}, a heuristic method based on Local Search; 3) Fastwclq~\citep{cai2016fast}, a heuristic method that constructs solutions in a greedy fashion with respect to a benefit-estimation function. 
+\end{itemize}
+
+\paragraph{Computational budgets, evaluation criteria, and other specifications.} Table~\ref{tab:budget} shows the computational budgets for solving small and large problem instances, respectively. In addition to an overall cutoff time for CG, we also set a cutoff time for solving the MWISP at every CG iteration. In particular, the exact methods are also subject to the time limit and are evaluated as heuristic methods. Moreover, we set for each of the pricing methods an individual termination condition. For LSCC based on Local Search (LS), we terminate LSCC if it cannot find better solutions for $50n$ LS iterations. This is because, empirically, LSCC can find high-quality solutions efficiently, and providing excessive computational time can hardly improve these solutions. For MLPH, ACO, and Fastwclq, we set the number of constructed solutions to $50n$. For TSM and Gurobi, they may terminate early when solving a MWISP instance to optimality. We use `add-partial' as the default column-selection method with the column limit $n$. When a pricing method fails to find any NRC column, TSM is used to solve the MWISP to optimality and the optimal column is added to the RMP to start the next iteration. 
+
+\begin{table}[t!]
+    \centering
+    \resizebox{0.9\columnwidth}{!}{\begin{tabular}{ccccc}
+        \toprule
+         Label & Total \# Instances & \begin{tabular}{@{}c@{}}Cutoff Time \\ (Overall)\end{tabular} & \begin{tabular}{@{}c@{}}Cutoff Time \\ (Pricing)\end{tabular} & \begin{tabular}{@{}c@{}}\# CPUs  \\ (Paralleled)\end{tabular}\\
+         \midrule
+         small & 1944 & 1800s & 30s & 1\\
+         large & 192 &  8000s & 150s & 4\\
+         \bottomrule
+    \end{tabular}}
+    \caption{Test instances and Computational Budget.}
+    \label{tab:budget}
+\end{table}
+
+We evaluate the performance of CG using a certain pricing heuristic based on two criteria, the computational time of CG for solved problem instances and the objective value of the RMP (the lower the better) for unsolved problem instances. The latter measures how close the solution of the RMP is to the optimal LP solution and so reflects the progress that CG has made. When reporting the results, we will address CG using a certain pricing method in short, e.g., CG-MLPH.  
+
+During CG the RMPs are solved by the default LP solver of Gurobi~\citep{gurobi2018gurobi}. The experiment is conducted on a cluster with $8$ nodes. Each node has $32$ CPUs (AMD EPYC Processor, 2245 MHz) and $128$ GB RAM. \added[id=yunzhuang]{Our code is written in C/C++ and is available online}\footnote{\url{https://github.com/Joey-Shen/MLPH.git}}.
+\section{Results \& Analysis}
+\label{exp:cg}
+
+
+\begin{figure}[t!]
+	\begin{tikzpicture}
+	\begin{groupplot}[group style = {group size = 2 by 1, horizontal sep = 50pt}, height=0.45\columnwidth, width=0.45\columnwidth, grid style={line width=.1pt, draw=gray!10},major grid style={line width=.2pt,draw=gray!30}, xlabel = \small Time (Hundred Seconds), xtick = {0,6,12,18}, ticklabel style = {font=\small}, xmajorgrids=true, ymajorgrids=true,  major tick length=0.05cm, minor tick length=0.0cm, legend style={font=\small, column sep = 1pt, legend columns = 3,draw=none}]
+   \nextgroupplot[%
+    legend to name=group1,
+    ylabel = \small \# Solve Instances,
+    y label style={at={(axis description cs:-0.375,.5)},anchor=south},
+    ]
+
+	\addplot[color=red, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/solving-curve/svm-cs-0.txt};\addlegendentry{\small CG-MLPH}
+	\addplot[color=purple, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/solving-curve/aco.txt};\addlegendentry{\small CG-ACO}
+	\addplot[color=blue, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/solving-curve/fastwclq.txt};\addlegendentry{\small CG-Fastwclq}
+	\addplot[color=gray, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/solving-curve/lscc.txt};\addlegendentry{\small CG-LSCC}
+	\addplot[color=olivegreen, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/solving-curve/tsm.txt};\addlegendentry{\small CG-TSM}
+	\addplot[color=black, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/solving-curve/gurobi.txt};\addlegendentry{\small CG-Gurobi}
+	\addplot[color=orange, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/solving-curve/gurobi-heur.txt};\addlegendentry{\small CG-Gurobi-heur}
+   \nextgroupplot[%
+    ylabel = \small LP Obective,
+    y label style={at={(axis description cs:-0.2,.5)},anchor=south},
+    ]
+	\addplot[color=red, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/lp-curve/svm-cs-0.txt};
+	\addplot[color=purple, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/lp-curve/aco.txt};
+	\addplot[color=blue, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/lp-curve/fastwclq.txt};
+	\addplot[color=gray, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/lp-curve/lscc.txt};
+	\addplot[color=olivegreen, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/lp-curve/tsm.txt};
+	\addplot[color=black, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/lp-curve/gurobi.txt};
+	\addplot[color=orange, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/small/lp-curve/gurobi-heur.txt};
+    \end{groupplot} 
+    \node at (group c1r1.north) [anchor=north, yshift=1.6cm, xshift=1.5cm] {\pgfplotslegendfromname{group1}}; 
+	\end{tikzpicture}
+\caption{Results for CG with different pricing methods for solving small problem instances. \textbf{Left:} the number of solved instances. \textbf{Right:} the objective values of the RMP (the lower the better), averaged over all problem instances using the geometric mean. }
+\label{fig:ret_small}
+\end{figure}
+
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{tikzpicture}
+    	\begin{axis}[%
+    	height=0.5\columnwidth, width=0.9\columnwidth, grid style={line width=.1pt, draw=gray!10},major grid style={line width=.2pt,draw=gray!30}, xlabel = \small Number of Nodes, xtick = {0,100, 1000,2500}, xmajorgrids=true, ylabel= \small Graph Density, ymajorgrids=true, xmode=log, log ticks with fixed point, major tick length=0.05cm, minor tick length=0.0cm, legend style={at={(1.15,1.4)}, column sep = 1pt, legend columns = 4,draw=none}, ticklabel style = {font=\small}, scatter/classes={%
+    		MLPH={mark=*,red},
+    		ACO={mark=*,purple},
+    		Fastwclq={mark=*,blue},
+    		LSCC={mark=*,gray},
+    		TSM={mark=*,olivegreen},
+    		Gurobi={mark=*,black},
+    		Gurobi_heur={mark=*,orange}}]
+    	\addplot[scatter,only marks,%
+    	    mark size=1.5pt,
+    		scatter src=explicit symbolic]%
+    	table[x=x, y=y,meta=label,col sep=comma] {data/cg/graph_compare.txt};
+            \legend{\small CG-MLPH, \small CG-ACO, \small CG-Fastwclp, \small CG-LSCC, \small CG-TSM, \small CG-Gurobi, \small CG-Gurobi-heur}
+    	\end{axis}
+    \end{tikzpicture} \caption{$81$ small graphs labeled by CG with the winning pricing method. MLPH is the best pricing method for $52$ graphs, followed by TSM for $12$ graphs, ACO for $8$ graphs, Fastwclq for $7$ graphs, Gurobi for $1$ graph, and LCSS for $1$ graph.}
+    \label{fig:gcompare}
+\end{figure}
+
+
+\paragraph{Results for CG using different pricing methods.} Figure~\ref{fig:ret_small} shows the solving statistics for small graphs. The left sub-figure shows that CG-MLPH can solve many more problem instances than CG using other pricing methods (with a given computational budget). The right sub-figure shows that CG-MLPH can make more substantial progress than the comparison methods over all test instances. Noticeably, CG-Fastwclq and CG-ACO have comparable performances, and they are better than the remaining methods we consider. To better understand the CG using different pricing methods with respect to graph characteristics, we report in Figure~\ref{fig:gcompare} the best method on individual graphs. Overall, we observe that MLPH is particularly suitable for CG on relatively larger and/or denser graphs. In contrast, Fastwclp, ACO, and TSM are only competitive on small and sparse graphs. 
+
+Table~\ref{tab:large} shows the results on large graphs for CG. \replaced[id=yunzhuang]{Note that the cutoff time is extended to $8,000$ seconds, and the compared pricing methods are parallelized on $4$ CPUs.}{using several pricing methods that can be paralleled.} It can be seen that CG-MLPH achieves the best performance on every individual graph, and it outperforms the other methods substantially in most cases. In contrast, the other methods are only competitive for certain graphs. Notably, CG-MLPH can optimally solve some problem instances, while other methods cannot solve any instance to optimality. 
+\begin{table}[t!]
+    \centering
+    \resizebox{\columnwidth}{!}{\begin{tabular}{@{}lrlrrrrr@{}}
+        \toprule
+        Graph & \# Nodes & Density & CG-MLPH & CG-ACO & CG-Gurobi & CG-Gurobi-heur & CG-Fastwclq  \\ 
+        \cmidrule(lr){1-3} \cmidrule(lr){4-8}
+        wap04a & 5231 & 0.022 & \textbf{44.45} & 75.07 & 56.0 & 55.46 & 81.13 \\
+        wap03a & 4730 & 0.026 & \textbf{44.87} & 70.09 & 54.09 & 54.50 & 76.04 \\
+        4-FullIns\_5 & 4146 & 0.009 & \textbf{6.68} & 12.32 & 9.60 & 7.67 & 7.91 \\
+        C4000.5 & 4000 & 0.500 & \textbf{263.47} & 264.55 & 304.80 & 304.89 & 286.65 \\
+        wap02a & 2464 & 0.037 & \textbf{40.02} (3) & 58.57 & 42.69 & 43.49 & 64.52 \\
+        wap01a  & 2368 & 0.040 & \textbf{41.0} (24) & 56.21 & 42.71 & 43.34 & 62.13 \\
+        C2000.5  & 2000 & 0.500 & \textbf{137.91} & 140.78 & 164.60 & 164.62 & 141.98 \\\
+        ash958GPIA & 1916 & 0.007 & \textbf{3.37} & \textbf{3.37} & 3.45 & 3.42 & 3.41 \\
+        \cmidrule(lr){1-3} \cmidrule(lr){4-8}
+        Geometric Mean & - & - & \textbf{37.09} & 49.20 & 43.08 & 42.15 & 49.49 \\
+        \bottomrule
+    \end{tabular}}
+    \caption{The mean LP objective values (the lower the better) for CG with different pricing methods for large graphs. The results are averaged over the $24$ problem instances generated using the same graph. The number of solved instances (if any) is shown in brackets.}
+    \label{tab:large}
+\end{table}
+
+\begin{table*}[t!]
+    \centering
+    \resizebox{0.95\textwidth}{!}{\begin{tabular}{@{}lrlrrrrrrrrrr@{}}
+        \toprule
+                \multirow{2}{*}{Graph} & \multirow{2}{*}{\# Nodes} & \multirow{2}{*}{Density} & \multicolumn{5}{c}{\# Columns with Negative Reduced Costs} & \multicolumn{5}{c}{Minimum Reduced Cost} \\
+         & & & MLPH & ACO & Gurobi & Gurobi-heur & Fastwclq & MLPH & ACO & Gurobi & Gurobi-heur &Fastwclq \\ 
+         \cmidrule(lr){1-3}\cmidrule(lr){4-8}\cmidrule(lr){9-13}
+        wap04a & 5231 & 0.022 & 191494.5 & 277.8 & 5.5 & 23.0 & 0.0 & -2.48 & -0.37 & -3.11 & -2.94 & N/A \\
+        wap03a & 4730 & 0.026 & 234610.1 & 277.8 & 5.8 & 42.1 & 0.0 & -2.44 & -0.35 & -3.05 & -3.04 & N/A \\
+        4-FullIns\_5 & 4146 & 0.009 & 28273.2 & 26.3 & 3.0 & 4820.1 & 676.8 & -4.37 & -0.55 & -4.37 & -4.38 & -3.93 \\
+        C4000.5 & 4000 & 0.500& 185611.9 & 140979.4 & 2.4 & 1.1 & 89.8 & -0.49 & -0.39 & -0.24 & -0.15 & -0.30 \\
+        wap02a & 2464 & 0.037 & 123309.2 & 202.7 & 10.8 & 1064.8 & 0.0 & -1.76 & -0.33 & -2.30 & -2.29 & N/A \\
+        wap01a & 2368 & 0.040 & 118508.7 & 243.0 & 10.6 & 1132.1 & 0.0 & -1.79 & -0.36 & -2.32 & -2.33 & N/A\\
+        C2000.5 & 2000 & 0.500& 89512.1 & 91193.0 & 1.9 & 1.7 & 253.5 & -0.50 & -0.42 & -0.23 & -0.23 & -0.38\\
+        ash958GPIA & 1916 & 0.007 & 95888.6 & 1962.9 & 29.1 & 1507.0 & 58.0 & -0.12 & -0.05 & -0.20 & -0.20 & -0.06 \\
+        \bottomrule
+    \end{tabular}}
+    \caption{Results for different pricing methods solving the MWISP at the initial CG iteration for large problem instances. The first statistic shows the number of columns with negative reduced costs that a pricing method can find. The second statistic shows the reduced cost of the best column that a pricing method can find. Both statistics are averaged over $24$ problem instances generated using the same graph.}
+    \label{tab:pp}
+\end{table*}
+
+\paragraph{MLPH as a competitive pricing method.} For the set of $8$ large graphs, Table~\ref{tab:pp} compares the performances of different pricing methods for solving the pricing problems in the initial CG iteration (to ensure the results used for compared methods are from solving the same set of MWISPs). Comparing MLPH with other pricing methods, MLPH can find many more NRC columns. Furthermore, the quality of the best-found column by MLPH is highly competitive. Subsequently, CG-MLPH achieves the best performance overall~(Table~\ref{tab:large}). In addition, it can be noted that CG-MLPH solves all problem instances on the graph `wap01a' to optimality using an average number of $36.5$ iterations, while CG methods based on other pricing methods cannot optimally solve any of these, having at a minimum,  an average number of $43.7$ iterations. For other pricing methods, we can also observe that the good performance of CG with a certain pricing method is often accompanied by finding many high-quality columns by that pricing method, such as ACO for dense graphs (e.g., `C4000.5') and Fastwclq for sparse graphs (e.g., 4-FullIns\_5). Similar observations can be also made from the results on small graphs as shown in the Appendix. 
+
+The results indicate that finding a large number of high-quality columns can accelerate the progress of CG. In particular, our proposed MLPH can find a large number of high-quality NRC columns, thereby helping CG obtain much better LP objective values for unsolved problem instances or spending many fewer CG iterations for solved problem instances. 
+
+
+
+\begin{figure}[t!]
+    \centering
+	\begin{tikzpicture}
+	\begin{groupplot}[group style = {group size = 2 by 1, horizontal sep = 50pt}, height=0.45\columnwidth, width=0.45\columnwidth, grid style={line width=.1pt, draw=gray!10},major grid style={line width=.2pt,draw=gray!30}, xmajorgrids=true, ymajorgrids=true,  major tick length=0.05cm, minor tick length=0.0cm, legend style={font=\small, column sep = 1pt, legend columns = 3,draw=none},ticklabel style = {font=\small}]
+   \nextgroupplot[%
+    ylabel = \small LP Obective,
+        y label style={at={(axis description cs:-0.2,.5)},anchor=south},
+        xlabel = \small $i^{th}$ CG iteration, xtick = {1,5,10}
+    ]
+	\addplot[color=black, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/large-cs/lp-curve-cg/svm-cs-1.txt};
+	\addplot[color=red, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/large-cs/lp-curve-cg/svm-cs-0.txt};
+	\addplot[color=blue, line width=0.45mm] table [x=x, y=y, col sep=comma]
+	{data/cg/large-cs/lp-curve-cg/svm-cs-5.txt};
+    \nextgroupplot[%
+    legend to name=group2,
+    ylabel = \small LP Objective,
+    y label style={at={(axis description cs:-0.2,.5)},anchor=south},
+    xlabel = \small Time (Thousand Seconds), xtick = {0,4, 8},
+    ]
+	\addplot[color=black, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/large-cs/lp-curve/svm-cs-1.txt};\addlegendentry{add-all}
+	\addplot[color=red, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/large-cs/lp-curve/svm-cs-0.txt};\addlegendentry{add-partial}
+	\addplot[color=blue, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/cg/large-cs/lp-curve/svm-cs-5.txt};\addlegendentry{replace-existing}
+    \end{groupplot} 
+    
+    \node at (group c1r1.north) [anchor=north, yshift=0.8cm, xshift=2cm]
+    {\pgfplotslegendfromname{group2}}; 
+	\end{tikzpicture}
+\caption{CG-MLPH using different column-selection strategies for large problem instances (on the left, the $x$-axis is the number of CG iterations; on the right, the $x$-axis is the wall clock time).}
+\label{fig:ret_cs_large}
+\end{figure}
+
+\paragraph{Efficiency and effectiveness trade-off in column selection.} As shown in the left of Figure~\ref{fig:ret_cs_large}, adding all the NRC columns generated at every CG iteration (i.e., `add-all') results in the faster convergence of the LP objective. On the other hand  keeping a fixed number of columns in the RMP, by replacing the existing columns already in the RMP with newly generated NRC columns (i.e., `replace-existing'), tends to slow down the progress of CG. This shows that adding more columns can increase the chance of capturing the optimal LP columns. When measuring the progress of CG in wall-clock time as shown on the right, we observe that `add-all' and `replace-existing' are comparable because `add-all' increases the computational burden for solving the fast-growing RMP. Compared to these two methods, adding a proportion ($n$ in our case) of the best NRC columns (`add-partial') better balances the trade-off between efficiency and effectiveness.
+\section{Branch-and-price with MLPH}
+In this part, we use CG-MLPH to enhance Branch-and-Price~(B\&P), an exact method that solves a GCP to optimality by recursively decomposing the original problem (root node) into subproblems (child nodes). During the solving process, CG is used at every node to compute their LP bounds (lower bounds), and a node can be safely pruned without further expansion if its lower bound is no better than the current best-found solution.
+\subsection{Setup}
+We use the B\&P code from an open-source MIP solver, SCIP~\citep{gamrath2020scip}. For CG, in particular, an efficient greedy search is used as the pricing heuristic for tackling MWISPs. Only when it fails to generate any NRC column, an exact method called $t$-clique is used to find the optimal column to either certify the optimality of the LP or start the next CG iteration with the optimal column added to RMP. Once the LP at the current node is solved, the node is branched into child nodes, and the columns generated at this node are passed into the child nodes. Furthermore, the B\&P implementation incorporates specialized techniques to GCP from previous studies~\citep{mehrotra1996column,malaguti2011exact}, and more details can be found in the Appendix. 
+
+
+
+
+
+We refer to the default setup of B\&P as B\&P-def, and compare it with B\&P-MLPH that replaces the greedy search in B\&P-def with the MLPH for solving MWISPs. Although the greedy search has negligible computational cost, it is less effective as it can only construct a single column at a CG iteration. In contrast, our MLPH can sample many high-quality columns effectively. Empirically, we examine the sample size $\lambda$ of MLPH in $\{10n, n, 0.1n\}$, and observe that no single sample size can fit all graph benchmarks. To best contrast our B\&P-MLPH with B\&P-def, we report the results when $\lambda=10n$. From newly generated NRC columns, we add at most $\theta$ columns into the RMP in the increasing order of their reduced costs, $\theta=n$ for the root node and $\theta=0.1n$ for child nodes. We observe that setting a smaller $\theta$ in column selection for child nodes can reduce the memory required for storing all the columns generated during the B\&P process without sacrificing the performance. This is because child nodes often have a sufficient number of quality columns inherited from their parents and their initial RMPs are already close to the optimum. 
+
+
+For each method, a total number of $1584$ seeded runs are performed to solve the GCPs on a set of~$66$ graphs in the Graph Coloring Benchmarks. The excluded graphs are either too easy (both methods can solve them within $10$ seconds) or too hard to solve (both methods cannot solve the LP at the root node) under the cutoff time of $8000$ seconds. When the LP at the root node is solved to optimality, we report optimality gap, defined as $Gap = 100\% \times \frac{upper\_bound - global\_lower\_bound}{upper\_bound}
+$. The upper bound is the objective value of the best-found solution and the global lower bound is determined by the smallest lower bound amongst the remaining open tree nodes.
+\subsection{Results}
+\begin{figure}[t!]
+    \centering
+	\begin{tikzpicture}
+	\begin{axis}[height=0.45\columnwidth, width=0.55\columnwidth, grid style={line width=.1pt, draw=gray!10},major grid style={line width=.2pt,draw=gray!30}, xmajorgrids=true, ymajorgrids=true,  major tick length=0.05cm, minor tick length=0.0cm, ylabel = \small \# Runs, y label style={at={(axis description cs:-0.275,.5)},anchor=south}, xlabel = \small Optimality Gap (\%), xtick = {0, 25, 50}, ytick = {500, 1000, 1500}, legend style={at={(1.1,0.5)},anchor=west, font=\small,draw=none}, ticklabel style = {font=\small}]
+	\addplot[color=red, line width=0.45mm] table [x=x, y=y, col sep=comma]
+	{data/bp/gap-curve/mlhp-mix-10n-0.1n.txt};\addlegendentry{\small B\&P-MLPH}
+	\addplot[color=blue, line width=0.45mm] table [x=x, y=y, col sep=comma] {data/bp/gap-curve/greedy.txt};\addlegendentry{\small B\&P-def}
+    \end{axis} 
+	\end{tikzpicture}
+    \caption{The number of runs where a GCP instance can be solved within a certain optimality gap threshold.}
+    \label{fig:bp_gap}
+\end{figure}
+
+
+Figure~\ref{fig:bp_gap} shows the number of runs for which B\&P-def and B\&P-MLPH can obtain optimality gap within a certain threshold value. We can observe that 1) B\&P-MLPH (red) solves GCP within a certain optimality gap in more runs than B\&P-def (blue); 2) B\&P-MLPH solves GCP to optimality ($Gap = 0\%$) in $482$ runs, better than $444$ runs by B\&P-def; 3) B\&P-MLPH obtains optimality gap (i.e., the LP at the root node is solved) on GCPs in $1524$ runs, whereas B\&P-def obtains optimality gap in $1325$ runs. 
+
+
+\begin{table}[t!]
+    \centering
+    \resizebox{0.85\linewidth}{!}{\begin{tabular}{@{}lrlrr@{}}
+        \toprule
+        \multirow{2}{*}{Instance} & \multirow{2}{*}{\# Nodes} &
+        \multirow{2}{*}{Density} & 
+        \multicolumn{2}{c}{Solving Time in Seconds} \\
+         & & & B\&P-MLPH & B\&P-def\\
+        \cmidrule(lr){1-3}\cmidrule(lr){4-5}
+        
+         r125.5 & 109 & 0.565 & \textbf{12} & 13 \\
+         le450\_25b & 294 & 0.29 & \textbf{14} & 16 \\
+         school1 & 355 & 0.603 & \textbf{51} & 1966 \\
+         ash331GPIA & 661 & 0.038 & \textbf{53} & 307 \\
+         qg.order30 & 900 & 0.129 & \textbf{58} & 60 \\
+         will199GPIA & 660 & 0.054 & \textbf{70} & 128 \\
+         flat300\_20\_0 & 300 & 0.953 & \textbf{84} & 343 \\
+         DSJR500.1c & 311 & 0.972 & \textbf{99} & 109 \\
+         flat300\_26\_0 & 300 & 0.965 & \textbf{223} & 1910 \\
+        \cmidrule(lr){1-3}\cmidrule(lr){4-5}
+        le450\_25a & 264 & 0.336 & 14 & \textbf{13} \\
+         DSJC125.9 & 125 & 0.898 & 32 & \textbf{29} \\
+         qg.order100 & 10000 & 0.04 & 6259 & \textbf{6127} \\
+        \bottomrule
+    \end{tabular}}
+ \caption{Results for graphs solved by both B\&P methods in all runs.}
+  \label{tab:bp1}
+\end{table}
+
+\begin{table}[t!]
+    \centering
+    \resizebox{0.85\linewidth}{!}{\begin{tabular}{@{}lrlrr@{}}
+        \toprule
+        \multirow{2}{*}{Instance} & \multirow{2}{*}{\# Nodes} &
+        \multirow{2}{*}{Density} &
+        \multicolumn{2}{c}{ Gap (\# Root Solved)} \\
+         & & & B\&P-MLPH & B\&P-def \\
+        \cmidrule(lr){1-3}\cmidrule(lr){4-5}
+        
+        queen16\_16 & 256 & 0.387 & \textbf{11.1} (\textbf{24}) & N/A (0) \\
+        queen15\_15 & 225 & 0.411 & \textbf{11.8} (\textbf{24}) & N/A (0) \\
+        le450\_25d & 433 & 0.366 & \textbf{10.7} (\textbf{24}) & N/A (0) \\
+        le450\_15b & 410 & 0.187 & \textbf{6.2} (\textbf{24}) & N/A (0) \\
+        le450\_25c & 435 & 0.362 & \textbf{10.7} (\textbf{24}) & N/A (0) \\
+        le450\_15a & 407 & 0.189 & \textbf{6.2} (\textbf{24}) & N/A (0) \\
+        DSJC250.9 & 250 & 0.896 & \textbf{2.3} (24)  & 4.1 (24)\\
+        wap06a & 703 & 0.288 & \textbf{4.8} (\textbf{24}) & N/A (0) \\
+        DSJC1000.9 & 1000 & 0.9 & 11.5 (\textbf{24}) & 11.5 (17) \\
+        myciel6 & 95 & 0.338 & \textbf{31.0} (24)  & 42.9 (24)  \\
+        qg.order40 & 1600 & 0.098 & \textbf{2.4} (\textbf{24}) & N/A (0) \\
+        myciel5 & 47 & 0.437 & \textbf{22.9} (24) & 32.6 (24) \\
+        
+        \cmidrule(lr){1-3}\cmidrule(lr){4-5}
+         1-Insertions\_5 & 202 & 0.121 & 43.8 (24) & \textbf{33.3} (24) \\
+         2-Insertions\_5 & 597 & 0.044 & 50.0 (1) & 50.0 (\textbf{24})  \\
+         3-Insertions\_5 & 1406 & 0.02 & N/A (0) & \textbf{50.0} (\textbf{24}) \\
+         4-Insertions\_4 & 475 & 0.032 & 40.0 (15) & 40.0 (\textbf{24})  \\
+         r1000.5 & 966 & 0.989 & 7.8 (24) & \textbf{1.2} (24) \\
+        \bottomrule
+    \end{tabular}}
+     \caption{Results for graphs not solved by either of the two methods.}
+  \label{tab:bp2}
+\end{table}
+
+\begin{table}[t!]
+    \centering
+    \resizebox{0.85\linewidth}{!}{\begin{tabular}{@{}lrlrr@{}}
+        \toprule
+        \multirow{2}{*}{Instance} & \multirow{2}{*}{\# Nodes} &
+        \multirow{2}{*}{Density} &
+        \multicolumn{2}{c}{\# Optimally Solved Runs} \\
+         & & & B\&P-MLPH & B\&P-def \\
+        \cmidrule(lr){1-3}\cmidrule(lr){4-5}
+         le450\_5d & 450 & 0.193 & \textbf{21} & 10 \\
+         le450\_5c & 450 & 0.194 & \textbf{21} & 1 \\
+         ash608GPIA & 1215 & 0.021 & \textbf{24} & 0 \\
+         2-Insertions\_3 & 37 & 0.216 & \textbf{17} & 9 \\
+         DSJR500.5 & 486 & 0.972 & \textbf{17} & 15 \\
+        \cmidrule(lr){1-3}\cmidrule(lr){4-5}
+         1-FullIns\_4 & 38 & 0.364 & 18 & \textbf{23} \\
+        queen9\_9 & 81 & 0.652 & 0 & \textbf{2} \\
+        \bottomrule
+    \end{tabular}}
+ \caption{Results for graphs solved by the two methods in some~runs.}
+  \label{tab:bp3}
+\end{table}
+
+
+Next, we report the numerical results on $36$ benchmark graphs where the performance of the two compared methods are significantly different (according to the student's $t$-test with a significance level of $0.05$). The results are grouped into Tables 4-6 based on their comparative performances. Table~\ref{tab:bp1} shows the results for graphs that can be optimally solved by both methods in all runs. Here, B\&P-MLPH uses less solving time than B\&P-def on $9$ graphs, and the speed-up is substantial on graphs such as `school1' ($38\times$) and `flat300\_26\_0' ($8\times$). In contrast, B\&P-def performs slightly better than B\&P-MLPH only on $3$ graphs. Table~\ref{tab:bp2} shows the results for hard graphs not solved by any method. B\&P-MLPH can still solve the LP at the root node for most graphs and runs. However, B\&P-def fails to solve the LP at the root node for many graphs, resulting in no optimality gap for those graphs. Table~\ref{tab:bp3} shows the results for the remaining graphs. B\&P-MLPH can solve GCP to optimality on more graphs and in more runs, compared to B\&P-def. Overall, B\&P-MLPH significantly outperforms B\&P-def on $26$ out of 36 graphs.
+
+
+Apart from these promising results, our studies also show that MLPH can be better integrated into B\&P based on certain conditions. Firstly, if the MWISP can be solved by an exact method efficiently on a graph, then it is not necessary to use MLPH (or any other pricing heuristic). In particular, on the set of $10$ graphs where B\&P-MLPH does not outperform B\&P-def, the performance of B\&P without using any pricing heuristic is on par with B\&P-def's. Secondly, if the improvement of the RMP becomes very slow, i.e., the tailing-off effect~\citep{gilmore1961linear}, an exact method can be used occasionally to solve MWISP to optimality even if MLPH can still find NRC columns. This is because MLPH is likely to keep finding NRC columns, which prevents the execution of the exact method from finding the optimal column and computing the Lagrangian lower bound. This reduces the chance of an early termination of CG. When applying this condition, we observe improved results of B\&P-MLPH on $12$ graphs. The detailed results can be found in the Appendix.
+\section{Related Work}
+Machine Learning for combinatorial optimization has received a lot of attention in recent years \citep{bengio2020machine}. Existing studies have applied ML in a variety of ways, such as learning variable selection methods \citep{khalil2016learning, gasse2019exact, liu2020learning, furian2021machine} or node selection methods \citep{he2014learning, furian2021machine} for exact branch-and-bound solvers; learning to select the best algorithm among its alternatives based on the problem characteristics~\citep{di2016dash,khalil2017learning}; learning to determine whether to perform problem reformulation~\citep{kruber2017learning, bonami2018learning} or problem reduction~\citep{sun2019using, ding2020accelerating}; learning primal heuristics aiming to construct an optimal solution directly \citep{dai2017learning,kool2018attention}; and learning to select columns for column generation~\citep{Morabit2020mlcs}.
+
+
+Our work is in line with the recent studies in predicting optimal solutions for combinatorial optimization problems~\citep{li2018combinatorial,sun2019using,ding2020accelerating,sun2020generalization,sun2020boosting}. However, we are the first to leverage machine learning to develop a pricing heuristic for CG, to our knowledge. More specifically, the existing machine-learning-based heuristic methods focus on \emph{effectively finding a single best solution} (hopefully an optimal one) for a single problem instance, while our pricing heuristic aims to \emph{efficiently generate many high-quality solutions} by solving a series of pricing problems.
+\section{Conclusion \& Future Work}
+This paper presents a Machine-Learning-based Pricing Heuristic (MLPH) for tackling NP-hard pricing problems repeatedly encountered in the process of Column Generation~(CG). Specifically, we employ Support Vector Machine with linear kernel to fast predict `the optimal solution' for an NP-hard pricing problem, which is then adopted by a sampling-based method to \emph{construct many high-quality columns efficiently}. 
+
+On the graph coloring problem, we demonstrate the efficacy of MLPH for solving its pricing problem - the maximum weight independent set problem. We demonstrate that MLPH can generate many more high-quality columns efficiently than existing state-of-the-art exact and heuristic methods. As a result, MLPH can significantly reduce the CG's computational time and enhance the branch-and-price exact method.
+
+\added[id=YS]{In future work, we would like to extend our MLPH method to other combinatorial optimization problems such as vehicle routing problems. Our overarching aim is to develop a \emph{generic} ML-based pricing heuristic to speed up CG and branch-and-price for solving the Dantzig-Wolfe reformulation of combinatorial optimization problems.}
+
+
+
+
+
+
+\bibliography{lib}

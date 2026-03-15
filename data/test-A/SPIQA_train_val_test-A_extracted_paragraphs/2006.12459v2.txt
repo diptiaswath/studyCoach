@@ -1,0 +1,533 @@
+\section{Introduction}
+\label{sec:introduction}
+Density estimation algorithms that minimize the cross entropy between a data distribution and a model distribution can be interpreted as lossless compression algorithms because the cross-entropy upper bounds the data entropy. While autoregressive neural networks \citep{uria2014deep, theis2015generative, oord2016pixel, salimans2017pixelcnn++} and variational auto-encoders \citep{kingma2013auto, rezende2015variational} have seen practical connections to lossless compression for some time, normalizing flows were only recently used for lossless compression.
+Most normalizing flow models are designed for real-valued data, which complicates an efficient connection with entropy coders for lossless compression since entropy coders require discretized data. However, normalizing flows for real-valued data were recently connected to bits-back coding by \citet{ho2019local}, opening up the possibility for efficient dataset compression with high compression rates. Orthogonal to this, \citet{tran2019discreteflows} and \citet{hoogeboom2019idf} introduced normalizing flows for discrete random variables. \citet{hoogeboom2019idf} demonstrated that integer discrete flows can be connected directly to entropy coders without the need for bits-back coding. 
+
+In this paper we aim to improve integer discrete flows for lossless compression. Recent literature has proposed several hypotheses on the weaknesses of this model class, which we investigate as potential directions for improving compression performance. More specifically, we start by discussing the claim on the flexibility of normalizing flows for discrete random variables by \citet{papamakarios2019normalizing}, and we show that this limitation on flexibility does not apply to integer discrete flows. We then continue by discussing the potential influence of gradient bias on the training of integer discrete flows. We demonstrate that other less-biased gradient estimators do not improve final results. Furthermore, through a numerical analysis on a toy example we show that the straight-through gradient estimates for 8-bit data correlate well with finite difference estimates of the gradient.
+We also demonstrate that the previously observed performance degradation as a function of number of flows is highly dependent on the architecture of the coupling layers. Motivated by this last finding, we introduce several architecture changes that improve the performance of this model class on lossless image compression.
+\section{Related work}
+\textbf{Continuous Generative Models:} Continuous generative flow-based models \citep{chen2001gauss, dinh2014nice, dinh2016density} are attractive due to their tractable likelihood computation. Recently these models have demonstrated promising performance in modeling images \citep{ho2019flowpp, kingma2018glow}, audio \citep{kim2018flowavenet}, and video \citep{kumar2019videoflow}. We refer to \citet{papamakarios2019normalizing} for a recent comprehensive review of the field.
+
+By discretizing the continuous latent vectors of variational auto-encoders and flow-based models, efficient lossless compression can be achieved using bits-back coding \citep{hinton1993keeping}. Recent examples of such approaches are Local Bits-Back Coding with normalizing flows \citep{ho2019local} and variational auto-encoders with bits-back coding such as Bits-Back with ANS \citep{townsend2019practical}, Bit-Swap \citep{kingma2019bit} and HiLLoC \citep{townsend2019hilloc}. These methods achieve good performance when compressing a full dataset, such as the ImageNet test set, since the auxiliary bits needed for bits-back coding can be amortized across many samples. However, encoding a single image would require more bits than the original image itself \citep{ho2019local}. 
+
+\textbf{Learned discrete lossless compression:} Producing discrete codes allows entropy coders to be directly applied to single data instances. 
+\citet{mentzer2019practical} encode an image into a set of discrete multiscale latent vectors that can be stored efficiently. 
+Fully autoregressive generative models condition unseen pixels directly on the previously observed pixel values and have achieved the best likelihood values compared to other models \citep{oord2016pixel, salimans2017pixelcnn++}. However, decoding with these models is impractically slow since the conditional distribution for each pixel has to be computed sequentially.
+Recently, super-resolution networks were used for lossless compression \citep{cao2020lossless} by storing a low resolution image in raw format and by encoding the corrections needed for lossless up-sampling to the full image resolution with a partial autoregressive model. Finally, \citet{mentzer2020learning} first encode an image using an efficient lossy compression algorithm and store the residual using a generative model conditioned on the lossy image encoding.
+
+\textbf{Hand-designed Lossless Compression Codecs: }
+The popular PNG algorithm \citep{boutell1997png} leverages a simple autoregressive model and the DEFLATE algorithm \citep{deutsch1996deflate} for compression. WebP \citep{webp} uses larger patches for conditional compression coupled with a custom entropy coder. In its lossless mode, JPEG~2000 \citep{rabbani2002jpeg2000} transforms an image using wavelet transforms at multiple scales before encoding. Lastly, FLIF \citep{sneyers2016flif} uses an adaptive entropy coder that selects the local context model using a per-image learned decision tree.
+\section{Background: normalizing flows}
+\label{sec:normalizing_flows}
+In this section we briefly review normalizing flows for real-valued and discrete random variables.
+A normalizing flow consists of a sequence of invertible functions applied to a random variable $\bs x$: $f^K \circ f^{K-1} \circ ... \circ f^{1} (\bs x)$, yielding random variables $\bs y^{K}\leftarrow ... \leftarrow \bs y^{1} \leftarrow \bs y^{0} = \bs x$. 
+First, consider a real-valued random variable $\bs x\in \mathbb R^d$ with unknown distribution $p_{\bs x}(\bs x)$. Let $f : \mathbb R^d \mapsto \mathbb R^d$ be an invertible function that such that $\bs y = f(\bs x)$ with $\bs y \in \mathbb R^d$. 
+If we impose a density $p_{\bs y}(\bs y)$ on $\bs y$, the distribution $p_{\bs x}(\bs x)$ is obtained by marginalizing out $\bs y$ from the joint distribution $p_{\bs x, \bs y}(\bs x, \bs y) = p_{\bs x|\bs y}(\bs x|\bs y) p_{\bs y}(\bs y)$:
+\begin{align}
+    p_{\bs x}(\bs x) \!= \!\!\int  \!\!\delta(\bs x \!-\! f\inv(\bs y)) p_{\bs y}(\bs y)\mathrm d\bs y
+    =\!\!\int \!\!\delta(\bs x\! - \!\bs u) p_{\bs y}(f(\bs u)) \bigg \vert \! \det\!  \frac{\partial f(\bs u) }{\partial \bs u}\bigg \vert \mathrm d\bs u
+    = p_{\bs y} (f(\bs x)) \bigg \vert\! \det\!  \frac{\partial f(\bs x) }{\partial \bs x}\bigg \vert ,
+    \label{eq:change_of_variables}
+\end{align}
+where we used $ p_{\bs x|\bs y}(\bs x|\bs y) = \delta(\bs x - f^{-1}(\bs y))$, with $\delta(x-x')$ the Dirac delta distribution, and we applied a change of variables.
+Repeated application of \eqref{eq:change_of_variables} for a sequence of transformations then yields the log-probability:
+\begin{align}
+    \ln p_{\bs x} (\bs x) =  \ln p_{\bs y^K} (\bs y^K) + \sum_{k=1}^K \ln \bigg\vert \det  \frac{\partial \bs y^{k} }{\partial \bs y^{k-1}}\bigg \vert \; .
+\end{align}
+By parameterizing the invertible functions with invertible neural networks and by choosing a tractable distribution $p_{\bs y^K}(\bs y^K)$ these models can be used to optimize the log-likelihood of $\bs x$. 
+When modeling discrete data with continuous flow models, dequantization noise must be added to the input data to ensure that a lower bound to the discrete log-likelihood is optimized \citep{uria2013rnade, theis2015note, ho2019flowpp}.
+\subsection{Discrete normalizing flows}
+Next, consider $\bs x$ to be a discrete random variable with domain $\mathcal X$, and define the invertible function $f: \mathcal X \mapsto \mathcal X$. In general $f$ can be a mapping between two different domains, but for our discussions it will be sufficient to consider a single domain. 
+The marginal probability mass of $\bs x$ is given by
+\begin{align}
+    p_{\bs x}(\bs x) = \sum_{\bs y \in \mathcal X} p_{\bs x|\bs y}(\bs x|\bs y) p_{\bs y}(\bs y) = \sum_{\bs y \in \mathcal X} \delta_{\bs x, f^{-1}(\bs y)} p_{\bs y}(\bs y) = p_{\bs y} (f(\bs x)) \; ,
+    \label{eq:change_of_variables_discrete}
+\end{align}
+with the Kronecker delta function $\delta_{i,j} = 1$ if $i=j$ and $0$ otherwise.
+Note the absence of a volume correction in the form of a Jacobian determinant owing to the fact that probability mass functions only have support on a discrete set of points.
+
+Recently, \citet{tran2019discreteflows} and \citet{hoogeboom2019idf} have both considered normalizing flows for discrete random variables. 
+In integer discrete flows (IDF) by \citet{hoogeboom2019idf} the random variables are assumed to be integers, i.e. $\mathcal X = \mathbb Z^d$. 
+The main building block of IDF is an additive bipartite coupling layer \citep{dinh2016density}:
+\begin{align}
+    \begin{bmatrix}
+    \bs y_a \\
+    \bs y_b 
+    \end{bmatrix}
+    = 
+    \begin{bmatrix}
+    \bs x_a \\
+    \bs x_b + \lfloor \bs t_{\bs \theta}(\bs x_a) \rceil 
+    \end{bmatrix} \;.
+    \label{eq:idf_bijector}
+\end{align}
+Here $\bs y_a \in \mathbb Z^m$, $\bs y_b \in \mathbb Z^n$ are obtained by splitting $\bs y \in \mathbb Z^d$ into two pieces such that $m + n = d$, and similarly for $\bs x_a$ and $\bs x_b$. 
+The pre-quantized translation $\bs t_{\bs \theta}(\cdot)$ is represented by the output of a neural network with learnable parameters $\bs\theta$, and is rounded to integer values with the rounding operator $\lfloor \cdot \rceil$.
+The parameters $\bs\theta$ are optimized with a straight-through estimator and a gradient-based optimizer. 
+
+\citet{tran2019discreteflows} introduce flows for non-ordinal discrete random values with a finite number of possible values: $\bs x \in \mathcal X = \{0, 1, ..., K-1\}^d$. They introduce an autoregressive and a coupling bijector, with the coupling layer given by $[\bs y_a ,\bs y_b] = [\bs x_a, \left( \bs s_{\theta}(\bs x_a)\circ \bs x_b + \bs t_{\theta}(\bs x_a) \right) \mathrm{mod} K]$, with $\circ$ denoting element-wise multiplication and $\bs s \in\{1, 2 ..., K-1\}$ and $\bs t \in \{0, 1, ..., K-1\}$ and $\bs s$ and $K$ constrained to be co-prime. Gradients are again computed with a straight-through estimator.
+
+
+One of the main differences between discrete flows \citep{tran2019discreteflows} and integer discrete flows \citep{hoogeboom2019idf} is that the former treats the random variable as having a finite number of classes while the latter considers a countably infinite number of classes. In the next section we will see that this difference plays an important role in the theoretical flexibility of invertible flows for discrete random variables.
+\section{Can integer discrete flows factorize any distribution?}
+\label{sec:flex}
+In this section we discuss the theoretical flexibility of normalizing flows for discrete random variables. In particular, we will focus on the ability to map from a distribution with dependencies across all dimensions to a distribution which is fully factorized (i.e. independent across all dimensions). As generative flow models require a tractable base distribution with efficient sampling, simple base distributions (e.g. Gaussian, logistic, categorical) which are independent across dimensions/subpixels are frequently used. \citet{papamakarios2019normalizing} state that invertible flows for discrete random variables cannot map all distributions to a factorized base distribution, and name this as a limitation as compared to flows for real-valued random variables. 
+We will analyze this claim and show that this limitation can be overcome by embedding the discrete data into a space with a larger set of possible values. Since integer discrete flows embed the data into the integer lattice $\mathbb Z^d$, this model class naturally does not suffer from a limited factorization capacity. 
+
+The starting point for this discussion lies in the observation by \citet{papamakarios2019normalizing} that invertible normalizing flows for discrete random variables can only permute probability masses in the probability tensor that represents the probability distribution of the random variable. 
+In other words, if we have an invertible function $f: \mathcal X \mapsto \mathcal X$, then there is always exactly one $\bs y$, such that $\bs y = f (\bs x)$ and $p_{\bs x} (\bs x) = p_{\bs y} (\bs y)$. 
+In contrast, non-volume preserving normalizing flows for real-valued random variables can increase or decrease the density through the Jacobian determinant in the change of variables formula in \eqref{eq:change_of_variables}.
+
+\citet{papamakarios2019normalizing} then discuss an educative example to show that this permutation property can lead to a limited ability to factorize distributions.
+Consider the case of a two-dimensional random variable $\bs{x} = (x_1, x_2)$, with $x_1, x_2 \in \{0,1\}$, and a data distribution given by
+\begin{align}
+    p_{\bs x}(x_1, x_2) : 
+    \begin{blockarray}{c c c }
+           x_{1}\backslash x_2  & 0 & 1 \\ 
+        \begin{block}{c (c c) }
+            0 & 0.1 & 0.3 \\
+            1 & 0.2 & 0.4 \\
+        \end{block}
+    \end{blockarray}\;.
+    \label{eq:examplepapamakarios}
+\end{align}
+In order to map this probability distribution to an independent base distribution, the corresponding probability matrix must be of rank one. In other words, given a sequence of functions $f^k: \mathcal X \mapsto \mathcal X$ with $\mathcal X = \{0,1\}^2$, the probability distribution of the random variable $ \bs y = \bs y^K = f^K \circ f^{K-1} \circ ... \circ f^{1} (\bs x)$ should be represented by a matrix with linearly dependent columns or rows. This allows for a factorization into an outer product of two vectors that represent the independent base distributions for $y_1$ and $y_2$. 
+Since discrete flows can only permute probability mass tensors, the matrix corresponding to $p_{\bs y}(y_1, y_2)$ must be a permutation of the matrix in \eqref{eq:examplepapamakarios}. However, there is no permutation of the elements in \eqref{eq:examplepapamakarios} that results in a rank-one matrix. Therefore, \citet{papamakarios2019normalizing} conclude that discrete normalizing flows cannot map any distribution to a factorized base distribution.
+\begin{figure}[t]
+\vspace{-10pt}
+    \includegraphics[width=0.25\textwidth]{figures/idf_prob_cube.pdf} \hspace{-0.1cm}
+    \includegraphics[width=0.25\textwidth]{figures/idf_cube_shift_planes.pdf}\hspace{-0.1cm}
+    \includegraphics[width=0.25\textwidth]{figures/idf_cube_shift_columns.pdf}\hspace{-0.1cm}
+    \includegraphics[width=0.25\textwidth]{figures/idf_cube_column_split.pdf}
+    \vspace{-5pt}
+    \caption{Left: 3D probability distribution tensor, only nonzero values are indicated with colored cubes, all empty space is assumed to be filled with zero-valued cubes. Middle left: an example of an additive transformation conditioned on $x_3$: $y_1 = x_1 + \lfloor t_1(x_3)\rceil$, $y_2 = x_2 + \lfloor t_2(x_3)\rceil$, $y_3 = x_3$. Middle right: an example of an additive transformation conditioned on $x_1$ and $x_3$:  $y_1 = x_1$, $y_2 = x_2 + \lfloor t_2(x_1, x_3)\rceil$, $y_3 = x_3$. Right: a distribution tensor that a single additive transformation of the form of \eqref{eq:idf_bijector} cannot generate from the cube on the left.}
+    \label{fig:flatten_dist}
+\vspace{-10pt}
+\end{figure}
+
+However, one of the key assumptions made above is that the domain of $f^k$ is restricted to $\mathcal X = \{0,1\}^2$. By extending $\mathcal X$ to a larger number of classes this example \textit{can} in fact be factorized by a discrete normalizing flow. More concretely, let us extend the domain to $\mathcal X = \{0, 1, 2, 3\}^2$. The probability distribution matrix of $\bs x$ is shown below, together with a permutation of rank 1.
+\begin{align}
+    p_{\bs x}(x_1, x_2)& : 
+    \begin{pmatrix}
+            0.1   & 0.3   & 0     & 0 \\
+            0.2   & 0.4   & 0     & 0 \\
+            0     & 0     & 0     & 0 \\
+            0     & 0     & 0     & 0\\
+    \end{pmatrix}
+    \rightarrow p_{\bs y}(y_1, y_2) : 
+    \begin{pmatrix}
+        0.1   & 0   & 0     & 0 \\
+        0.2   & 0   & 0     & 0 \\
+        0.3   & 0   & 0     & 0 \\
+        0.4   & 0   & 0     & 0\\
+    \end{pmatrix}
+    =
+    \begin{pmatrix}
+        0.1 \\
+        0.2 \\
+        0.3 \\
+        0.4 \\
+    \end{pmatrix}
+    \otimes
+    \begin{pmatrix}
+        1 \\
+        0 \\
+        0 \\
+        0 \\
+    \end{pmatrix}
+    \;.
+    \label{eq:extend_domain}
+\end{align}
+This example illustrates that the number of classes that are considered valid for the discrete random variables plays a crucial role in the flexibility of discrete flows. Here, we claim that this holds more generally through the following two lemmas. First we show that by embedding the data into a space with more possible values than present in the data itself, one can always construct an invertible mapping to one-dimensional variable embedded in $d$ dimensions, and that the resulting variable has a distribution which is trivially factorized across all $d$ dimensions. 
+\begin{lemma}
+\label{lem:1}
+A $d$-dimensional discrete random variable $\bs x = (x_1, \dots, x_d)^T$ with $d>1$ and $x_i \in \{ 0,\dots,K^{(i)}-1\}$, distributed according to an arbitrary distribution $p_{\bs x}(\bs x)$, can be transformed to a one-dimensional random variable $y \in \{0,\dots, \left(\prod_{i=1}^d K^{(i)}\right) -1\}$ 
+with a number of classes that scales exponentially with the dimension $d$ 
+through a bijective mapping $f$. Embedding $y$ in $d$ dimensions through padding with $d-1$ zeros, i.e. $\bs y = (y, 0, \dots, 0)^T$, the distribution over $\bs y$ is trivially factorized across all dimensions: $p_{\bs x}(\bs x) = p_{y}(f(\bs x)) \prod_{i=2}^d \delta_{y_i, 0}$ with $\delta_{i,j}$ the Kronecker delta distribution for all zero-padded dimensions. 
+\end{lemma}
+
+The closed form of the mapping is $y = f(\bs x) = x_1 + K^{(1)} x_2 + K^{(1)}K^{(2)} x_3 +\dots + \prod_{i=1}^{d-1} K^{(i)} x_d$, such that $y \in \{0,\dots, \left(\prod_{i=1}^d K^{(i)}\right) -1\}$. See Appendix \ref{sec:appendix_flexibility} for the full proof. Intuitively, given enough classes, a factorized base distribution is obtained by ``flattening'' the hypercube that contains all nonzero entries in the data distribution tensor (see left panel Figure \ref{fig:flatten_dist}) into one dimension. The following lemma demonstrates that additive coupling layers as in \eqref{eq:idf_bijector} of integer discrete flows can model such an invertible mapping.
+\begin{lemma}
+\label{lem:2}
+For a $d$-dimensional random variable $\bs x$, translation operations of the form $z_a = x_a$, $z_b = x_b + \lfloor t(x_a)\rceil$, with $a$ and $b$ denoting the indices of two splits of the variable $\bs x$, are sufficient to map $\bs x$ in an invertible manner to a random variable $\bs y = (y_1, 0, \dots, 0)^T$, which is a one-dimensional variable embedded in $d$ dimensions. 
+\end{lemma}
+
+The formal proof is an induction on $d$ and relies on 1) the fact that integer discrete flows embed the discrete random variables into the integer lattice  $\mathcal X = \mathbb Z^d$, which always has a sufficient number of classes (countably infinite), and 2) the observation that two translations are sufficient to map two dimensions into a single dimension with more classes, see Appendix \ref{sec:appendix_flexibility}. 
+For a more intuitive illustration, Figure \ref{fig:flatten_dist} depicts the type of operations that a single additive bijector can and cannot perform on a three-dimensional probability tensor. In Figure \ref{fig:toy_example} we show that, although sensitive to initialization, an IDF can be trained to factorize the toy example of \eqref{eq:examplepapamakarios}. The first three panels correspond to the data distribution and the intermediate and factorized final distributions produced by the first and second coupling layer respectively. For architecture details see Appendix \ref{sec:appendix_toy_architecture}.
+
+As pointed out by \citet{papamakarios2019normalizing}, a discrete flow can only map a uniform base distribution into a uniform data distribution due to its permutation property. Therefore, invertible discrete flows require one-dimensional learnable distributions in order to be able to model all data distributions. Note also that discrete flows as introduced by \citet{tran2019discreteflows} are designed for a finite number of classes in $\mathcal X$ and therefore \textit{cannot} factorize all distributions. Although not implemented in the original work, this model class can in principle also be extended to embed the data into a space with a larger finite number of possible values than present in the support of the data in order to help alleviate this issue. Since IDFs treat the random variable as integers (with a countably infinite number of classes) it does not have a limited factorization capacity. We therefore explore other directions for potential improvements.
+
+\begin{figure}[t]
+\vspace{-10pt}
+    \includegraphics[trim=0 0 0 50,clip,width=0.50\textwidth]{figures/iter4800_empirical.png} 
+    \includegraphics[trim=0 0 0 50,clip,width=0.50\textwidth]{figures/iter4800_model.png}
+    \vspace{-10pt}
+    \caption{Visualization of an IDF that has learned to factorize the probability distribution of the toy example in \eqref{eq:examplepapamakarios}. Left: empirical densities of the data, the data transformed by one additive bijector, and the data transformed by two additive bijectors. Right: similar to the left plot, but with data sampled from the model.}
+    \label{fig:toy_example}
+    \vspace{-10pt}
+\end{figure}
+\section{Does gradient bias hinder optimization of IDFs?}
+\label{sec:quantization}
+
+In this section we investigate whether gradient bias is a problem when training IDF models.
+\citet{hoogeboom2019idf} demonstrated that the performance of IDFs can deteriorate when the number of coupling layers is too large, and that this does not occur in the continuous additive counterpart without rounding operators or straight-through gradient estimators. The gradient bias induced by the straight-through estimator was suggested to be the cause. 
+\begin{figure}[t]
+\vspace{-20pt}
+    \begin{center}
+        \includegraphics[width=0.40\columnwidth]{figures/straight_through_cifar10.png}
+        \includegraphics[width=0.385\columnwidth]{figures/cifar10_architecture_fpl_300K.png} 
+    \end{center}
+    \vspace{-12pt}
+    \caption{\textit{Left}: Bits per dimension for models trained for 2000 epochs on CIFAR-10. Continuous (cont) and discrete (disc) models are trained with different combinations of translations activation functions ($\rightarrow$) and backward ($\leftarrow$) substitute functions for the straight-through estimators: a soft rounding function ($\sigma_T$), a hard rounding function ($rnd$) and the identity function ($id$). $\sigma_T$ interpolates between the identity function at $T=0$ and the hard rounding function at $T=1$.
+    \textit{Right}: Bits per dimension of IDF models trained for 300K iterations ($\pm 960$ epochs) with different architectures for the translation networks in the coupling layers: convolutional neural networks, ResNets and DenseNets. The models have 3 levels. The discrete ResNet model for 10 flows per level was unstable so the result for this model is omitted. The models with the DenseNet architecture correspond to the best models used by \citet{hoogeboom2019idf}. The ConvNets and ResNets have approximately equal number of parameters and depth as the DenseNets. Note that the ConvNets used to produce the results in Figure 5 of \citep{hoogeboom2019emerging} are much shallower. The DenseNet++ architectures correspond to the proposed IDF++ model of Section \ref{sec:experiments}.}
+    \label{fig:gradbias_CIFAR-10}
+\vspace{-18pt}
+\end{figure}
+
+In our experiments we found that neither stochastic rounding nor replacing the identity function in the straight-through estimator with a soft approximation of the rounding function improved the results. 
+To disentangle the effect of gradient bias of the straight-through estimator and the difficulty of discrete optimization, we have trained IDFs and their continuous additive counterpart (without the rounding operator and without a quantized base distribution) on CIFAR-10. We use different combinations of translation activation functions and backward substitute functions in the straight-through estimator: soft rounding, hard rounding and the identity function. The soft rounding function $\sigma_T$ was modeled with a superposition of scaled sigmoid functions and a temperature $T$ that allows to interpolate between the identity function ($T=1$) and the rounding function $T=0$, see Appendix \ref{sec:appendix_soft_rounding} for more details.
+The left plot in Figure \ref{fig:gradbias_CIFAR-10} shows that the continuous model with an identity straight-through gradient estimator consistently outperforms the continuous model without gradient bias. The discrete model clearly also does not benefit from a soft-rounding operator in the straight-through estimator, even though this estimator reduces the bias. 
+Note that the continuous model trained with a hard rounding function and identity straight-through estimator ($\rightarrow rnd, \leftarrow id)$ performs worse than the discrete model because the continuous model needs to maximize a lower bound to the likelihood. 
+
+We numerically study the significance of gradient bias in more detail on an extension of the two-dimensional toy example of Section \ref{sec:flex} to 8 bits with a model with two coupling layers. For details on the 8-bit extension of the toy example see Appendix \ref{sec:appendix_toy_example} and for architecture details see Appendix \ref{sec:appendix_toy_architecture}. We study the search directions using finite differences as an approximate gradient vector $\bs{g}^{\text{fd}}$ with elements $ \bs{g}^{\text{fd}}_{i} = (L(\theta_{i}+\epsilon,\bs \theta_{/i}) - L(\theta_{i}-\epsilon,\bs\theta_{/i}))/2\epsilon$.
+Here $L$ is the loss function averaged over a single batch of data. For additive continuous flow models, $\bs{g}^{\text{fd}}$ will approach the true loss gradient $\nabla_{\theta}L$ as $\epsilon \to 0$. For discrete models, $\bs{g}^{\text{fd}}$ can be thought of as a linear approximation of the loss landscape in a trust-region of radius $\epsilon$ around the current parameter vector $\bs \theta$. 
+
+We compare continuous flow models that are trained using the unbiased gradient $\nabla_{\bs\theta}L$ with discrete flow models that are trained using the straight-through gradient estimator $\bs{g}^{\text{st}}$. We estimate the agreement between the (approximate) gradient and the finite difference approximation $\bs{g}^{\text{fd}}$ for varying trust-region size $\epsilon$ at various stages of training and for varying bit-depth of the input data. We compute the agreement of the (approximate) gradient directions with the cosine similarity $\bs{g} \cdot \bs{g}^{\text{fd}}/||\bs{g}||_{2}  ||\bs{g}^{\text{fd}}||_{2}$, which can be interpreted as the uncentered correlation between the elements of $\bs{g}$ and $\bs{g}^{\text{fd}}$. As long as the agreement is consistently positive, performing gradient descent with $\bs{g}$ is expected to reduce the loss according to the trust-region approximation based on $\bs{g}^{\text{fd}}$. If the agreement is consistently zero, or even negative, gradient descent with $\bs{g}$ is not expected to improve the training loss. The agreements are estimated over multiple batches. As the base distribution parameters are not affected by the gradient bias we only consider the gradients for the parameters of the bijectors.
+
+Figure~\ref{fig:gradbias_toyexample} shows the agreement between the finite-difference gradient and the straight-through gradient of the discrete model and the agreement with the real gradient for the continuous model, at initialization and after 3000 training iterations. 
+The straight-through gradient estimator for 8-bit data is always positively correlated with small but finite difference estimates, corroborating our results on CIFAR-10 that the identity straight-through gradient estimator allows for good optimization. For 1-bit data the quality of the straight-through gradient estimator clearly deteriorates and the correlation becomes zero or even negative. This is not surprising as the random variables and translations are in practice modeled on the rescaled grid $\mathbb Z/2^{\mathrm{bits}}$, leading to more coarse-grained rounding for lower bits. As lossless compression mostly deals with source data in the higher bit ranges the poor performance for lower bit data is less relevant. The bottom two panels in Figure \ref{fig:gradbias_toyexample} show the loss surface and optimization trajectory of a discrete model trained on the 1-bit data, suggesting that the optimization landscape is hard to traverse for low bit-depths. See Appendix \ref{sec:appendix_toy_example} for loss landscapes for 8-bit data and for similar plots for the corresponding continuous models.
+
+\begin{figure}[t]
+\vspace{-5pt}
+    \begin{center}
+        \includegraphics[width=0.95\columnwidth]{figures/larger_model_single_seed1234_gradbias_all_largereps_10_3000.png} 
+        \\
+        \hspace{-50pt}
+        \includegraphics[width=0.32\textwidth]{figures/discrete_loss_landscape}
+        \quad
+        \includegraphics[width=0.32\textwidth]{figures/opt_trajectory_sq}
+    \end{center}
+    \caption{ \textit{Top two panels}: Agreement between the approximate (true) gradient and finite difference gradient of the discrete (continuous) model at model initialization (left), and after 3000 training iterations (right). The curves were obtained by averaging over 10 batches. The higher variance for the 8-bit case is due to the larger number of different datapoints, leading to more variance in the data batches.
+    \textit{Bottom two panels}: Visualization of the loss surface (left) and trajectory of the optimizer on the loss surface (right) for the discrete model on the 1-bit toy example, following~\citep{li2018visualizing}.}
+    \label{fig:gradbias_toyexample}
+\vspace{-10pt}
+\end{figure}
+
+Finally, we observed that the performance degradation of IDF as a function of the number of coupling layers is highly dependent on the architecture used for the translation networks in the coupling layers. The right plot in Figure \ref{fig:gradbias_CIFAR-10} shows the performance of continuous and discrete models with identity straight-through estimators, under different coupling layer architectures: stacked convolutions, ResNets \citep{he2016deep} or DenseNets \citep{huang2017dense}. All coupling layer architectures are of approximately the same size and depth, and the DenseNet models have the same architecture as the best model of \citep{hoogeboom2019emerging}. The performance of the convolutional model clearly deteriorates quicker than the ResNet and DenseNet models.
+
+The results in this section show that gradient bias due to the straight-through estimator is less of a problem than previously suggested. Alternative gradient estimators with less bias do not improve the results, and our analysis on the toy examples shows that for data with large bit depths the straight-through gradient estimates have positive correlation with finite difference estimates. We show that the previously observed performance deterioration as a function of the number of coupling layers is highly dependent on the architecture choice of the coupling layers. This motivates our search for architectural changes that can help improve the performance of IDFs on lossless image compression.
+\section{Improving Integer Discrete Flows for Lossless Compression}
+\label{sec:experiments}
+In this section we introduce changes to the architecture of IDF that improve its performance. 
+We briefly summarize the IDF architecture, for more detailed information see Appendix \ref{sec:appendix_architecture}. 
+Similar to other generative flow models, the architecture of IDF contains $L$ levels. Each level $l$ consists of a space-to-depth transformation followed by a sequence of $K$ alternating channel permutations and additive coupling layers. For levels $l = 1, ..., L-1$ the output random variable is split into two pieces, with the second part serving as an input to the next level: $[\bs z^{(l)}, \bs y^{(l)}] = f^{(l, K)}\circ ... \circ f^{(l, 1)}(\bs y^{(l-1)})$, with $\bs y^{(0)} = \bs x$. For the last level we simply have $\bs z^{(L)} = f^{(L, K)}\circ ... \circ f^{(L, 1)}(\bs y^{(L-1)})$. The combined $\bs z = [\bs z^{(1)}, ..., \bs z^{(L)}]$ denotes the latent representation of $\bs x$. The distribution of $\bs z$ for 3 levels is then factorized as $p(\bs z) = p(\bs z^{(1)}, \bs z^{(2)}, \bs z^{(3)}) =p(\bs z^{(3)}) p(\bs z^{(2)}|\bs y^{(2)}) p(\bs z^{(1)}|\bs y^{(1)})$, which is equivalent to $p(\bs z^{(3)}) p(\bs z^{(2)}|\bs z^{(3)}) p(\bs z^{(1)}|\bs z^{(2)}, \bs z^{(3)})$. The conditional distributions are modeled as discretized logistic distributions and the unconditional $p(\bs z^{(3)})$ is modeled with a mixture of discretized logistics with 5 components. Both the conditioning networks and the pre-quantized translations $\bs t_{\theta}$ in \eqref{eq:idf_bijector} are modeled with DenseNets \citep{huang2017dense}. 
+
+The first modification is to invert the channel permutations after every coupling layer. Although inverting the permutation after each translation does not affect the coupling layers of the network, it affects the way the data is split after each level and therefore influences the modeling of the conditional distributions $p(\bs z^{(l)}|\bs y^{(l)})$. By inverting the permutations one ensures that the split into $\bs y^{(l)}$ and $\bs z^{(l)}$ happens along the channel direction of the space-to-depth transformed version of $\bs y^{(l-1)}$; as such $\bs y^{(l)}$ and $\bs z^{(l)}$ retain the spatial correlation structure of the \textit{original} image presumably making it easier to model the conditional distribution $p(\bs z^{(l)}|\bs y^{(l)})$ (see visualization in Figure~\ref{fig:appendix_idf-invert-perm} of Appendix~\ref{sec:appendix_architecture}). 
+
+The second change is an adaptation of the rezero trick by \citet{bachlechner2020rezero}. The additive bijectors of \eqref{eq:idf_bijector} are replaced by $[\bs y_a, \bs y_b] = [\bs x_a, \bs x_b + \lfloor \alpha \bs t_{\theta}(\bs x_a) \rceil ]$, where $\alpha$ is a learnable scalar parameter initialized to zero, such that the bijectors are initialized to the identity function. The mean and log-scale of the conditional discretized logistic distributions are parameterized as $ \bs \mu = \gamma \bs \nu$, $\log \bs s =  \delta \log \bs \sigma$ with $ [\bs \nu, \log \bs \sigma]= \mathrm{DenseNet}_{\phi}(\bs y)$ and $\gamma$ and $\delta$ learnable scalar parameters initialized to zero.
+
+The third modification consists of an alteration in the dense blocks that make up the translation and logistic conditioning DenseNets by introducing group normalization layers \citep{wu2018group} and switching from ReLU activations \citep{nair2010rectified} to Swish activations \citep{ramach2017searching}:
+\begin{align}
+&\text{IDF:} \quad \mathrm{Conv1x1} \rightarrow \mathrm{ReLU} \rightarrow  \mathrm{Conv3x3} \rightarrow \mathrm{ReLU} \nonumber\\ 
+&\text{IDF++:} \quad \mathrm{Conv1x1} \rightarrow \mathrm{GroupNorm} \rightarrow \mathrm{Swish} \rightarrow  \mathrm{Conv3x3} \rightarrow \mathrm{GroupNorm} \rightarrow \mathrm{Swish} \nonumber
+\end{align}
+The trainability of deep neural networks such as flow models is strongly dependent on careful initialization and normalization. Identity mapping initialization of flow models, which we achieve by virtue of the rezero trick, is a known technique for improving training stability of these models \citep{kingma2018glow}. The use of group normalization layers ensures that the dense blocks within the coupling layers receive properly scaled and centered inputs. Combined with the Swish activation function this allows DenseNet activations to remain non-zero and the coupling layers to utilize their capacity more effectively. Empirically, these intuitions are supported by the fact that collectively these modifications allow for the use of a higher base learning rate during training while achieving better results. Finally, during training we also keep track of a slow exponential moving average of the models weights, and use these average weights during evaluation. 
+
+Figure \ref{fig:gradbias_CIFAR-10} shows the performance of models with the proposed modifications (DenseNet++) on the validation set (consisting of 20\% of the training set) on CIFAR-10 as a function of flows per level, after 300K iterations. For this new architecture the performance of \textit{both} the continuous and the discrete version of the model deteriorates for 10 flows per level due to overfitting (see Figure \ref{fig:appendix_overfitting}).
+These results also show that the modifications allow for a more efficient use of the flow layers: for 300K iterations the performance of the IDF++ model with a DenseNet++ architecture is on par with that of the IDF model of \citet{hoogeboom2019idf} with DenseNet coupling layers. 
+
+\begin{table}[t!]
+    \centering
+    \caption{Compression results in bits per dimension (bpd) for IDF++, hand-designed codecs and other deep density estimators based on normalizing flows, super resolution and variational auto-encoders. Where available, the bpd according to the model's negative log-likelihood is indicated in parenthesis. Results with a $^*$ are taken from \citet{townsend2019hilloc}, and those with $^\dagger$ are taken from \citet{hoogeboom2019idf}. The IDF CIFAR-10 result indicated with $^{**}$ is obtained by our implementation of IDF with 100\% of the training data used to train the model. In \citep{hoogeboom2019idf} only 80\% of the training data was used to train the best CIFAR-10 model.
+    All other results are from the original papers.}
+    \begin{tabular}{llll}
+        \toprule
+         Compression models & \textsc{Cifar-10} & \textsc{ImageNet-32} & \textsc{ImageNet-64} \\
+         \midrule
+         \textsc{PNG} (\citet{boutell1997png})              & $5.87^*$          & $6.39^*$          & $5.71^*$\\
+         \textsc{JPEG-2000} (\citet{rabbani2002jpeg2000})    & $5.20^{\dagger}$  & $6.48^{\dagger}$  & $5.10^{\dagger}$ \\
+         \textsc{FLIF} (\citet{sneyers2016flif})            & $4.19^*$          & $4.52^*$          & $4.19^*$\\
+         \midrule
+          \textsc{Bit-Swap} (\citet{kingma2019bit})       & $3.82$ ($3.78$)    & $4.50$ ($4.48$)   & \quad-\\
+          \textsc{HiLLoC} (\citet{townsend2019hilloc})    & $3.56$ ($3.55$)   & $4.20$ ($4.18$)    &  $3.90$ ($3.89$)\\
+          \textsc{LBB} (\citet{ho2019local})              & $3.12$ ($3.12$)   & $3.88$ ($3.87$) & $3.70$ ($3.70$)\\
+        \midrule
+         \textsc{SReC} (\citet{cao2020lossless})      & \quad-    & \quad-    &  $4.29$\\
+         \textsc{IDF} (\citet{hoogeboom2019idf})      & $3.32$  $(3.30)^{**}$ & $4.18$ ($4.15$) & $3.90$ ($3.90$)\\
+         \textsc{IDF++, small: 4 flows per level}                               & $3.31$ ($3.29$) & $ 4.16$ $(4.14)$  & $3.85$ $(3.85)$\\
+         \textsc{IDF++}                               & $3.26$ ($3.24$) & $4.12$ ($4.10$)  & $3.81$ ($3.81$)\\
+         \bottomrule
+    \end{tabular}
+    \label{tab:results}
+\vspace{-10pt}
+\end{table}
+To further corroborate this point, we have trained an IDF++ model with 4 and 8 flows per level until convergence for CIFAR-10, ImageNet-32 and ImageNet-64, and compared it with the baseline IDF model with 8 flows per level and other related work in Table \ref{tab:results}. 
+To make a fair comparison against other methods like local bits-back coding (LBB) by \citet{ho2019local} we train our final models on the entire training set without holding out part of the training set as a validation set. Although there is no visible difference for the ImageNet-32 and ImageNet-64 datasets, more data does matter for CIFAR-10: it reduces the model's average negative log-likelihood in units of bits per dimension (bpd) on the test set from $3.32$ (as reported by \citet{hoogeboom2019idf}) to $3.30$ for the baseline IDF model. 
+Table \ref{tab:results} displays the bpd resulting from compressing the latent representations $\bs z$ with a range-based Asymmetric Numerical Systems (rANS) entropy coder \citep{duda2013asymmetric}. Results for hand-designed codecs, models with bits-back coding and models without bits-back coding are shown in separate groups. 
+Where available, the bpd as predicted from the models negative log-likelihood is indicated in brackets. 
+
+The results show that, contrary to less-biased gradient estimators, the proposed architecture modifications in IDF++ improve the performance over IDF for 8 flows per level for all datasets. Furthermore, the smaller IDF++ model with only 4 flows per level either performs on par or better than the IDF baseline with 8 flows per level. This effectively reduces the number of parameters and time required for a forward pass through the model by a factor of 2, and demonstrates that the proposed modifications in IDF++ enable more efficient compression without sacrificing performance. 
+For a more detailed ablation on the contributions of the proposed modifications see Appendix \ref{sec:appendix_ablation}.
+\section{Conclusion}
+In this paper we investigated several potential directions for improvement of integer discrete flows for lossless compression. We analyzed the hypothesis and claims of recent works on the weaknesses of this model class, and we showed that the claim by \citet{papamakarios2019normalizing} that flows for discrete random variables cannot factorize all distributions does not apply to integer discrete flows. Furthermore, we demonstrated that the effect of gradient bias on optimization is less severe than previously thought. Other gradient estimators with less bias do not improve optimization, and a numerical analysis of the direction of the straight-through gradient estimates showed that they correlate well with finite difference estimates for large-bit data. We also showed that the previously observed performance deterioration with increasing depth of the flow model is highly dependent on the architecture of the coupling layers. Motivated by this, we proposed several architecture changes that improve the performance of IDFs on lossless image compression for an equal computational budget. The proposed modifications lead to a more efficient flow-based compression model, as evidenced by our results that show that an IDF++ model with half the number of flows compared to the baseline IDF model performs on par or better. 
+
+Although we found that the simple straight-through gradient estimator outperformed all of the other estimators that we considered, future work could consider other estimators inspired by universal quantization and the statistics of quantization noise, similar to the work by \citet{agustsson2020universally}.
+Another important direction for future work is to further reduce the computational complexity of deep density estimators. Although hand-designed codecs such as JPEG-2000 do not compress as well on the datasets we consider, they (de)compress significantly faster and require significantly less memory while not being tuned for each dataset. 
+More work in directions like optimizing for (de)compression speed~\citep{cao2020lossless} or generalizing learnable compressors to other datasets~\citep{townsend2019hilloc} is needed to make deep density estimators more practical for source compression.
+\subsubsection*{Acknowledgments}
+We would like to thank Nal Kalchbrenner and Patrick Forr\'e for useful discussions during the project and Lucas Theis for feedback on our manuscript. We thank Nicolas Renaud for help with creating Figure \ref{fig:flatten_dist}.
+
+
+
+\bibliographystyle{iclr2021_conference}
+\bibliography{iclr2021_conference}
+
+\newpage
+
+\begin{center}
+ \Large{Supplementary Material of ``IDF++: Analyzing and Improving Integer Discrete Flows for Lossless Compression''}  
+\end{center}
+
+\begin{appendices}
+\section{Flexibility of integer discrete flows}
+\label{sec:appendix_flexibility}
+
+The proof of Lemma \ref{lem:1} can be done in two ways, one is by giving the exact mapping, and the second way is through induction. We include both below as well as the proof for Lemma \ref{lem:2}.
+\begin{proof}[Proof of Lemma \ref{lem:1}]
+The invertible mapping is given by $y = f(\bs x) = x_1 + K^{(1)} x_2 + K^{(1)}K^{(2)} x_3 +\dots + \prod_{i=1}^{d-1} K^{(i)} x_d$, with a maximum value of $\left(\prod_{i=1}^{d} K^{(i)}\right)  - 1$ and minimum value of zero. Given $y$, each element $x_i$ can be obtained recursively: $x_i = \left(y - \left(\sum_{j=i+1}^d K^{j-1} x_j\right)\right)//K^{i-1}$, where $//$ refers to integer division. Through the change of variables formula we know that $p_y(y) = p_{\bs x}(f^{-1}(y))$, which combined with zero padding to embed in $d$ dimensions leads to the desired factorized distribution in $d$ dimensions. 
+\end{proof}
+
+\begin{proof}[Alternative proof of Lemma \ref{lem:1}]
+An alternative proof is via induction on $d$. 
+
+Base case: Let us start with $d=2$, we have the random variable $\bs x = (x_1, x_2)^T$ with $x_1 \in \{0, ..., K^{(1)}-1\}$ and $x_2 \in \{0, ..., K^{(2)}-1\}$. $\bs x$ is distributed according to $p_{\bs x} (x_1, x_2)$. The following function can map this random variable to a one-dimensional random variable $y$ with $y \in \{0, \dots, K^{(1)}K^{(2)}-1\}$: $y = x_1 + K^{(1)} x_2$. 
+Given $y$, $x_1$ and $x_2$ can be recovered through $x_2 = y // K^{(1)}$ and $x_1 = y - K^{(1)} x_2$.
+
+General case: Now let us assume that the lemma holds for $d=n$, and examine the case of $d=n+1$: $\bs x = (x_1, ..., x_n, x_{n+1})^T$ with $x_i \in \{0, ..., K^{(i)}\}$. Then the following transformation maps to an $n$-dimensional random variable $\bs y = (y_1, \dots y_n)^T$: $y_i= x_i$ for $i=\{1, \dots, n-1\}$ and $y_n = x_n + K^{(n)} x_{n+1}$. $\bs x$ can be recovered from $\bs y$ through $x_i= y_i$ for $i=\{1, \dots, n-1\}$ and $x_{n+1} = y_n // K$, $x_n = y_n - K x_{n+1}$. We have $y_1, ..., y_{n-1} \in \{0, ..., K^{(i)}-1\}$ and $y_n \in \{0, ..., K^{(n)}K^{(n-1)}-1\}$. As we assumed that we can transform an $n$-dimensional random variable to a one-dimensional random variable in an invertible manner, this concludes that we can also do so for the $d=n+1$ case.
+\end{proof}
+
+\begin{proof}[Proof of Lemma \ref{lem:2}]
+We will prove this via induction on $d$.
+
+Base case: Let us start again with $d=2$. $\bs x = (x_1, x_2)^T$ with $x_i \in \{0, \dots, K^{(i)}\}$ can be transformed into a random variable $\bs y = (y_1, 0)^T$ in an invertible manner with two translation operations of the form $z_a = x_a$, $z_b = x_b + \lfloor t(x_a)\rceil$, where either $(a, b) =(1, 2)$ or $(a, b) = (2, 1)$.
+The first translation is given by $z_1 = x_1 + K^{(1)} x_2$, $z_2 = x_2$, followed by $y_1 = z_1 = x_1 + K^{(1)} x_2$, $y_2 = x_2 - (x_1 + K^{(1)} x_2)//K^{(1)} = x_2 - x_2 = 0$.
+
+General case: Let us assume translations are sufficient for $d=n$. We can then transform a $d=n+1$ dimensional variable $\bs x = (x_1, \dots , x_n, x_{n+1})^T$ in an invertible manner to a random variable that is effectively $n$-dimensional: $\bs y = (y_1, \dots, y_n, 0)$ with two translations operations:
+The first translation is:
+\begin{align}
+&z_i = x_i \text{ for } i \in \{1, \dots, n-1, n+1\} \nonumber \\
+&z_n = x_n + K^{(n)} x_{n+1},   
+\end{align}
+followed by the second translation:
+\begin{align}
+&y_i = z_i \text{ for } i \in \{1, \dots, n\} \nonumber \\
+&y_{n+1} = z_{n+1} - z_n//K^{(n)} = x_{n+1} - (x_n + K^{(n)} x_{n+1})//K^{(n)} = x_{n+1} - x_{n+1} = 0.
+\end{align}
+Which results in $y_i = x_i$ for $i \in \{1, ..., n-1\}$ and $y_n = x_n + K^{(n)} x_{n+1}$. As we assumed integer translations were sufficient to map an $n$-dimensional variable like $(y_1, \dots, y_n)^T$ to a one-dimensional random variable embedded in $n$ dimensions in an invertible manner, we have now proven that this also holds for $d=n+1.$
+\end{proof}
+\section{Learning toy examples}
+\label{sec:appendix_toy_example}
+
+\subsection{Gradient bias on the toy example}
+The toy example that is discussed in Section~\ref{sec:flex} has a probability distribution with nonzero probabilities for $x_i \in \{0, 1\}$. With only two values per dimension with nonzero probability the data is effectively 1-bit quantized. Here we use an extension of this toy example for input data that is quantized to a higher bit-depth. This can be done by modeling the probability masses with log-linearly spaced logits in the interval $(0, 1)$. The resulting distributions for several bit-depths are shown in Figure \ref{fig:toy_example_bits}.
+\begin{figure}[h]
+    \centering
+        \includegraphics[width=1\textwidth]{figures/toy_example_nbits.pdf}
+    \caption{probability distribution of the extension of the toy example of Eq. \eqref{eq:examplepapamakarios} to more bits.}
+    \label{fig:toy_example_bits}
+\end{figure}
+
+\subsection{Loss landscape and optimizer trajectory}
+\label{sec:appendix_loss_landscapes}
+In Section~\ref{sec:quantization}, we presented the visualization of the loss landscape and the optimization trajectory of the \emph{discrete} model on a toy example with 1-bit data. The details on how these plots were obtained will be explained in this section.
+Navigating through a loss landscape that is affected by quantization operators can be challenging due to discontinuities. To illustrate this effect, we visualize the loss landscape and the optimization path for the discrete and continuous models trained on the 1-bit and 8-bit toy examples. We use the method proposed by \citet{li2018visualizing}, where for given model parameters $\bs \theta^*$, we choose two direction vectors $\bs \theta_1$ and $\bs \theta_2$ and plot the value of $f(\alpha, \beta) = \mathcal{L}(\bs \theta^*+\alpha \bs\theta_1+\beta \bs\theta_2)$. To choose the direction vectors, we use model parameters at different stages of training. Let $\bs \theta^*_i$ be model parameters after iteration $i$. Given the set of parameters for $n$ iterations, we apply PCA to the matrix $\bs M = [\bs \theta^*_0 - \bs\theta^*_n, \ldots, \bs\theta^*_{n-1} - \bs\theta^*_n]$ and select the two most explanatory directions as $\bs\theta_1$ and $\bs\theta_2$.
+
+The results for the 1-bit toy example are shown in the left two panels of Figure \ref{fig:gradbias_toyexample} for the discrete flow model. Figure \ref{fig:cont_loss_surface} shows similar plots for the continuous case, demonstrating a much smoother loss landscape. Figure \ref{fig:gradbias_toyexample} suggests that discrete models with unlucky initializations can easily end up in a local minimum from which it is hard to escape due to sharp cliffs in the loss landscape. Figures \ref{fig:disc_loss_surface_8bits} and \ref{fig:cont_loss_surface_8bits} show a significantly less pronounced difference between the loss landscape of the continuous and discrete model for the 8-bit toy example. This supports our observation in Section~\ref{sec:quantization} that the gradient bias is less of an issue at higher bit-depths.
+
+\begin{figure}[H]
+    \centering
+        \begin{subfigure}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/continuous_loss_landscape.png}
+    \end{subfigure}%
+    ~
+    \begin{subfigure}{0.42\textwidth}
+        \centering
+        \includegraphics[width=0.75\textwidth]{figures/continuous_loss_surface_sq}
+    \end{subfigure}%
+    \caption{Visualization of the trajectory of the optimization on the loss surface~\citep{li2018visualizing} for the continuous model for the toy example with 1-bit data.}
+    \label{fig:cont_loss_surface}
+\end{figure}
+\begin{figure}[H]
+    \centering
+        \begin{subfigure}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/discrete_loss_landscape_8bits.png}
+    \end{subfigure}%
+    ~
+    \begin{subfigure}{0.42\textwidth}
+        \centering
+        \includegraphics[width=0.75\textwidth]{figures/discrete_loss_surface_8bits}
+    \end{subfigure}%
+    \caption{Visualization of the trajectory of the optimization on the loss surface~\citep{li2018visualizing} for the discrete model for the toy example with 8-bit data.}
+    \label{fig:disc_loss_surface_8bits}
+\end{figure}
+\begin{figure}[H]
+    \centering
+        \begin{subfigure}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/continuous_loss_landscape_8bits.png}
+    \end{subfigure}%
+    ~
+    \begin{subfigure}{0.42\textwidth}
+        \centering
+        \includegraphics[width=0.75\textwidth]{figures/continuous_loss_surface_8bits}
+    \end{subfigure}%
+    \caption{Visualization of the trajectory of the optimization on the loss surface~\citep{li2018visualizing} for the continuous model for the toy example with 8-bit data.}
+    \label{fig:cont_loss_surface_8bits}
+\end{figure}
+
+\section{Soft rounding function}
+\label{sec:appendix_soft_rounding}
+The soft rounding function $\sigma_T$ that is used in Section \ref{sec:quantization} is given by
+\begin{align}
+    \sigma_T(x) = \lfloor x \rfloor + \frac{\sigma\left(\frac{2}{T} (x- \lfloor x \rfloor)- \frac{1}{T}\right)}{\sigma\left(\frac{1}{T}\right)- \sigma\left(-\frac{1}{T}\right)} \;.
+\end{align}
+The soft rounding function is depicted in Figure \ref{fig:soft_rounding} for different temperatures. 
+\begin{figure}[ht]
+    \centering
+        \includegraphics[width=0.5\textwidth]{figures/sigmoid_staircase.png}
+    \caption{Soft rounding function $\sigma_T$ for different temperatures $T$. In the limit $T=0$ the soft rounding function reduces to the hard rounding function $\lfloor \cdot \rceil$. At $T=1$ the soft rounding function is indistinguishable from the identity function.}
+    \label{fig:soft_rounding}
+\end{figure}
+\section{Architectures}
+\label{sec:appendix_architecture}
+
+\subsection{Architecture and training details of IDF}
+The architecture of IDF consists of $L$ levels, each consisting of an alternating sequence of channel permutations and additive bijectors. More specifically, the architecture of level $l$ of IDF is built up as follows:
+\begin{align}
+&\bs y^{(l-1)}\rightarrow \text{space-to-depth} \rightarrow \overbrace{\{\text{Permute} \rightarrow \text{Additive transform}\}}^{\times K} \rightarrow[\bs z^{(l)}, \bs y^{(l)}].  \nonumber 
+\end{align}
+Except for the last level, the output random variable is split into two equal halves $[\bs z^{(l)}, \bs y^{(l)}]$, where only $\bs y^{(l)}$ is transformed by the next level. Furthermore, $\bs y^{(0)} = \bs x$ and $\bs z = [\bs z^{(1)}, \ldots, \bs z^{(L)}]$ denotes the latent representation of $\bs x$. 
+Inside the additive transformations of \eqref{eq:idf_bijector} the prequantized translations are modeled using DenseNets \citep{huang2017dense} with dense blocks of the following structure:
+\begin{align}
+&\text{Dense block:} \quad \mathrm{Conv1x1} \rightarrow \mathrm{ReLU} \rightarrow  \mathrm{Conv3x3} \rightarrow \mathrm{ReLU} \nonumber. 
+\end{align}
+All DenseNets have a depth of $12$ blocks and $512$ channels.
+The additive bijector splits the random variable into two parts along the channel dimension with splitting fractions $3/4$ and $1/4$ for the untransformed and transformed parts of the random variable. After translating, the resulting variables are concatenated again along the channel axis.
+
+The distribution of $\bs z$ for $L$ levels is factorized as $p(\bs z) =p(\bs z^{(L)}) p(\bs z^{(L-1)}|\bs y^{(L-1)}) \ldots p(\bs z^{(1)}|\bs y^{(1)})$, which is equivalent to $p(\bs z^{(L)}) p(\bs z^{(L-1)}|\bs z^{(L)}) \ldots p(\bs z^{(1)}|\bs z^{(2)}, \ldots \bs z^{(L)})$. All conditional distributions are modeled with discretized logistic distributions. The unconditional distribution $p(\bs z^{(L)})$ is modeled with a mixture of discretized logistics with five components. The log-scale and mean of the conditional logistic distributions are modeled as the outputs of DenseNets with the same structure as the DenseNets of the prequantized translations: $ [\bs \nu, \log \bs \sigma]= \mathrm{DenseNet}_{\phi}(\bs y)$. Note that instead of modeling the random variables as integers ($\bs x \in \mathbb Z^d$), they are modeled as discrete random variables on a grid with bin-width $1/256$ ($\bs x \in \mathbb Z^d/256$).
+
+The model is trained with the Adamax optimizer \citep{kingma2014adam} with an exponential learning rate schedule with base learning rate equal to $1 \times 10^{-3}$ and a linear warmup phase of 10 epochs. See Table \ref{tab:idf_architecture} for more details on the learning rate decay, the number of levels, the batch size and the number of epochs used for training.
+\begin{table}[h]
+    \begin{center}
+        \caption{Architecture and training settings for IDF. Table adapted from \citet{hoogeboom2019idf}. Note that we used a batch size of 128 for CIFAR-10 instead of 256 as used in the original work, while still reproducing the same number as reported by \citet{hoogeboom2019idf}. For ImageNet-32 and ImageNet-64 the batch sizes are the same as in the original work \citep{hoogeboom2019idf}.}
+        \begin{tabular}{lllll} 
+            \toprule
+             Dataset & Levels $L$ & Batch size & Learning rate decay & Epochs \\
+             \midrule
+             CIFAR-10   & 3 & 128   & 0.999 & 2000  \\
+             ImageNet-32 & 3 & 256   & 0.99  &  100  \\
+             ImageNet-64 & 4 &  64   & 0.99  &   10  \\
+             \bottomrule
+             \end{tabular}
+        \label{tab:idf_architecture}
+    \end{center}
+\end{table}
+
+Range-based Asymmetric Numerical Systems (rANS) \citep{duda2009asymmetric, duda2013asymmetric, townsend2020tutorial} is used for lossless compression of the latent variables $\bs z = [\bs z^{(1)}, \ldots, \bs z^{(L)}]$ by using the probability distribution $p(\bs z) =p(\bs z^{(L)}) p(\bs z^{(L-1)}|\bs y^{(L-1)}) \ldots p(\bs z^{(1)}|\bs y^{(1)})$ corresponding to the model's multi-level structure.
+
+\subsection{Architecture and training details of IDF++}
+In IDF++, each of the $K$ blocks containing a permutation and additive bijector has an additional inverse channel permutation to ensure that the output random variable has the same spatial and channel ordering as the input random variable:
+\begin{align}
+&\bs y^{(l-1)}\rightarrow \text{space-to-depth} \rightarrow \overbrace{\{\text{Permute}\rightarrow \text{Additive transform} \rightarrow \text{Inverse permute}\}}^{\times K} \rightarrow[\bs z^{(l)}, \bs y^{(l)}]  . \nonumber
+\end{align}
+The inversion of each permutation inside a level ensures that the splitting at the end of each level is done along the channel dimension of a space-to-depth transformed image, enabling the conditional distributions to be able to use the spatial correlation between pixels. See Figure~\ref{fig:appendix_idf-invert-perm} for a visualization. 
+The dense blocks of the DenseNets for the prequantized translations and the conditional discretized logistics have additional group normalization layers \citep{wu2018group} and Swish activations \citep{ramach2017searching} instead of ReLU activations \citep{nair2010rectified}:
+\begin{align}
+&\text{Dense block:} \quad \mathrm{Conv1x1} \rightarrow \mathrm{GroupNorm} \rightarrow \mathrm{Swish} \rightarrow  \mathrm{Conv3x3} \rightarrow \mathrm{GroupNorm} \rightarrow \mathrm{Swish} \nonumber.
+\end{align}
+The number of groups for each group normalization layer are determined as follows: if the number of channels of the group normalization layer is divisible by 3 then 3 groups are used, else if it is divisible by 2 then 2 groups are used, and finally if it is neither divisible by 3 or 2 then a single group is used.
+
+\begin{figure}[b!]
+    \centering
+        \includegraphics[width=0.5\textwidth]{figures/idf_invert_perm.pdf}
+    \caption{Schematic visualization of the effect of inverse permutations on the IDF++ architecture. In a multi-level IDF++ model the original image (\textbf{a}) undergoes a space-to-depth transformation (\textbf{b}), after which at the end of the first level half of the dimensions (blue tones) are factored out and their conditional distribution based on the remaining dimension (green tones) is learned. This procedure is repeated for the remaining dimensions (\textbf{c}) in the next level where again half the dimensions (light green) are factored out and their conditional distribution is modelled based on the remaining dimensions (dark green). By inverting permutations introduced in the coupling layers of each level we guarantee that the spatial structure of the original image is preserved at all levels. Specifically, with this structure, the factored out and remaining dimensions correspond to nearby rows of the original image. We expect that the spatial correlation present in nearby rows is effectively leveraged by the conditional distributions parameterized with convolutions, leading to better results.}
+    \label{fig:appendix_idf-invert-perm}
+\end{figure}
+
+The additive bijectors in \eqref{eq:idf_bijector} are adjusted to include a learnable scalar parameter that ensures initialization to the identity operator, similar to the rezero trick by \citet{bachlechner2020rezero}:
+\begin{align}
+    \begin{bmatrix}
+    \bs y_a \\
+    \bs y_b 
+    \end{bmatrix}
+    = 
+    \begin{bmatrix}
+    \bs x_a \\
+    \bs x_b + \lfloor \bs t_{\bs \theta}(\alpha \bs x_a) \rceil 
+    \end{bmatrix} \;.
+    \label{eq:idf++_bijector}
+\end{align}
+Here $\alpha$ is a learnable scalar parameter initialized to zero. 
+The mean and log-scale of the conditional discretized logistic distributions are parameterized as $ \bs \mu = \gamma \bs \nu$, $\log \bs s =  \delta \log \bs \sigma$ with $ [\bs \nu, \log \bs \sigma]= \mathrm{DenseNet}_{\theta}(\bs y)$. $\gamma$ and $\delta$ are learnable scalar parameters initialized to zero, such that the scale is initialized to one and the mean is initialized to zero. 
+
+The combination of the rezero trick and the group normalization layers allows us to use a larger base learning rate of $2\times 10^{-3}$ in the exponential decayed learning rate schedule. For CIFAR-10, the IDF++ model with 8 flows per level was trained for 1400 epochs instead of 2000 epochs as overfitting was observed for more epochs. We evaluated all variations of IDF with an exponential moving average of the trainable parameters with a decay rate of $0.9999$.
+
+
+\subsection{Architecture for toy example models}
+\label{sec:appendix_toy_architecture}
+The models for the toy examples in Section \ref{sec:flex} and \ref{sec:quantization} have a single level with an unconditional prior given by a mixture of logistics with five components. The models have two coupling layers with DenseNets as translation neural networks. The dense blocks have the following structure
+\begin{align}
+&\text{Dense block:} \quad \mathrm{Conv1x1} \rightarrow \mathrm{LayerNorm} \rightarrow \mathrm{ReLU} \rightarrow  \mathrm{Conv1x1} \rightarrow \mathrm{LayerNorm}\rightarrow \mathrm{ReLU} \nonumber. 
+\end{align}
+We found the inclusion of LayerNorm \citep{ba2016layer} to help make the model less sensitive to initialization. Because the DenseNets in these models are fairly shallow we did not see a performance difference between LayerNorm and GroupNorm. 
+The DenseNets have a depth of $4$ blocks and $32$ channels.
+The datapoints are treated as images of shape $h \times w \times c = 1\times1\times2$.
+The additive bijectors split the random variable into two parts along the channel dimension. After translating, the resulting variables are concatenated again along the channel axis. In between the coupling layers the channels are reversed to allow for alternating conditioning.
+The learning rates for the prior parameters and coupling layers are set to $1 \times 10^{-3}$ and $1 \times 10^{-4}$ respectively and we used a batchsize of 128.
+
+\subsection{Datasets}
+The training set of CIFAR-10 consists of 50000 images and the test set contains 10000 images. ImageNet-32 and ImageNet-64 contain approximately 1250000 train images and 50000 test images. 
+While we used a validation set that was held out from the respective training sets for model development, we trained our final models on the entire training set for each dataset. The effect of this is discussed in Section \ref{sec:appendix_ablation}. We follow \citet{hoogeboom2019idf} and augment the CIFAR-10 dataset with horizontal flipping, reflect-padding and random cropping during training. No augmentation is used for ImageNet-32 and ImageNet-64.
+
+
+\subsection{Hardware and software}
+We implemented our models in TensorFlow \citep{tensorflow2015-whitepaper}. All experiments were run with 8 NVIDIA V100 GPUs. 
+
+\section{Ablation studies}
+\label{sec:appendix_ablation}
+
+\begin{table}[b!]
+    \begin{center}
+        \caption{Ablation study of the modifications of IDF for the CIFAR-10 dataset. The second column indicates the percentage of the dataset's original train set that was used to train the model. EMA = exponential moving average. The reported numbers are theoretically achievable bits per dimension.}
+        \begin{tabular}{lll} 
+            \toprule
+             IDF variations & \% Train data & \textsc{Cifar-10} \\
+             \midrule
+             IDF                & 80\%             & $3.322$ \\
+             IDF          & 100\%           &  $3.298$\\
+             IDF + EMA          & 100\%            &$3.291$ \\
+             IDF + EMA + rezero + lr $\times \;2$ & 100\% &  $3.262$ \\
+             IDF + EMA + rezero + lr $\times \;2$ + invert perm &100\% & $3.255$ \\
+            IDF + EMA + rezero + lr $\times \;2$ + invert perm + groupnorm (\textbf{IDF++}) & 100\%& $3.241$ \\
+             \bottomrule
+             \end{tabular}
+        \label{tab:ablation}
+    \end{center}
+    \vspace{-10pt}
+\end{table}
+
+Table \ref{tab:ablation} shows the contributions of the modifications proposed in Section \ref{sec:experiments} for IDF++. 
+As \citet{hoogeboom2019idf} only use 80\% of the training data for CIFAR-10, we also show the influence of using the entire train set for training, as opposed to keeping 20\% held out as a validation set. Note that the result for the original IDF model on 80\% of the training data reproduces the result of \citet{hoogeboom2019idf}. The held out validation set for ImageNet-32 and ImageNet-64 was much smaller and we noticed no significant change in performance when training on the entire training set for these datasets. All models without group normalization were trained for 2000 epochs. The final IDF++ model, which includes group normalization layers, was trained for 1400 epochs to avoid overfitting.
+
+In Figure \ref{fig:appendix_overfitting} the validation bpd is shown for IDF++ models and their continuous counterparts for 8 and 10 flows per level. The plot shows that both the continuous and the discrete model with 10 flows per level start to overfit. 
+
+\begin{figure}[t!]
+    \centering
+        \includegraphics[width=0.5\textwidth]{figures/cifar10_densenetpp_fpl_fullruns.png}
+    \caption{The performance of IDF++ models and their continuous counterparts on the validation set for 8 and 10 flows per level (fpl). The models are trained on 80\% of the training data.}
+    \label{fig:appendix_overfitting}
+\end{figure}
+
+\end{appendices}
