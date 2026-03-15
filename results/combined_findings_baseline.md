@@ -107,6 +107,21 @@ We also evaluated scenarios where the reference answer was provided to the model
 
 **Key insight:** F1/ROUGE/BLEU are poor proxies for feedback quality. Human evaluation was necessary to reveal the true differences.
 
+### Phase 2c: LLM-as-Judge (N=50 per scenario)
+
+*Question: Does the model's feedback match educator-written ground truth feedback?*
+
+Using Claude (`claude-sonnet-4-6`) to judge each predicted feedback as Match / Partial / Unmatched against ground truth.
+
+| Scenario | N | Match | Partial | Unmatched | Match % | Soft Match % | Avg F1 | Avg ROUGE-L | Avg BLEU |
+|----------|---|-------|---------|-----------|---------|--------------|--------|-------------|----------|
+| multimodal_no_answer | 50 | 3 | 25 | 22 | 6.0% | **56.0%** | 0.302 | 0.197 | 6.16 |
+| vision_only_no_answer | 50 | 2 | 22 | 26 | 4.0% | 48.0% | 0.292 | 0.184 | 6.70 |
+| caption_only_no_answer | 50 | 1 | 22 | 27 | 2.0% | 46.0% | 0.294 | 0.192 | 4.79 |
+| text_only_no_answer | 50 | 1 | 19 | 30 | 2.0% | 40.0% | 0.296 | 0.189 | 5.09 |
+
+**Finding:** Multimodal leads on soft match (56%) at N=50, confirming the human evaluation finding. Match rates are low overall (2–6%), reflecting the stricter LLM judge rubric applied to a larger sample.
+
 ---
 
 ## Conclusion: Verdict Accuracy ≠ Feedback Quality

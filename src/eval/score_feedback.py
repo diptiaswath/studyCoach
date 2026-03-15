@@ -78,6 +78,7 @@ def main():
     parser.add_argument("--out_scored_dir", default="data/eval_scored", help="Directory to write per-file scored JSONL")
     parser.add_argument("--out_summary_dir", default="data/eval_summary", help="Directory to write summary CSV/JSON")
     parser.add_argument("--pattern", default="*.json", help="Glob for input files")
+    parser.add_argument("--run_name", default="", help="Prefix for summary output filenames (e.g. 'qwen3_32b')")
     args = parser.parse_args()
 
     in_dir = Path(args.in_dir)
@@ -145,8 +146,9 @@ def main():
         )
 
     # write summary outputs
-    summary_csv = out_summary_dir / "eval_metrics_summary.csv"
-    summary_json = out_summary_dir / "eval_metrics_summary.json"
+    prefix = f"{args.run_name}_" if args.run_name else ""
+    summary_csv = out_summary_dir / f"{prefix}eval_metrics_summary.csv"
+    summary_json = out_summary_dir / f"{prefix}eval_metrics_summary.json"
 
     write_csv(
         summary_csv,

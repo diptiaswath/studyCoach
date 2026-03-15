@@ -149,24 +149,61 @@ python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images \
   --output data/SPIQA_testA_part1_output.json
 ```
 
-## Usage – Evaluation and Human Annotation
+## Environment Setup
 
-### 1. Automatic Metric Scoring
+```bash
+conda env create -f environment.yml
+conda activate studyCoachEnv
+```
 
-We compute the following metrics between:
+Required API keys (set as environment variables):
 
-- `ground_truth.feedback`
-- `predicted.feedback`
+| Variable | Used By |
+|---|---|
+| `OPENAI_API_KEY` | `icl.py` (GPT-5.1 for SPIQA+ generation) |
+| `TOGETHER_API_KEY` | All 4 eval scenarios (Qwen3-VL via Together.ai) |
+| `ANTHROPIC_API_KEY` | LLM-as-judge (`llm_judge_feedback.py`) |
 
-Metrics:
+---
 
-- F1 (token-level)
-- ROUGE-L
-- BLEU
+## Usage – Evaluation Pipeline
 
-#### Run Scoring
+### Step 1: Run Evaluation Scenarios
 
-From the project root:
+Four scenarios test how much context (caption, image) helps the model assess student answers. All scripts share the same CLI interface and read from a SPIQA+ output JSON.
+
+| Scenario | Script | Model Input |
+|---|---|---|
+| Text-only | `eval_text_only.py` | Question + student answer |
+| Caption-only | `eval_caption_only.py` | + figure caption |
+| Vision-only | `eval_vision_only.py` | + figure image |
+| Multimodal | `eval_multimodal.py` | Caption + image + question |
+
+All scenarios use `Qwen/Qwen3-VL-8B-Instruct` via Together.ai.
+
+```bash
+python src/eval_text_only.py --data data/test-A/SPIQA_testA_part1_output_latest.json --images data/test-A/SPIQA_testA_Images --output data/eval/text_only_results.json
+
+python src/eval_caption_only.py --data data/test-A/SPIQA_testA_part1_output_latest.json --images data/test-A/SPIQA_testA_Images --output data/eval/caption_only_results.json
+
+python src/eval_vision_only.py --data data/test-A/SPIQA_testA_part1_output_latest.json --images data/test-A/SPIQA_testA_Images --output data/eval/vision_only_results.json
+
+python src/eval_multimodal.py --data data/test-A/SPIQA_testA_part1_output_latest.json --images data/test-A/SPIQA_testA_Images --output data/eval/multimodal_results.json
+```
+
+Add `--no-answer` to omit the reference answer from the prompt. Add `--max 3` for a quick smoke test.
+
+**Feedback-only variant** (no verdict/error category, no reference answer):
+
+```bash
+python src/eval_multimodal.py --data data/test-A/SPIQA_testA_part1_output_latest.json --images data/test-A/SPIQA_testA_Images --output data/eval/feedback_only_no_answer/multimodal_results.json --no-answer --prompt prompts/feedback_only_eval.txt
+```
+
+---
+
+### Step 2: Automatic Metric Scoring
+
+Computes F1 (token-level), ROUGE-L, and BLEU between `ground_truth.feedback` and `predicted.feedback`.
 
 ```bash
 python -m src.eval.score_feedback \
@@ -175,43 +212,43 @@ python -m src.eval.score_feedback \
   --out_summary_dir data/eval_summary
 ```
 
-#### Outputs
-
-Per-model scored files:
-
-```
-data/eval_scored/<model>.scored.jsonl
-```
-
-Summary table:
-
-```
-data/eval_summary/eval_metrics_summary.csv
-```
-
-Each scored record includes:
-
-- `metrics.feedback.f1`
-- `metrics.feedback.rougeL`
-- `metrics.feedback.bleu`
+Outputs:
+- `data/eval_scored/<scenario>.scored.jsonl` — per-record scores (`metrics.feedback.f1/rougeL/bleu`)
+- `data/eval_summary/eval_metrics_summary.csv` — aggregate summary table
 
 ---
 
-### 2. Human Annotation (Shared Sampling)
+### Step 3: LLM-as-Judge
 
-To fairly compare models, we use shared sampling:
+Uses Claude to evaluate whether AI-generated feedback is equivalent to ground-truth educator feedback. Judges each record as `match`, `partial`, or `unmatched` with a confidence score and rationale.
 
-- The same `k` records are sampled once
-- The same indices are applied to all model files
-- Annotation is performed file-by-file
+```bash
+python -m src.eval.llm_judge_feedback \
+  --in_dir data/eval/feedback_only_no_answer \
+  --out_dir data/llm_judged/feedback_only_no_answer \
+  --pattern "multimodal_results.json"
+```
 
-Labels:
+Output: `data/llm_judged/<run>/<scenario>.llmjudged.json`
 
-- `m` → match
-- `u` → unmatched
-- `p` → partial / unclear
+Each record gains a `llm_judge` field:
+```json
+{
+  "label": "match" | "partial" | "unmatched",
+  "confidence": "high" | "medium" | "low",
+  "rationale": "short explanation"
+}
+```
 
-#### Run Annotation
+Add `--resume` to skip already-judged files if interrupted.
+
+---
+
+### Step 4: Human Annotation (Shared Sampling)
+
+Shared sampling ensures the same `k` records are annotated across all model files for fair comparison. Indices are saved to `annotation_index.json` on first run and reused on subsequent runs.
+
+Labels: `m` → match, `u` → unmatched, `p` → partial/unclear
 
 ```bash
 python -m src.eval.annotate_feedback \
@@ -221,62 +258,37 @@ python -m src.eval.annotate_feedback \
   --seed 42
 ```
 
-This will:
+Add `--resume` to skip already-annotated files if interrupted.
 
-- Sample 10 shared indices
-- Prompt for annotation per model file
-- Save annotated outputs to:
+Output: `data/human_annotated/<scenario>.annotated.jsonl`
 
-```
-data/human_annotated/<model>.annotated.jsonl
-```
-
-Each annotated record includes:
-
-- `human_label` ("match", "unmatched", "partial/unclear")
-- `human_match` (1, 0, 2)
-- `human_notes` (optional)
-- `sample_index` (shared across models)
-
-The shared sampling indices are stored in:
-
-```
-data/human_annotated/annotation_index.json
-```
+Each record includes `human_label`, `human_match` (1/0/2), `human_notes`, and `sample_index`.
 
 ---
 
-### 3. Resume Annotation
+### Step 5: Combine All Results
 
-If annotation is interrupted, you can resume safely:
+Merges human annotation, LLM judge, and auto metrics into a single summary table per scenario.
 
 ```bash
-python -m src.eval.annotate_feedback \
-  --in_dir data/eval_scored \
-  --out_dir data/human_annotated \
-  --k 10 \
-  --seed 42 \
-  --resume
+python -m src.eval.combine_results \
+  --human_dir data/human_annotated \
+  --llm_dir data/llm_judged/feedback_only_no_answer \
+  --scored_dir data/eval_scored \
+  --out_dir data/eval_summary \
+  --run_name feedback_only_no_answer
 ```
 
-This will:
-
-- Reuse the same shared indices
-- Skip already annotated files
+Output: `data/eval_summary/<run_name>_combined_summary.csv` and `.json`
 
 ---
 
-### 4. Human vs. Automatic Metrics Comparison
-
-After completing human annotation, you can generate a summary comparison between:
-
-- Human judgments (`match / unmatched / partial`)
-- Automatic metrics (F1, ROUGE-L, BLEU)
-
-Run:
+### Step 6: Hypothesis Testing
 
 ```bash
-python -m src.eval.summarize_human_vs_metrics \
-  --in_dir data/human_annotated \
-  --out_dir data/eval_summary
+# H3: Factual errors detected more reliably than conceptual; context helps conceptual more
+python src/eval_by_error_type.py --data data/test-A/SPIQA_testA_part1_output_latest.json --images data/test-A/SPIQA_testA_Images --output data/eval/error_type_analysis
+
+# H4: Tables easiest (explicit data), architecture diagrams hardest (spatial reasoning)
+python src/eval_by_figure_type.py --data data/test-A/SPIQA_testA_part1_output_latest.json --images data/test-A/SPIQA_testA_Images --output data/eval/figure_type_analysis
 ```

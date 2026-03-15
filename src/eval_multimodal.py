@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from eval_utils import load_examples, parse_eval_output, save_results, to_data_url, SYSTEM_PROMPT
 
 MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
 
 def build_client() -> openai.OpenAI:
@@ -44,7 +45,7 @@ def build_client() -> openai.OpenAI:
     )
 
 
-def evaluate_example(client: openai.OpenAI, example: dict, include_answer: bool = True) -> dict:
+def evaluate_example(client: openai.OpenAI, example: dict, include_answer: bool = True, system_prompt: str = SYSTEM_PROMPT) -> dict:
     caption = example["caption"]
     question = example["question"]
     answer = example["answer"]
@@ -66,7 +67,7 @@ def evaluate_example(client: openai.OpenAI, example: dict, include_answer: bool 
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
     )
@@ -118,7 +119,17 @@ def main() -> None:
         action="store_true",
         help="Omit the reference answer from the prompt",
     )
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Path to a custom system prompt file (default: prompts/incongruence_eval_v3.txt)",
+    )
     args = parser.parse_args()
+
+    system_prompt = SYSTEM_PROMPT
+    if args.prompt:
+        system_prompt = Path(args.prompt).read_text(encoding="utf-8").strip()
+        print(f"Using custom prompt: {args.prompt}")
 
     client = build_client()
 
@@ -131,7 +142,7 @@ def main() -> None:
         print(f"[{i}/{len(examples)}] paper={example['paper_id']} "
               f"gt={example['ground_truth']['verdict']}")
         try:
-            result = evaluate_example(client, example, include_answer=not args.no_answer)
+            result = evaluate_example(client, example, include_answer=not args.no_answer, system_prompt=system_prompt)
             results.append(result)
             print(f"  -> predicted: {result['predicted']['verdict']} / "
                   f"{result['predicted']['error_category']}")
