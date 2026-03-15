@@ -1,0 +1,653 @@
+\documentclass{article}
+\usepackage{iclr2024_conference,times}
+\input{math_commands.tex}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{colortbl}
+\iclrfinalcopy
+
+\title{Study Coach: R3. Analysis and Initial Modifications}
+\author{
+  Dipti Aswath$^*$ \hspace{2em} Buddhika Makehelwala$^*$ \hspace{2em} Jiashan Cui$^*$ \hspace{2em} Khubi Shah$^*$ \\
+  \texttt{\{daswath, bmakehelwala, jiashanc, khubis\}@andrew.cmu.edu}
+}
+\date{}
+
+\begin{document}
+\maketitle
+
+The aim in this report is to analyze the outputs of the approaches collected in R2,
+and try out modifications to see how they affect performance on intrinsic metrics
+and qualitatively. Our task is incongruence detection: given a scientific figure and
+a student answer, a model must (1) classify the verdict (correct / partially correct
+/ incorrect), (2) identify the error category (factual, conceptual, omission), and
+(3) generate coaching feedback.
+
+\section{Analysis (4 pages)}
+
+\subsection{\points{2} Intrinsic Metrics}
+
+For a VLM to grade student answers about scientific figures, it needs three core
+skills: recognizing incomplete answers, knowing when coaching is required, and
+extracting specific values from visual data. We measure these independently of
+end-to-end verdict accuracy using per-example outputs from the 8B evaluation set
+(N=108; 61 partially correct, 47 incorrect; note SPIQA+ contains \emph{no}
+ground-truth correct examples by construction---all generated examples are either
+partially correct or incorrect).
+
+\paragraph{Intrinsic Metric 1: Partially-Correct Recall (PC Recall).}
+
+Can the model recognize that a student answer is \textit{incomplete} rather than
+fully wrong or fully right? Study Coach's core coaching scenario involves answers
+that are partially correct---the student understood something but missed something
+else. An educator who cannot reliably identify this middle class cannot target
+feedback appropriately.
+
+We define PC Recall as the fraction of ground-truth Partially Correct examples
+correctly classified:
+\begin{equation}
+\text{PC Recall} = \frac{\text{TP}_\text{PC}}{\text{TP}_\text{PC} + \text{FN}_\text{PC}}
+\end{equation}
+
+This is not overall verdict accuracy: a model can maintain moderate accuracy by
+collapsing partially correct answers into the incorrect class, generating feedback
+of the wrong kind. PC Recall isolates the hardest, most coaching-relevant class.
+Since no ground-truth correct examples exist, any model prediction of ``Correct''
+is a false positive---making PC Recall the primary signal for verdict inflation.
+
+At 8B scale, PC Recall drops sharply as visual context is added: text-only
+44.3\%~$\to$~multimodal 19.7\% (Table~\ref{tab:intrinsic}). The model correctly
+identifies fewer than 1 in 5 partially correct answers in the multimodal
+condition---the same condition that produces the best coaching feedback. This
+sharpens the verdict--feedback dissociation from R2 into a precise, per-class
+finding: visual input specifically degrades recognition of the middle class that
+most needs coaching.
+
+\paragraph{Intrinsic Metric 2: Feedback Suppression Rate (FSR).}
+
+Does the model generate coaching when it is needed? When the model predicts
+``Correct,'' it outputs N/A feedback by prompt design. Since no ground-truth
+correct examples exist, every Correct prediction simultaneously inflates the
+verdict and silences the coaching pipeline. We define:
+\begin{equation}
+\text{FSR} = \frac{\text{\# predictions where Feedback} = \texttt{N/A}}{\text{total predictions}}
+\end{equation}
+
+FSR measures a prerequisite skill: recognizing that coaching is required at all.
+A model with high FSR produces false-positive verdicts with no explanation,
+directly harming the student. FSR is distinct from verdict accuracy---a model
+could classify incorrect answers correctly while still suppressing feedback on
+every partial-credit case.
+
+FSR increases substantially with visual context: text-only 13.9\%~$\to$~vision-only
+30.6\%~$\to$~multimodal 28.7\% (Table~\ref{tab:intrinsic}). Adding visual input
+causes the model to accept more student answers as correct without justification,
+particularly for omission errors where the answer is plausible but structurally
+incomplete. In the text-only condition, the model suppresses feedback on roughly
+1 in 7 examples; in visual conditions, this rises to nearly 1 in 3.
+
+\paragraph{Intrinsic Metric 3: Visual Grounding Score (VGS).}
+
+Can the model extract specific numerical values from figures and reference them in
+feedback? Factual errors---48\% of our dataset---require verifying claims like
+``BERT achieves 89\%'' against an actual bar height of 84.6\%. A model that
+cannot ground specific values generates generic feedback (``You misread the
+figure'') rather than corrective feedback (``The figure shows 84.6\%, not
+89\%''). We define VGS on factual errors only, excluding suppressed feedbacks:
+\begin{equation}
+\text{VGS} = \frac{\text{\# feedbacks citing specific numerical values}}{\text{\# non-suppressed feedbacks (factual errors only)}}
+\end{equation}
+
+VGS measures whether visual information is actually translated into text during
+reasoning, independently of whether the verdict is correct. It is conceptually
+related to Qwen3-VL's square-root reweighting loss (preserving visual grounding
+during pre-training) but measured at inference time on our task.
+
+VGS increases substantially with visual input: text-only 31.1\%~$\to$~vision-only
+58.3\%~$\to$~multimodal 52.9\% (Table~\ref{tab:intrinsic}). This confirms that
+the model \textit{does} use visual information for explanation generation even when
+it cannot use it for classification---providing intrinsic evidence for the
+verdict--feedback dissociation. The gap between VGS (52.9\% at C4) and factual
+verdict accuracy (30.8\% at C4) quantifies the grounding bottleneck: the model
+extracts values into feedback text, but this extraction is not reliable enough to
+anchor the three-class verdict decision.
+
+\medskip
+\noindent
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Intrinsic Metric & Skill Measured & Why It Is Needed \\
+\midrule
+PC Recall & Detecting incomplete answers & Prerequisite for targeted coaching \\
+FSR       & Knowing when coaching is needed & Prerequisite for feedback generation \\
+VGS       & Extracting values from figures  & Prerequisite for factual correction \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Evaluation methodology: LLM-as-Judge for feedback quality.}
+
+Because open-ended coaching feedback cannot be evaluated with n-gram metrics alone
+(F1, ROUGE-L, and BLEU show near-zero variation across conditions at both scales;
+see R2, Table~10), we use Claude Sonnet~4 as an automated judge. Each predicted
+feedback is classified as \textbf{Match} (correctly identifies error and explains
+why), \textbf{Partial} (right direction but imprecise or incomplete), or
+\textbf{Unmatched} (does not align with ground truth). Full definitions are in R2.
+
+We report \textbf{Match\%} (strict: exact matches only) and \textbf{Soft Match\%}
+(Match + Partial). At 32B, C4 achieves 20\% strict match but 58\% soft
+match---meaning 38\% of responses are approximately correct but not precise.
+Human evaluation ($n{=}10$/condition, 8B) confirmed the pattern: human match
+ranged from 40\% (C1) to 80\% (C4), validating soft match as the practical metric
+for coaching. We use strict match (Match\%) in Table~\ref{tab:intrinsic} since it
+separates conditions more cleanly.
+
+\clearpage
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+& & \multicolumn{3}{c}{Intrinsic Metrics} & \multicolumn{3}{c}{Extrinsic Metrics} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}
+Model & Condition
+  & PC Rec $\uparrow$
+  & FSR $\downarrow$
+  & VGS $\uparrow$
+  & Verd $\uparrow$
+  & Match\% $\uparrow$
+  & SoftM\% $\uparrow$ \\
+\midrule
+\multicolumn{7}{l}{\textit{Unimodal Baselines (Qwen3-VL-8B, N=50 extrinsic, N=108 intrinsic)}} \\
+Qwen3-VL-8B & C1: text-only    & 44.3\% & 13.9\% & 31.1\% & 56.0\% & 2.0\% & 40.0\% \\
+Qwen3-VL-8B & C2: caption-only & 29.5\% & 17.6\% & 37.2\% & 48.0\% & 2.0\% & 46.0\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Simple Multimodal Baselines (Qwen3-VL-8B, N=50 extrinsic, N=108 intrinsic)}} \\
+Qwen3-VL-8B & C3: vision-only  & 21.3\% & 30.6\% & 58.3\% & 50.0\% & 4.0\% & 48.0\% \\
+Qwen3-VL-8B & C4: multimodal   & 19.7\% & 28.7\% & 52.9\% & 48.0\% & 6.0\% & 56.0\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Competitive Approaches (Qwen3-VL-32B, N=50)}} \\
+Qwen3-VL-32B & C1: text-only    & --- & --- & --- & 56.0\% & 2.0\% & 42.0\% \\
+Qwen3-VL-32B & C2: caption-only & --- & --- & --- & 58.0\% & 8.0\% & 48.0\% \\
+Qwen3-VL-32B & C4: multimodal   & --- & --- & --- & 54.0\% & 20.0\% & 58.0\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Modifications (Qwen3-VL-8B, N=50 extrinsic, N=108 intrinsic)}} \\
+Routing     & C1 verdict + C4 fdbk         & 44.3\% & 28.7\% & 52.9\% & 56.0\% & 6.0\% & 56.0\% \\
+Qwen3.5-9B   & C1: text-only (Mod~2)  & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+Qwen3.5-9B   & C4: multimodal (Mod~2) & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+Qwen3.5-397B & C1: text-only (Mod~3)  & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+Qwen3.5-397B & C4: multimodal (Mod~3) & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+\bottomrule
+\end{tabular}
+\caption{\points{1} Intrinsic and extrinsic metrics. Intrinsic metrics (PC Recall,
+FSR, VGS) computed from 8B per-example outputs on H3 evaluation set (N=108; 61
+partially correct, 47 incorrect). Extrinsic metrics (Verdict, Match\%, SoftM\%)
+from H1/H2 evaluation (N=50 per condition). PC Recall = partially-correct recall;
+FSR = feedback suppression rate (lower is better); VGS = visual grounding score,
+factual errors only; Verdict = three-class accuracy; Match\% = LLM-as-Judge strict
+match; SoftM\% = Match + Partial. 32B intrinsic metrics marked --- (per-example
+outputs unavailable). Routing combines C1 verdict with C4 feedback at no additional
+inference cost.}
+\label{tab:intrinsic}
+\end{table}
+
+\subsection{Modifications and their Effects}
+\points{2}
+
+We implement three modifications motivated by the qualitative failure analysis in
+Section~\ref{sec:qual} and the intrinsic metric patterns above. Modification~1
+(Condition Routing) is a zero-cost inference-time fix computable from existing R2
+outputs. Modifications~2 and 3 are architectural ablations that test competing
+explanations for the verdict--feedback dissociation by swapping the model while
+holding the prompt and evaluation pipeline constant.
+
+\paragraph{Modification 1: Condition Routing (C1 verdict + C4 feedback).}
+
+\textbf{Motivation.} The intrinsic metrics make the verdict--feedback dissociation
+precise: PC Recall drops from 44.3\% to 19.7\% as visual context is added (C1 to
+C4), while VGS rises from 31.1\% to 52.9\%. These are not correlated failures of
+a single configuration---they measure different sub-skills that are genuinely in
+tension at 8B scale. The model can use visual information for extraction (improving
+VGS and feedback quality) but not for classification (degrading PC Recall). Routing
+assigns each sub-task to the condition best suited to it: C1 for verdict and error
+category, C4 for coaching feedback.
+
+\textbf{Implementation.} No new inference is required. We pair per-example C1
+predictions (verdict, error category) with per-example C4 predictions (feedback)
+using matched (\texttt{paper\_id}, \texttt{question}) keys across the H3/H4
+evaluation set. All 108 examples matched successfully (100\% coverage).
+
+\textbf{Results.} Routing achieves the best combined profile across all conditions:
+verdict 56.0\% and PC Recall 44.3\% (matching C1), VGS 52.9\% and Fdbk Match
+6.0\% (matching C4), with FSR at 28.7\%. The routing system recovers C1's verdict
+precision and C4's visual grounding simultaneously at zero additional inference
+cost. The FSR limitation (28.7\%) arises because N/A feedback comes from C4 when
+C4 predicts Correct; a production system would override this by using the C1
+verdict to force feedback generation regardless of C4's verdict.
+
+\paragraph{Modification 2: Architectural Ablation --- Qwen3.5-9B Early Fusion vs. Qwen3-VL-8B Bolt-On ViT.}
+
+\textbf{Motivation.} The intrinsic metrics reveal a structural paradox: VGS rises
+from 31.1\% (C1) to 52.9\% (C4), confirming that visual information is being
+extracted and used for explanation generation---yet PC Recall simultaneously
+collapses from 44.3\% to 19.7\%, and FSR roughly doubles. The model \emph{can}
+use figure content; it just cannot apply it to the verdict classification decision.
+
+One architectural explanation is the \emph{bolt-on ViT} design of Qwen3-VL.
+In Qwen3-VL-8B, a separately-trained Vision Transformer (ViT with DeepStack)
+encodes the figure into 256 compressed visual tokens, which are projected into the
+LLM's token space via a Spatial Merger and concatenated with text tokens before
+Layer 1. The visual pathway was added onto an LLM that was originally trained
+on text alone. This late-injection design may create a representational mismatch:
+the LLM backbone was not pre-trained to interpret projected visual tokens for
+three-class verdict decisions, even though it can use those tokens to enrich
+open-ended text generation (feedback).
+
+Qwen3.5-9B uses a fundamentally different design: \emph{early fusion}. Vision and
+language tokens are co-trained from the start of pre-training within a unified
+Gated DeltaNet hybrid architecture, with no separate ViT encoder or projection
+bridge. Visual and textual representations are never disentangled---they occupy the
+same token space throughout all 32 layers. This is not a cosmetic difference: the
+model was never in a regime where visual tokens were foreign inputs bolted onto a
+text-trained backbone. If the bolt-on ViT is the cause of verdict accuracy
+degradation under visual input, Qwen3.5-9B should show a smaller or reversed
+verdict gap (C4 accuracy $\geq$ C1 accuracy) at comparable parameter count.
+
+\textbf{Architecture comparison:}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+ & Qwen3-VL-8B (baseline) & Qwen3.5-9B (modification) \\
+\midrule
+Vision design   & Bolt-on ViT + Spatial Merger & Early fusion, no separate ViT \\
+Pre-training    & Text first, vision added later & Co-trained from start \\
+Visual tokens   & 256 compressed tokens injected at L1 & Unified token space throughout \\
+Architecture    & Standard transformer & Gated DeltaNet + Gated Attention hybrid \\
+Parameters      & 8B & 9B \\
+Together.ai ID  & \texttt{Qwen/Qwen3-VL-8B-Instruct} & \texttt{Qwen/Qwen3.5-9B} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Exact implementation steps (what to run):}
+
+\begin{enumerate}
+
+\item \textbf{Confirm Together.ai access.}
+Verify \texttt{Qwen/Qwen3.5-9B} is available under the existing Together.ai API
+key used for R2. Model is live as of March 2, 2026 (\$0.10/1M input,
+\$0.15/1M output tokens).
+
+\item \textbf{Disable thinking mode.}
+Qwen3.5-9B runs in thinking mode by default, which prepends a chain-of-thought
+reasoning block before the final response. This will break the structured output
+parser (which expects \texttt{Verdict = ...}, \texttt{Error Category = ...},
+\texttt{Feedback = ...}). Disable it explicitly:
+\begin{quote}
+\texttt{extra\_body=\{"chat\_template\_kwargs": \{"enable\_thinking": False\}\}}
+\end{quote}
+Use sampling parameters: \texttt{temperature=0.0} (greedy, for reproducibility),
+\texttt{top\_p=1.0}, \texttt{presence\_penalty=0.0}.
+
+\item \textbf{Use identical prompts.}
+Use the exact same prompt templates as R2 for all four conditions (C1--C4). No
+prompt changes. The only change is the model ID string. This ensures any
+performance difference is attributable to the model architecture, not prompt
+variation.
+
+\item \textbf{Run C1 and C4 on the H3/H4 evaluation set (N=108).}
+These are the two conditions that define the verdict--feedback gap. C1 (text-only)
+establishes the same-architecture text baseline. C4 (multimodal) is the
+hypothesis-test condition: does early fusion eliminate the verdict drop?
+Running all four conditions (C1--C4) is preferred if API budget allows, to produce
+a complete comparison row in Table~\ref{tab:intrinsic}.
+
+\item \textbf{Parse outputs with the same extraction logic.}
+Qwen3.5-9B output formatting may differ slightly from Qwen3-VL (e.g., extra
+whitespace, different capitalization of ``Partially Correct'' vs ``partially
+correct''). Before computing metrics, verify the parser correctly extracts Verdict,
+Error Category, and Feedback fields from 5--10 sample outputs. Normalize verdict
+strings to lowercase before comparison.
+
+\item \textbf{Run the same three evaluation scripts:}
+  \begin{itemize}
+  \item Verdict accuracy: compare predicted vs.\ ground-truth verdict labels
+  \item Intrinsic metrics (PC Recall, FSR, VGS): same computation from raw
+    per-example outputs
+  \item Feedback quality (LLM-as-Judge): run \texttt{analyze\_feedback\_by\_error\_type.py}
+    with \texttt{model=claude-sonnet-4-6}, \texttt{temperature=0}, N=108
+  \end{itemize}
+
+\item \textbf{Interpret the result against two hypotheses:}
+  \begin{itemize}
+  \item \textbf{If C4 verdict accuracy $\geq$ C1 for Qwen3.5-9B:} early fusion
+    resolves the architectural mismatch. The R4 implication is to use Qwen3.5-9B
+    as the backbone for fine-tuning on SPIQA+, not Qwen3-VL.
+  \item \textbf{If C4 verdict accuracy $<$ C1 for Qwen3.5-9B:} the bolt-on ViT
+    is not the cause. The failure is inherent to how visual input interacts with
+    three-class verdict decisions at this parameter scale, and the R4 strategy
+    shifts to fine-tuning Qwen3-VL-32B (or 72B+) with a Verdict-Classification
+    Head.
+  \end{itemize}
+
+\end{enumerate}
+
+\textbf{Results.} \textit{[To be filled after running N=108 on C1 and C4.
+Update Table~\ref{tab:intrinsic} with PC Recall, FSR, VGS, Verdict, and Fdbk
+Match rows for Qwen3.5-9B C1 and C4.]}
+
+% FIGURE PLACEHOLDER (Mod 2): Grouped bar chart comparing Qwen3-VL-8B C1,
+% Qwen3-VL-8B C4, Routing, Qwen3.5-9B C1, Qwen3.5-9B C4.
+% Three clusters (PC Recall, FSR, Fdbk Match), five bars each.
+
+\paragraph{Modification 3: Frontier-Scale Early Fusion --- Qwen3.5-397B-A17B (C1 and C4).}
+
+\textbf{Motivation.} Modification~2 tests whether the bolt-on ViT architecture
+causes the verdict--feedback dissociation by replacing it with early fusion at
+matched scale ($\sim$9B). But a confound remains: perhaps the failure is not
+architectural but simply a function of cross-modal reasoning capacity, which
+scales with model size. Qwen3-VL-32B already narrowed the verdict gap from
+$-$8pp to $-$2pp without resolving it. The question for Modification~3 is:
+does early fusion at \emph{frontier scale} (17B active parameters, 397B total)
+close the gap entirely?
+
+This matters for R4 for a distinct reason from Modification~2. If Qwen3.5-9B
+(Mod~2) resolves the gap, early fusion at 9B is sufficient and fine-tuning should
+target that backbone. If Qwen3.5-9B does not resolve it but Qwen3.5-397B-A17B
+does, the interaction of early fusion \emph{and} scale is required, and the R4
+fine-tuning backbone must be at least the 397B MoE model (or the 27B dense
+variant as a practical compromise). If neither resolves the gap, the failure is
+inherent to the task at current scales, and the R4 strategy must rely on the
+Verdict-Classification Head and routing rather than a single model.
+
+The 397B-A17B is the same Qwen3.5 architecture as Modification~2 (early fusion,
+Gated DeltaNet + MoE, unified token space), but scales to 397B total / 17B active
+parameters via sparse mixture-of-experts with 512 total experts (10 routed + 1
+shared per token).
+
+\textbf{Architecture comparison across all three models:}
+
+\begin{center}
+\small
+\begin{tabular}{llll}
+\toprule
+ & Qwen3-VL-8B & Qwen3.5-9B & Qwen3.5-397B-A17B \\
+ & (baseline) & (Mod~2) & (Mod~3) \\
+\midrule
+Vision design   & Bolt-on ViT       & Early fusion      & Early fusion \\
+Architecture    & Standard transformer & Gated DeltaNet & Gated DeltaNet + MoE \\
+Active params   & 8B                & 9B               & 17B \\
+Total params    & 8B                & 9B               & 397B \\
+Together.ai ID  & \texttt{Qwen3-VL-8B-Instruct} & \texttt{Qwen3.5-9B} & \texttt{Qwen3.5-397B-A17B} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Exact implementation steps (what to run):}
+
+\begin{enumerate}
+
+\item \textbf{Confirm Together.ai access and cost estimate.}
+Model ID: \texttt{Qwen/Qwen3.5-397B-A17B}. Image input is supported natively.
+At Together.ai rates, running N=108 examples across C1 and C4 (each example
+$\approx$1,500 input + 300 output tokens; C4 adds $\approx$500 image tokens per
+example) costs under \$5 total for both conditions combined.
+
+\item \textbf{Disable thinking mode --- critical.}
+Qwen3.5-397B-A17B runs in thinking mode by default, generating a long internal
+reasoning block before the final response. This will break the structured output
+parser. Disable it in every API call:
+\begin{quote}
+\texttt{extra\_body=\{"chat\_template\_kwargs": \{"enable\_thinking": False\}\}}
+\end{quote}
+Use \texttt{temperature=0.0}, \texttt{top\_p=1.0}, \texttt{presence\_penalty=0.0}
+for reproducibility. If you prefer a small amount of temperature for diversity,
+use \texttt{temperature=0.0} for the first run and compare to the 9B run, which
+should also use \texttt{temperature=0.0}.
+
+\item \textbf{Use identical prompts as R2 and Modification~2.}
+No prompt changes from the R2 baseline. The only variable across all three
+models (Qwen3-VL-8B, Qwen3.5-9B, Qwen3.5-397B-A17B) is the model ID string.
+This is essential: comparing across models with different prompts would confound
+the architectural signal.
+
+\item \textbf{Run C1 (text-only) and C4 (multimodal) on N=108.}
+Same H3/H4 evaluation set as Modification~2. Running the same two conditions
+produces a directly comparable row in Table~\ref{tab:intrinsic}. If API budget
+allows, run all four conditions (C1--C4) to produce a full row.
+
+\item \textbf{Verify the output parser on 5--10 samples before the full run.}
+Qwen3.5-397B-A17B output format may differ from Qwen3-VL: check that
+Verdict, Error Category, and Feedback fields parse correctly with thinking
+mode off. Normalize verdict strings to lowercase (e.g.,
+\texttt{"Partially Correct"} $\to$ \texttt{"partially correct"}).
+
+\item \textbf{Run the same three evaluation scripts as Modification~2.}
+\begin{itemize}
+  \item Verdict accuracy: predicted vs.\ ground-truth verdict labels (N=108)
+  \item Intrinsic metrics: PC Recall, FSR, VGS from per-example raw outputs
+  \item Feedback quality: LLM-as-Judge using \texttt{analyze\_feedback\_by\_error\_type.py},
+    \texttt{model=claude-sonnet-4-6}, \texttt{temperature=0}, N=108
+\end{itemize}
+
+\item \textbf{Interpret against the three-way decision matrix:}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Mod~2 (9B) C4 vs C1 & Mod~3 (397B) C4 vs C1 & Implication for R4 \\
+\midrule
+Resolves gap & --- & Early fusion at 9B is sufficient; fine-tune Qwen3.5-9B \\
+Does not resolve & Resolves gap & Scale + early fusion required; target 27B dense or 397B MoE \\
+Does not resolve & Does not resolve & Task-inherent; use routing + Verdict-Classification Head \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{enumerate}
+
+\textbf{Results.} \textit{[To be filled after running N=108 on C1 and C4.
+Update Table~\ref{tab:intrinsic} with PC Recall, FSR, VGS, Verdict, and Fdbk
+Match rows for Qwen3.5-397B-A17B C1 and C4.]}
+
+% FIGURE PLACEHOLDER (Mod 3 combined): Seven-bar grouped chart comparing
+% Qwen3-VL-8B C1, Qwen3-VL-8B C4, Routing, Qwen3.5-9B C1, Qwen3.5-9B C4,
+% Qwen3.5-397B C1, Qwen3.5-397B C4.
+% Three clusters: PC Recall, FSR, Fdbk Match. This is the primary R3 figure.
+
+\clearpage
+
+\subsection{Qualitative Analysis and Examples}
+\label{sec:qual}
+
+\points{2} Table~\ref{tab:qual} presents five representative failure examples from
+per-example model outputs (8B, text-only condition, H3 evaluation set). Two failure
+modes account for the majority of errors: \textbf{Verdict Inflation}---the model
+upgrades Partially Correct to Correct, producing no feedback---and
+\textbf{Hallucinated Correction}---the model downgrades Partially Correct to
+Incorrect with confident but wrong feedback. Both modes share a root cause: without
+figure verification, the model falls back on plausibility assessment rather than
+evidence-based judgment.
+
+\begin{table*}[!ht]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.03\linewidth}p{0.09\linewidth}p{0.17\linewidth}p{0.16\linewidth}p{0.17\linewidth}p{0.18\linewidth}p{0.13\linewidth}@{}}
+\toprule
+\# & Error Type & Question & Student Answer & Ground Truth & Model Output & Failure Mode \\
+\midrule
+1 &
+Factual &
+Which model performs best on Ubuntu for text lengths 60--90 words? &
+``The LSTM model performs best for that length range.'' &
+\textbf{Partially Correct.} Right range, misread top model from table. Feedback should correct the misread value and name the actual winner. &
+\textbf{Incorrect.} ``The Transformer model performs best, not LSTM.'' &
+\textbf{Hallucinated Correction.} Verdict wrong; feedback invents a specific correction that may itself be incorrect. Student given false confidence in wrong information. \\
+\midrule
+2 &
+Factual &
+Which of LSTw/oAR or LST-Skip performs better? &
+``LSTw/oAR; its red forecast line stays closer to the true data than LST-Skip.'' &
+\textbf{Partially Correct.} Correct comparison approach; misread which panel shows the closer match. &
+\textbf{Correct. N/A.} &
+\textbf{Verdict Inflation.} False positive; feedback suppressed. Student's panel misread goes uncorrected. \\
+\midrule
+3 &
+Conceptual &
+Which Ortiz et al.\ system had highest BLEU/METEOR, and what does this mean? &
+``SMT system, 43.7 BLEU and 35.6 METEOR. This means SMT outperforms all systems.'' &
+\textbf{Partially Correct.} Numbers correct, system identified correctly. Missed: interpretive claim is unsupported without cross-system comparison. &
+\textbf{Correct. N/A.} &
+\textbf{Verdict Inflation.} Numbers verified via pre-trained knowledge; interpretive gap not detected. Incomplete reasoning accepted as complete. \\
+\midrule
+4 &
+Omission &
+What is the role of temperature $t$ in CCA decoding? &
+``Temperature $t$ controls the stopping condition; as $t$ decreases, the search ends.'' &
+\textbf{Partially Correct.} Correctly notes $t$ decreases; omits its role shaping acceptance probabilities $\alpha_0, \alpha_1$ in the main loop. &
+\textbf{Incorrect.} ``$t$ does not control stopping. It modulates a probability distribution over outputs.'' &
+\textbf{Hallucinated Correction.} Partially-right claim over-penalized; actual omission (acceptance probabilities) not identified. Model contradicts a claim the student got right. \\
+\midrule
+5 &
+Omission &
+Which agent values the entire share $Z_j$? &
+``Agent $j$ values $Z_j$, since the solid blue boxes cover all of $Z_j$.'' &
+\textbf{Partially Correct.} Correct answer; omits that \emph{other} agents do not value the entire share---the contrastive point the question implies. &
+\textbf{Correct. N/A.} &
+\textbf{Verdict Inflation.} Plausible claim accepted without figure verification. Contrastive omission not detected. Most common mode for omission errors: 0/15 exact feedback match at C1. \\
+\bottomrule
+\end{tabular}
+\caption{\points{2} Qualitative failure analysis (Qwen3-VL-8B, text-only condition, H3 evaluation
+set). Two failure modes: \textbf{Verdict Inflation} (examples 2, 3, 5)---model predicts Correct
+with N/A feedback, silencing the coaching pipeline; \textbf{Hallucinated Correction}
+(examples 1, 4)---model predicts Incorrect with confident but wrong feedback. Root cause: without
+the figure, the model performs plausibility checking rather than evidence-based
+verification. Visual context (C4) reduces both modes by grounding reasoning in figure
+content, explaining why feedback quality improves even as PC Recall drops.}
+\label{tab:qual}
+\end{table*}
+
+\clearpage
+
+\section{\points{3} Insights}
+
+\textbf{The verdict--feedback dissociation is a task decomposition signal, not a
+bug to fix.} Our intrinsic metric analysis sharpens what appeared in R2 as a
+surprising empirical finding into a precise, mechanistically-grounded claim. PC
+Recall drops from 44.3\% to 19.7\% as visual input is added, while VGS rises from
+31.1\% to 52.9\%. These measure different sub-skills that are genuinely in tension
+at 8B scale: visual information improves value extraction into text (VGS) but
+introduces noise into the three-class decision boundary, particularly for the
+partially correct middle class that requires the most nuanced judgment. The
+condition routing modification confirms this: using C1 for verdict and C4 for
+feedback simultaneously recovers C1's PC Recall (44.3\%) and C4's feedback quality
+(6.0\% match) at no additional inference cost. This reframes the main model
+proposal for R4: rather than searching for a single configuration or fine-tuning
+objective that improves both metrics jointly, Study Coach should be designed as an
+explicit two-stage pipeline with task routing---a lightweight verdict classifier
+(the Verdict-Classification Head proposed in R2, Section 3.4) decoupled from the
+feedback generator. The head would be trained directly on the three-class boundary
+using C1 or C2 inputs, while the feedback generator continues to use C4.
+
+\textbf{The two architectural ablations together form a decision tree for R4.}
+The gap between VGS (52.9\% at C4) and PC Recall (19.7\% at C4) has two competing
+explanations. The first is architectural: Qwen3-VL's bolt-on ViT injects 256 projected
+visual tokens into a backbone that was pre-trained without them, creating a
+representational mismatch that affects classification more than generation. The second
+is scale-dependent: the capacity required to use visual input reliably for three-class
+verdict decisions simply exceeds what 8B parameters can provide, regardless of
+architecture. Modifications~2 and 3 test these explanations at two operating points:
+9B early fusion (isolates architecture at matched scale) and 397B early fusion (tests
+whether the combination of architecture change and scale increase resolves what neither
+alone could). The three outcomes map directly to R4 strategy: if Qwen3.5-9B resolves
+the gap, fine-tune that backbone on SPIQA+; if only 397B resolves it, use the 27B
+dense variant as a practical fine-tuning target (full 397B fine-tuning is cost-prohibitive
+but the result identifies the correct architecture family); if neither resolves it, the
+task requires the Verdict-Classification Head (R2, Section~3.4) as an explicit
+supervisory signal for the verdict decision, with condition routing as the production
+deployment strategy regardless. The condition routing result from Modification~1 is
+robust to all three outcomes: it already captures C1 verdict precision and C4 feedback
+quality simultaneously, and will remain the best zero-cost inference strategy until
+fine-tuning is complete.
+
+\subsection{Team Member Contributions to this Report}
+
+\paragraph{Dipti Aswath} Defined the three intrinsic metrics (PC Recall, FSR, VGS)
+and computed all values from per-example raw outputs. Designed and evaluated
+Modification 1 (Condition Routing). Performed qualitative failure analysis and
+selected representative examples. Wrote Sections 1 (Intrinsic Metrics),
+Modification 1, Qualitative Analysis, Section 2 (Insights), and this contributions
+section.
+
+\paragraph{Buddhika Makehelwala} \textit{[To be filled in by Buddhika.]}
+
+\paragraph{Jiashan Cui} \textit{[To be filled in by Jiashan.]}
+
+\paragraph{Khubi Shah} \textit{[To be filled in by Khubi.]}
+
+\bibliography{references}
+\bibliographystyle{iclr2024_conference}
+
+\appendix
+\section{Appendix}
+
+\subsection{Intrinsic Metric Computation Details}
+
+All intrinsic metrics computed from 8B per-example outputs (H3/H4 evaluation set,
+N=108; 52 factual, 41 conceptual, 15 omission). Ground truth: 61 partially correct,
+47 incorrect, 0 correct.
+
+\textbf{PC Recall:} Count predictions of ``Partially Correct'' where ground truth =
+``Partially Correct.'' 61 such cases in the dataset.
+
+\textbf{FSR:} Count predictions where the raw output feedback field = ``N/A'' or
+empty. These correspond exactly to Correct predictions by prompt design.
+
+\textbf{VGS:} For factual error examples only, among non-suppressed feedbacks, count
+those matching a regex for specific numerical values (\textit{digits followed by \%},
+\textit{multi-digit integers}, or \textit{decimal numbers}). Denominators: C1=45,
+C2=43, C3=36, C4=34 (remaining after suppression).
+
+\textbf{Condition Routing:} Matched by (\texttt{paper\_id}, \texttt{question}) key
+across text\_only and multimodal outputs. All 108 examples matched (100\% coverage).
+Verdict and error category from text\_only; feedback from multimodal.
+
+\subsection{Feedback Judgment Counts (8B, H3 Evaluation Set, N=108)}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Error Type & Condition & Match & Partial & Unmatched & Match\% \\
+\midrule
+Factual    & text\_only    &  7 &  9 & 36 & 13.5\% \\
+Factual    & caption\_only & 13 &  7 & 32 & 25.0\% \\
+Factual    & vision\_only  & 15 &  6 & 31 & 28.8\% \\
+Factual    & multimodal    & 18 &  8 & 26 & 34.6\% \\
+Conceptual & text\_only    & 11 & 16 & 14 & 26.8\% \\
+Conceptual & caption\_only & 21 & 10 & 10 & 51.2\% \\
+Conceptual & vision\_only  & 15 & 10 & 16 & 36.6\% \\
+Conceptual & multimodal    & 24 &  4 & 13 & 58.5\% \\
+Omission   & text\_only    &  0 &  7 &  8 &  0.0\% \\
+Omission   & caption\_only &  0 &  7 &  8 &  0.0\% \\
+Omission   & vision\_only  &  4 &  3 &  8 & 26.7\% \\
+Omission   & multimodal    &  5 &  3 &  7 & 33.3\% \\
+\bottomrule
+\end{tabular}
+\caption{LLM-as-Judge feedback evaluation counts (8B, N=108).}
+\end{table}
+
+\end{document}
