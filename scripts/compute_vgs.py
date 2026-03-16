@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""
+Compute Visual Grounding Score (VGS) from error_type_results.json
+
+VGS measures whether model feedback cites specific numerical values from figures.
+- Computed on non-suppressed feedbacks only (where feedback != "N/A")
+- Checks for numerical patterns: percentages, decimals, specific values
+
+Usage:
+    python scripts/compute_vgs.py
+"""
+
+import json
+import re
+from pathlib import Path
+from collections import defaultdict
+
+# Patterns to detect specific numerical values in feedback
+NUMERICAL_PATTERNS = [
+    r'\d+\.?\d*\s*%',           # Percentages: 84.6%, 50%
+    r'\d+\.\d+',                 # Decimals: 0.92, 84.6
+    r'=\s*\d+\.?\d*',           # Assignments: F1=0.92, score=85
+    r'\d+\s*(?:pp|points?)',    # Point differences: 8pp, 10 points
+    r'(?:from|to|by)\s+\d+',    # Ranges: from 10 to 50, by 20
+    r'\$?\d+(?:,\d{3})*\.?\d*', # Numbers with optional $ or commas
+    r'\d+/\d+',                  # Fractions: 7/52, 3/4
+    r'R\d+@\d+',                 # Recall metrics: R2@1, R10@5
+    r'(?:top-?|@)\d+',          # Top-k: top-5, @10
+]
+
+def has_numerical_grounding(feedback_text):
+    """Check if feedback contains specific numerical values from figure."""
+    if not feedback_text or feedback_text.strip().upper() == "N/A":
+        return False
+
+    for pattern in NUMERICAL_PATTERNS:
+        if re.search(pattern, feedback_text, re.IGNORECASE):
+            return True
+    return False
+
+def compute_vgs_for_file(filepath):
+    """Compute VGS for a single results file."""
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+
+    results = data.get('results', data)  # Handle both formats
+
+    # Track counts per condition and error type
+    stats = defaultdict(lambda: {'total': 0, 'grounded': 0, 'suppressed': 0})
+
+    # Map condition names
+    condition_map = {
+        'text_only': 'C1',
+        'caption_only': 'C2',
+        'vision_only': 'C3',
+        'multimodal': 'C4'
+    }
+
+    for error_type, conditions in results.items():
+        if error_type not in ['factual', 'conceptual', 'omission']:
+            continue
+
+        for condition_name, examples in conditions.items():
+            condition = condition_map.get(condition_name, condition_name)
+
+            for example in examples:
+                predicted = example.get('predicted', {})
+                feedback = predicted.get('feedback', '')
+
+                key = f"{condition}"
+                key_by_error = f"{condition}_{error_type}"
+
+                if feedback.strip().upper() == "N/A":
+                    stats[key]['suppressed'] += 1
+                    stats[key_by_error]['suppressed'] += 1
+                else:
+                    stats[key]['total'] += 1
+                    stats[key_by_error]['total'] += 1
+
+                    if has_numerical_grounding(feedback):
+                        stats[key]['grounded'] += 1
+                        stats[key_by_error]['grounded'] += 1
+
+    return stats
+
+def print_vgs_report(stats, model_name):
+    """Print VGS report for a model."""
+    print(f"\n{'='*60}")
+    print(f"VGS Report: {model_name}")
+    print('='*60)
+
+    # Overall by condition
+    print("\n## VGS by Condition (all error types)")
+    print("-" * 50)
+    print(f"{'Condition':<12} {'Non-Supp':<10} {'Grounded':<10} {'VGS':<10} {'Suppressed':<10}")
+    print("-" * 50)
+
+    for condition in ['C1', 'C2', 'C3', 'C4']:
+        s = stats[condition]
+        total = s['total']
+        grounded = s['grounded']
+        suppressed = s['suppressed']
+        vgs = (grounded / total * 100) if total > 0 else 0
+        print(f"{condition:<12} {total:<10} {grounded:<10} {vgs:<10.1f}% {suppressed:<10}")
+
+    # By error type
+    print("\n## VGS by Condition × Error Type")
+    print("-" * 70)
+
+    for error_type in ['factual', 'conceptual', 'omission']:
+        print(f"\n### {error_type.capitalize()}")
+        print(f"{'Condition':<12} {'Non-Supp':<10} {'Grounded':<10} {'VGS':<10}")
+
+        for condition in ['C1', 'C2', 'C3', 'C4']:
+            key = f"{condition}_{error_type}"
+            s = stats[key]
+            total = s['total']
+            grounded = s['grounded']
+            vgs = (grounded / total * 100) if total > 0 else 0
+            print(f"{condition:<12} {total:<10} {grounded:<10} {vgs:<10.1f}%")
+
+    # Summary table for Report 3
+    print("\n## Summary for Report 3 Table")
+    print("-" * 50)
+    print("| Condition | VGS |")
+    print("|-----------|-----|")
+    for condition in ['C1', 'C2', 'C3', 'C4']:
+        s = stats[condition]
+        total = s['total']
+        grounded = s['grounded']
+        vgs = (grounded / total * 100) if total > 0 else 0
+        print(f"| {condition} | {vgs:.1f}% |")
+
+    return stats
+
+def main():
+    base_path = Path("data/eval")
+
+    # 8B model
+    path_8b = base_path / "error_type_analysis" / "error_type_results.json"
+    if path_8b.exists():
+        stats_8b = compute_vgs_for_file(path_8b)
+        print_vgs_report(stats_8b, "Qwen3-VL-8B")
+    else:
+        print(f"Warning: {path_8b} not found")
+
+    # 32B model
+    path_32b = base_path / "qwen3_32b" / "error_type_analysis" / "error_type_results.json"
+    if path_32b.exists():
+        stats_32b = compute_vgs_for_file(path_32b)
+        print_vgs_report(stats_32b, "Qwen3-VL-32B")
+    else:
+        print(f"Warning: {path_32b} not found")
+
+    # Print delta comparison
+    if path_8b.exists() and path_32b.exists():
+        print("\n" + "="*60)
+        print("VGS Comparison: 8B vs 32B")
+        print("="*60)
+        print(f"{'Condition':<12} {'8B VGS':<12} {'32B VGS':<12} {'Δ':<10}")
+        print("-" * 50)
+
+        for condition in ['C1', 'C2', 'C3', 'C4']:
+            s8 = stats_8b[condition]
+            s32 = stats_32b[condition]
+
+            vgs_8b = (s8['grounded'] / s8['total'] * 100) if s8['total'] > 0 else 0
+            vgs_32b = (s32['grounded'] / s32['total'] * 100) if s32['total'] > 0 else 0
+            delta = vgs_32b - vgs_8b
+
+            print(f"{condition:<12} {vgs_8b:<12.1f}% {vgs_32b:<12.1f}% {delta:+.1f}pp")
+
+if __name__ == "__main__":
+    main()
