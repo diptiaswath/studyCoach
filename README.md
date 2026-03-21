@@ -12,11 +12,11 @@ StudyCoach generates **synthetic student responses** for the SPIQA (Scientific P
 
 Three core error types guide all parts of the pipeline:
 
-| Error Type     | Definition                                | Example                                                      |
-| -------------- | ----------------------------------------- | ------------------------------------------------------------ |
-| **Omission**   | Missing key details in the student answer | "The methods are similar" (omits metric comparison details)  |
-| **Factual**    | Misreading visual elements                | Misinterpreting axes, legends, or data values in a chart     |
-| **Conceptual** | Wrong conclusion from correct data        | Confusing lower loss with worse performance (inverted logic) |
+| Error Type     | Definition                                | Example                                                       |
+| -------------- | ----------------------------------------- | ------------------------------------------------------------- |
+| **Omission**   | Missing key details in the student answer | "The methods are similar" (omits metric comparison details)   |
+| **Factual**    | Misreading visual elements                | Misinterpreting axes, legends, or data values in a chart      |
+| **Conceptual** | Wrong conclusion from correct data        | Co◊nfusing lower loss with worse performance (inverted logic) |
 
 These error types are:
 
@@ -158,11 +158,45 @@ conda activate studyCoachEnv
 
 Required API keys (set as environment variables):
 
-| Variable | Used By |
-|---|---|
-| `OPENAI_API_KEY` | `icl.py` (GPT-5.1 for SPIQA+ generation) |
-| `TOGETHER_API_KEY` | All 4 eval scenarios (Qwen3-VL via Together.ai) |
-| `ANTHROPIC_API_KEY` | LLM-as-judge (`llm_judge_feedback.py`) |
+| Variable            | Used By                                         |
+| ------------------- | ----------------------------------------------- |
+| `OPENAI_API_KEY`    | `icl.py` (GPT-5.1 for SPIQA+ generation)        |
+| `TOGETHER_API_KEY`  | All 4 eval scenarios (Qwen3-VL via Together.ai) |
+| `ANTHROPIC_API_KEY` | LLM-as-judge (`llm_judge_feedback.py`)          |
+
+### Deploying Qwen3-VL-32B-Instruct (Dedicated Endpoint)
+
+The standard eval scripts use `Qwen/Qwen3-VL-8B-Instruct` (serverless). To run with the larger **Qwen3-VL-32B-Instruct** model, you must create a **dedicated endpoint** on Together.ai — the 32B model is not available serverless.
+
+**Steps:**
+
+1. Go to [api.together.ai](https://api.together.ai) → **Endpoints** → **Create Endpoint**
+2. Select model: `Qwen/Qwen3-VL-32B-Instruct`
+3. Deploy and note the **model ID** shown on the endpoint page (format: `<username>/Qwen/Qwen3-VL-32B-Instruct-<hash>`)
+4. Use `src/eval_multimodal_32B_dedicated_endpoint.py` (git-ignored) as the eval script — it uses the `together` SDK to call the dedicated endpoint:
+
+```python
+from together import Together
+
+MODEL = "YOUR_USERNAME/Qwen/Qwen3-VL-32B-Instruct-YOUR_HASH"  # from endpoint page
+
+client = Together()  # reads TOGETHER_API_KEY automatically
+response = client.chat.completions.create(model=MODEL, messages=[...])
+```
+
+5. Run with `--prompt prompts/feedback_only_eval.txt --no-answer` for the feedback-only variant:
+
+```bash
+python src/eval_multimodal_32B_dedicated_endpoint.py \
+  --data data/test-A/SPIQA_testA_part1_output_latest.json \
+  --images data/test-A/SPIQA_testA_Images \
+  --output data/eval/qwen3_32b/h1h2/feedback_only/multimodal_results.json \
+  --prompt prompts/feedback_only_eval.txt \
+  --no-answer \
+  --max 3  # remove for full run
+```
+
+> `src/eval_multimodal_32B_dedicated_endpoint.py` is listed in `.gitignore` to avoid accidentally committing personal endpoint credentials.
 
 ---
 
@@ -172,12 +206,12 @@ Required API keys (set as environment variables):
 
 Four scenarios test how much context (caption, image) helps the model assess student answers. All scripts share the same CLI interface and read from a SPIQA+ output JSON.
 
-| Scenario | Script | Model Input |
-|---|---|---|
-| Text-only | `eval_text_only.py` | Question + student answer |
-| Caption-only | `eval_caption_only.py` | + figure caption |
-| Vision-only | `eval_vision_only.py` | + figure image |
-| Multimodal | `eval_multimodal.py` | Caption + image + question |
+| Scenario     | Script                 | Model Input                |
+| ------------ | ---------------------- | -------------------------- |
+| Text-only    | `eval_text_only.py`    | Question + student answer  |
+| Caption-only | `eval_caption_only.py` | + figure caption           |
+| Vision-only  | `eval_vision_only.py`  | + figure image             |
+| Multimodal   | `eval_multimodal.py`   | Caption + image + question |
 
 All scenarios use `Qwen/Qwen3-VL-8B-Instruct` via Together.ai.
 
@@ -213,6 +247,7 @@ python -m src.eval.score_feedback \
 ```
 
 Outputs:
+
 - `data/eval_scored/<scenario>.scored.jsonl` — per-record scores (`metrics.feedback.f1/rougeL/bleu`)
 - `data/eval_summary/eval_metrics_summary.csv` — aggregate summary table
 
@@ -232,6 +267,7 @@ python -m src.eval.llm_judge_feedback \
 Output: `data/llm_judged/<run>/<scenario>.llmjudged.json`
 
 Each record gains a `llm_judge` field:
+
 ```json
 {
   "label": "match" | "partial" | "unmatched",

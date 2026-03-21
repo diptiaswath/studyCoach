@@ -128,3 +128,30 @@ Human annotators (N=10 per scenario) were consistently more lenient than the LLM
 - **Automatic metrics still fail to differentiate scenarios** — semantic evaluation (human or LLM-based) remains essential for this task.
 
 Full numeric results: `data/eval_summary/qwen3_32b/qwen3_32b_combined_summary.json`
+
+---
+
+## Analysis Update: Feedback-Only Prompt Experiment (32B)
+
+**Motivation:** Replicating the same single-task simplification tested on the 8B baseline — instead of asking the model to simultaneously classify verdict + error category + generate feedback, the prompt is reduced to feedback generation only. The hypothesis is that a focused single-task prompt produces higher quality feedback.
+
+**Setup:**
+- Baseline: `multimodal` (h1h2 prompt) — asks for Verdict + Error Category + Feedback, no reference answer
+- New: `feedback_only` — simplified prompt asks for Feedback only, no reference answer
+- Both use the multimodal scenario (caption + image) on Qwen3-VL-32B-Instruct, N=50, judged by Claude (`claude-sonnet-4-6`)
+
+| Run | N | Match | Partial | Unmatched | Match % | Soft Match % | Avg F1 | Avg ROUGE-L | Avg BLEU |
+|-----|---|-------|---------|-----------|---------|--------------|--------|-------------|----------|
+| multimodal / h1h2 prompt (baseline 32B) | 50 | 10 | 19 | 21 | 20.0% | 58.0% | 0.298 | 0.202 | 7.44 |
+| feedback_only (new 32B) | 50 | 9 | 29 | 12 | **18.0%** | **76.0%** | **0.404** | **0.257** | **10.45** |
+
+**Finding:** The single-task feedback-only prompt substantially improves soft match from 58% to 76% (+18 pp) and reduces unmatched cases from 21 to 12 (-43%). All auto metrics improved substantially (F1 +36%, ROUGE-L +27%, BLEU +40%). Partial matches increased (19 → 29), indicating the model produces directionally correct feedback more often when not burdened with classification. Strict match dropped slightly (20% → 18%), likely because the h1h2 multimodal baseline was already strong at binary verdict alignment. Overall, task simplification yields a clear improvement in feedback quality at 32B scale.
+
+### 32B vs 8B: Feedback-Only Comparison
+
+| Model | N | Match | Partial | Unmatched | Match % | Soft Match % | Avg F1 | Avg ROUGE-L | Avg BLEU |
+|-------|---|-------|---------|-----------|---------|--------------|--------|-------------|----------|
+| 8B feedback_only | 50 | 4 | 29 | 17 | 4.0% | 66.0% | 0.377 | 0.242 | 7.30 |
+| 32B feedback_only | 50 | 9 | 29 | 12 | **18.0%** | **76.0%** | **0.404** | **0.257** | **10.45** |
+
+**Finding:** Scaling from 8B to 32B with the feedback-only prompt yields consistent gains across all metrics. Strict match improves from 4% → 18% (+14 pp), soft match from 66% → 76% (+10 pp), and unmatched cases drop from 17 → 12. F1, ROUGE-L, and BLEU all improve, indicating 32B generates feedback that is both semantically closer to ground truth and lexically more precise. The partial match count is identical (29), suggesting the ceiling on "directionally correct" responses is model-scale-independent — the 32B advantage lies in converting partial responses to full matches.
