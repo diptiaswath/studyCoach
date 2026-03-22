@@ -200,7 +200,23 @@ def print_vgs_report(stats, model_name):
     return stats
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Compute VGS metrics')
+    parser.add_argument('--cot', action='store_true',
+                        help='Compute VGS for C4-CoT results (data/eval/cot_analysis/)')
+    args = parser.parse_args()
+
     base_path = Path("data/eval")
+
+    if args.cot:
+        path_cot = base_path / "cot_analysis" / "error_type_results.json"
+        if path_cot.exists():
+            stats_cot = compute_vgs_for_file(path_cot)
+            print_vgs_report(stats_cot, "Qwen3-VL-32B-CoT")
+        else:
+            print(f"Error: {path_cot} not found")
+        return
 
     # 8B model
     path_8b = base_path / "error_type_analysis" / "error_type_results.json"

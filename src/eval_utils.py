@@ -24,6 +24,7 @@ RANDOM_SEED = 42
 # ---------------------------------------------------------------------------
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 SYSTEM_PROMPT = (_PROMPTS_DIR / "incongruence_eval_v1.txt").read_text(encoding="utf-8").strip()
+SYSTEM_PROMPT_COT = (_PROMPTS_DIR / "incongruence_eval_v1_cot.txt").read_text(encoding="utf-8").strip()
 
 
 def load_examples(
@@ -152,6 +153,52 @@ def parse_eval_output(output_text: str) -> Dict[str, str]:
         error_category = "N/A"
 
     return {
+        "verdict": verdict,
+        "error_category": error_category if error_category else "N/A",
+        "feedback": feedback if feedback else "N/A",
+    }
+
+
+def parse_eval_output_cot(output_text: str) -> Dict[str, str]:
+    """Extract Visual Analysis, Verdict, Error Category, Feedback from CoT model output.
+
+    Extends parse_eval_output() with an additional Visual Analysis field.
+    """
+    text = output_text.replace("\r\n", "\n").replace("\r", "\n")
+
+    lower = text.lower()
+    agent_idx = lower.find("agent:")
+    agent_block = text[agent_idx + len("agent:"):].strip() if agent_idx != -1 else text
+
+    visual_analysis = ""
+    verdict = ""
+    error_category = ""
+    feedback = ""
+
+    va_match = re.search(
+        r"Visual Analysis\s*=\s*(.*?)(?:\nVerdict\s*=|\Z)", agent_block, re.DOTALL
+    )
+    verdict_match = re.search(r"Verdict\s*=\s*([^\n]+)", agent_block)
+    error_match = re.search(r"Error Category\s*=\s*([^\n]+)", agent_block)
+    feedback_match = re.search(
+        r"Feedback\s*=\s*(.*?)(?:\n[A-Za-z ]+\s*=|\Z)", agent_block, re.DOTALL
+    )
+
+    if va_match:
+        visual_analysis = va_match.group(1).strip()
+    if verdict_match:
+        verdict = re.sub(r"\s+", " ", verdict_match.group(1).strip())
+    if error_match:
+        error_category = re.sub(r"\s+", " ", error_match.group(1).strip())
+    if feedback_match:
+        feedback = feedback_match.group(1).strip()
+
+    if verdict.lower() == "correct":
+        feedback = "N/A"
+        error_category = "N/A"
+
+    return {
+        "visual_analysis": visual_analysis,
         "verdict": verdict,
         "error_category": error_category if error_category else "N/A",
         "feedback": feedback if feedback else "N/A",

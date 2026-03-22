@@ -151,11 +151,63 @@ def print_results(results: dict, model_name: str, data_path: str):
     print()
 
 
+def compute_metrics_cot(data_path: str, model_name: str) -> dict:
+    """Compute PC Recall and FSR from CoT error_type_results.json.
+
+    CoT results only contain the 'multimodal' condition.
+    """
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+
+    error_types = ['factual', 'conceptual', 'omission']
+    results = {}
+
+    # CoT results only have 'multimodal' condition
+    all_examples = []
+    for error_type in error_types:
+        if error_type in data['results']:
+            all_examples.extend(data['results'][error_type]['multimodal'])
+
+    pc_examples = [ex for ex in all_examples
+                   if ex['ground_truth']['verdict'].lower() == 'partially correct']
+    tp_pc = sum(1 for ex in pc_examples
+                if ex['predicted']['verdict'].lower() == 'partially correct')
+    fn_pc = len(pc_examples) - tp_pc
+    pc_recall = tp_pc / len(pc_examples) * 100 if pc_examples else 0
+
+    correct_predictions = sum(1 for ex in all_examples
+                              if ex['predicted']['verdict'].lower() == 'correct')
+    fsr = correct_predictions / len(all_examples) * 100 if all_examples else 0
+
+    results['multimodal'] = {
+        'total_examples': len(all_examples),
+        'pc_examples': len(pc_examples),
+        'tp_pc': tp_pc,
+        'fn_pc': fn_pc,
+        'pc_recall': pc_recall,
+        'correct_predictions': correct_predictions,
+        'fsr': fsr
+    }
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description='Compute PC Recall and FSR metrics')
     parser.add_argument('--model', choices=['8b', '32b', 'both'], default='both',
                         help='Which model to compute metrics for (default: both)')
+    parser.add_argument('--cot', action='store_true',
+                        help='Compute metrics for C4-CoT results (data/eval/cot_analysis/)')
     args = parser.parse_args()
+
+    if args.cot:
+        cot_path = 'data/eval/cot_analysis/error_type_results.json'
+        if not os.path.exists(cot_path):
+            print(f"Error: {cot_path} not found")
+            return
+        results = compute_metrics_cot(cot_path, 'Qwen3-VL-32B-CoT')
+        print_results(results, 'Qwen3-VL-32B-CoT', cot_path)
+        return
 
     # Define data paths
     paths = {
