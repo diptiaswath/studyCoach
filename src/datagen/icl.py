@@ -11,13 +11,15 @@ Does the following:
     - Runs the inference and updates the JSON with model outputs (student answer, verdict, error category, feedback).
 
 Example usage:
-python src/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images --output data/test-A/SPIQA_testA_part1_output.json
+python src/datagen/icl.py data/SPIQA_testA_part1.json data/test-A/SPIQA_testA_Images --output data/test-A/SPIQA_testA_part1_output.json
 """
 from __future__ import annotations
 
 import base64
 import json
+import random
 import re
+import time
 
 from openai import OpenAI
 from pathlib import Path
@@ -157,13 +159,18 @@ client = OpenAI()
 def run_inference(
     json_path: str | Path,
     images_root: str | Path,
-    exemplars: dict
+    exemplars: dict,
+    output: str | Path | None = None,
+    checkpoint_every: int = 100,
+    num_papers: int | None = None,
+    paper_range: tuple[int, int] | None = None,
     ):
     """Run inference and inline-update JSON with model outputs."""
     global FACTUAL, OMISSION, CONCEPTUAL, ANSWER_TYPE, ANSWER_TYPE_DESCRIPTION
 
     json_path = Path(json_path)
     images_root = Path(images_root)
+    output_path = Path(output) if output else None
     
     print('+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
     print(f"JSON : {json_path}")
@@ -173,28 +180,25 @@ def run_inference(
     data = load_json(json_path)
 
     stats = {
-        'correct' : 0, 
-        'incorrect' : {'factual' : 0, 'omission' : 0, 'conceptual' : 0}, 
+        'correct' : 0,
+        'incorrect' : {'factual' : 0, 'omission' : 0, 'conceptual' : 0},
         'partially correct' : {'factual' : 0, 'omission' : 0, 'conceptual' : 0}
     }
-    paper_count = len(data.keys())
     total_qa_count = 0
+    processed_papers = {}
 
-    partially_correct_split, incorrect_split, correct_split = paper_count // 3, paper_count * 2 // 3, paper_count
-    for paper_idx, paper_key in enumerate(sorted(data.keys()), 1):
+    paper_keys = sorted(data.keys())
+    if paper_range is not None:
+        start, end = paper_range
+        paper_keys = paper_keys[start - 1:end]
+    elif num_papers is not None:
+        paper_keys = paper_keys[:num_papers]
+    paper_count = len(paper_keys)
+
+    for paper_idx, paper_key in enumerate(paper_keys, 1):
         print('++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
         print(f"Processing paper - {paper_key}")
         print('++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n')
-
-        if paper_idx <= partially_correct_split:
-            ANSWER_TYPE = "partially correct"
-            ANSWER_TYPE_DESCRIPTION = "A partially correct answer is an answer which gets some aspects correct with respect to the question posed in the context of the provided image and caption. But not all aspects are correct."
-        elif paper_idx <= incorrect_split:
-            ANSWER_TYPE = "incorrect"
-            ANSWER_TYPE_DESCRIPTION = "An incorrect answer is an answer which is incorrect with respect to the question posed in the context of the provided image and caption."
-        else:
-            ANSWER_TYPE = "correct"
-            ANSWER_TYPE_DESCRIPTION = "A correct answer is an answer which is provides the accurate and complete information to the question posed in the context of the provided image and caption."
 
         paper = data[paper_key]
         all_figures = paper.get("all_figures", {})
@@ -219,6 +223,14 @@ def run_inference(
                 figure_category = 'figure'
 
             assert figure_category in exemplars, f"Figure category {figure_category} not found in exemplars. Please check the figure content type and figure type in the JSON and ensure it is one of 'plot', 'table' or 'figure'."
+
+            ANSWER_TYPE = random.choice(["correct", "incorrect", "partially correct"])
+            if ANSWER_TYPE == "partially correct":
+                ANSWER_TYPE_DESCRIPTION = "A partially correct answer is an answer which gets some aspects correct with respect to the question posed in the context of the provided image and caption. But not all aspects are correct."
+            elif ANSWER_TYPE == "incorrect":
+                ANSWER_TYPE_DESCRIPTION = "An incorrect answer is an answer which is incorrect with respect to the question posed in the context of the provided image and caption."
+            else:
+                ANSWER_TYPE_DESCRIPTION = "A correct answer is an answer which is provides the accurate and complete information to the question posed in the context of the provided image and caption."
 
             # Only run inference for incorrect and partially correct answers since correct answers can be sourced from the SPIQA ground truth answers.
             if ANSWER_TYPE != "correct":
@@ -287,7 +299,27 @@ def run_inference(
                 qa["feedback"] = "Your answer is correct. Great job!"
                 
                 stats['correct'] += 1
-            
+
+        processed_papers[paper_key] = paper
+
+        if output_path and paper_idx % checkpoint_every == 0:
+            checkpoint_path = output_path.with_stem(f"{output_path.stem}_{paper_idx}")
+            checkpoint_path.write_text(
+                json.dumps(processed_papers, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            print(f"\n[Checkpoint] Saved {paper_idx} papers to {checkpoint_path}\n")
+            print(f"[Checkpoint] Waiting 10 seconds before continuing...\n")
+            time.sleep(10)
+
+    if output_path and paper_count % checkpoint_every != 0:
+        checkpoint_path = output_path.with_stem(f"{output_path.stem}_{paper_count}")
+        checkpoint_path.write_text(
+            json.dumps(processed_papers, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"\n[Checkpoint] Saved {paper_count} papers to {checkpoint_path}\n")
+
     # Print stats
     print(f"\nStats:\n")
     print(f"Total Papers Processed: {paper_count}")
@@ -306,6 +338,10 @@ if __name__ == "__main__":
     parser.add_argument("json", help="Path to JSON file")
     parser.add_argument("images_root", help="Path to images root folder")
     parser.add_argument("--output", required=True, help="Path to write updated JSON output")
+    parser.add_argument("--checkpoint-every", type=int, default=100, help="Save a checkpoint every N papers (default: 100)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--num-papers", type=int, default=None, help="Number of papers to process (default: all)")
+    group.add_argument("--range", nargs=2, type=int, metavar=("START", "END"), help="1-based inclusive range of paper indexes to process (e.g. --range 101 200)")
     args = parser.parse_args()
 
     ############ Plot Exemplars ############
@@ -641,9 +677,5 @@ Feedback = Your answer is partially correct because you recognize the central ro
         }
     }
 
-    updated_json = run_inference(args.json, args.images_root, exemplars=exemplars)
+    run_inference(args.json, args.images_root, exemplars=exemplars, output=args.output, checkpoint_every=args.checkpoint_every, num_papers=args.num_papers, paper_range=tuple(args.range) if args.range else None)
 
-    Path(args.output).write_text(
-        json.dumps(updated_json, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
