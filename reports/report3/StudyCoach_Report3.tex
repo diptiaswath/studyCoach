@@ -401,6 +401,225 @@ PC Recall stable ($-$1.7pp vs $-$24.6pp), Match\% 7$\times$ higher at C4---the
 architectural hypothesis is confirmed. The bolt-on ViT design was the cause, not
 insufficient scale. \textbf{Modification~3 is therefore not required.}
 
+\paragraph{Modification 4: Visual Chain-of-Thought Prompting (C4-CoT).}
+
+\textbf{Motivation.} The qualitative analysis in Section~\ref{sec:qual} identifies
+the root cause of both verdict inflation and hallucinated correction: without
+structured reasoning over the figure, the model falls back on plausibility assessment
+rather than evidence-based judgment. All baseline evaluations use \texttt{/no\_think}
+to suppress the model's native chain-of-thought, meaning the model produces a
+verdict without any explicit intermediate reasoning about figure content.
+Modification~4 tests whether forcing the model to describe what it sees in the figure
+\textit{before} judging can improve verdict accuracy---particularly PC Recall---without
+sacrificing feedback quality.
+
+\textbf{Implementation.} We create a modified system prompt
+(\texttt{incongruence\_eval\_v1\_cot.txt}) that inserts a visual analysis step
+before the verdict. The model must: (1)~identify key data points, values, or patterns
+visible in the figure, (2)~note specific numbers, trends, or comparisons relevant to
+the question, and (3)~compare the student's claims against what the figure shows. The
+output format adds a \texttt{Visual Analysis} field before the existing
+Verdict/Error~Category/Feedback fields. The \texttt{/no\_think} directive is
+retained---the CoT is visible in the structured output, not in a hidden reasoning
+block. This isolates the effect of structured visual reasoning from the model's
+internal thinking mode.
+
+We run C4-CoT on all $N{=}108$ non-correct examples using Qwen3-VL-32B, the same
+model and evaluation set as the C4 baseline. The only variable is the system prompt;
+all other parameters (model endpoint, temperature, user message format) are identical.
+
+\textbf{Results.}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Metric & C4 (32B) & C4-CoT (32B) & $\Delta$ \\
+\midrule
+PC Recall $\uparrow$ & 27.9\% & 23.0\% & $-$4.9pp \\
+FSR $\downarrow$      & 30.6\% & 17.6\% & $-$13.0pp \\
+VGS $\uparrow$        & 56.0\% & 55.1\% & $-$0.9pp \\
+Verdict $\uparrow$    & 54.0\% & 48.1\% & $-$5.9pp \\
+Match\% $\uparrow$    & 20.0\% & \textit{TBD} & --- \\
+SoftM\% $\uparrow$    & 58.0\% & \textit{TBD} & --- \\
+\bottomrule
+\end{tabular}
+\caption{C4 baseline vs.\ C4-CoT (Modification~4), Qwen3-VL-32B, $N{=}108$.}
+\label{tab:cot_comparison}
+\end{table}
+
+The most striking finding is that CoT \textbf{substantially reduces feedback
+suppression}: FSR drops from 30.6\% to 17.6\% ($-$13.0pp), meaning the model
+incorrectly accepts 13 fewer non-correct answers as ``Correct'' out of 108. This
+directly addresses the verdict inflation failure mode identified in
+Section~\ref{sec:qual}---the visual analysis step forces the model to examine figure
+evidence before committing to a verdict, making it harder to dismiss errors without
+justification.
+
+However, PC Recall drops from 27.9\% to 23.0\% ($-$4.9pp). The model classifies
+fewer partially correct answers correctly, instead over-correcting them to Incorrect.
+The visual analysis step helps the model detect \textit{that something is wrong}
+(lower FSR) but makes it harder to recognize \textit{how much is wrong} (lower PC
+Recall). This produces a net drop in verdict accuracy from 54.0\% to 48.1\%.
+
+VGS remains essentially unchanged (56.0\% $\to$ 55.1\%), confirming that CoT does
+not degrade visual grounding in feedback---the model continues to cite specific
+figure values at the same rate.
+
+\textbf{Interpretation.} CoT addresses one half of the verdict--feedback
+dissociation: it reduces false ``Correct'' predictions (lower FSR) by making the
+model confront figure evidence before judging. But it introduces a new failure
+mode---\textbf{over-correction}---where the visual analysis step leads the model to
+flag discrepancies that are minor enough to warrant ``Partially Correct,'' not
+``Incorrect.'' Table~\ref{tab:cot_qual} in Section~\ref{sec:qual} illustrates both
+patterns with paired examples. This suggests that the dissociation is not purely a
+reasoning depth problem (solvable by more explicit reasoning) but involves
+calibration of the three-class decision boundary. A production system could combine
+CoT's lower FSR with routing (Mod~1): use C1 for the verdict boundary and C4-CoT
+for feedback generation, capturing both reduced suppression and superior
+classification.
+
+\paragraph{Modification 5: Mixture of LoRA Experts for Figure-Type-Aware Adaptation}
+
+We use Qwen3-VL-8B as the baseline for this modification. With zero shot inference
+on test-A dataset (N=108), we observe following metrics for each figure type.
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lrrr}
+    \toprule
+    Figure Type & ROUGE-L & METEOR & BERTScore-F1 \\
+    \midrule
+    Schematic & 0.33 & 0.31 & 0.86 \\
+    Table     & 0.31 & 0.30 & 0.85 \\
+    Plot      & 0.30 & 0.28 & 0.84 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Evaluation metrics by figure type}
+  \label{tab:metrics-by-fig-type}
+\end{table}
+
+As per Table \ref{tab:metrics-by-fig-type} there are variations in scores per figure-types (specially 
+BERTSCore-F1 where $\sim$\%2 is a meaningful difference from a strong baseline of 0.84) .
+This gave us the idea: \textit{can we augment the LLM backbone with a Mixture-Of-Experts tuned on visual inputs, 
+with experts specializing on different figure types?}
+
+The details of the fine-tuning task given below.
+
+\textbf{Data}: Training used 8,000 examples sampled from 1,500 papers (SPIQA+ train), with a paper-disjoint validation 
+set of 160 examples drawn from a separate 200-paper pool. Evaluation used 108 examples from the SPIQA+ Test-A split. 
+We chose 8k training size based on loss curve analysis of a preliminary 10k run, which showed convergence at 
+approximately 8,000 examples with negligible improvement beyond that point.
+
+\textbf{Architecture}: Each target linear layer ($q_{proj}$, $v_{proj}$, $o_{proj}$, $gate_{proj}$) on the LLM backbone 
+is replaced with a module $MoLoRALinear$ containing K=4 parallel LoRA adapters (rank r=16, $α$ = 32, dropout=0.05) and a 
+shared MLP router (Figure \ref{fig:molora-experts-layer}) . The router takes the mean-pooled output of the vision-language projector/merger as input (a visual 
+summary vector with dim=4096) and produces K softmax weights via a two-layer MLP (hidden dim=128). These weights are 
+applied as a soft weighted combination of the K expert adapter outputs, so all experts participate in every forward
+pass (i.e.: soft routing). The vision encoder and merger are frozen; only the LoRA adapter weights and router were
+trained.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{StudyCoach//report3/MoLoRALinear_Layer.jpg}
+    \caption{Mixture-of-LoRA-Experts Layer}
+    \label{fig:molora-experts-layer}
+\end{figure}
+
+\textbf{Router collapse prevention:} We noticed that the structured output format creates strong directional LM loss 
+gradients in early training. This causes naive soft routing to collapse to a single dominant expert 
+within 20–30 steps (dominant expert ends up having around 80\% of routing weight). We used three
+complementary mechanisms to mitigate this: \newline \newline
+(1) \textit{Temperature annealing}: We initialize the router softmax temperature T at 10.0 and then anneal it
+linearly to 1.0 over the first 30\% of training steps, forcing near-uniform expert utilisation during 
+the early phase
+\\
+(2) \textit{Entropy Bonus}: We add a term −0.02 × H(weights) to the loss throughout training, directly 
+penalising collapsed distributions
+\\
+(3) \textit{Router Noise}: We also add a Gaussian noise ($\sigma$=0.5) to router logits during training to encourage exploration.
+
+\textbf{Training setup:} Single NVIDIA A40 46GB GPU, bfloat16 precision. Batch size 1, gradient accumulation 8 (effective batch 8), learning rate $2*10^{-4}$ with cosine schedule, 5\% warmup, 1 epoch. Training took approximately 4 hours per run. 
+
+\textbf{Results:}
+
+We compared task performance using ROUGE-L, METEOR and BERTScore-F1. Fine tuned model shows a significant
+performance improvement over the baseline model as shown in Figure \ref{fig:molora-performance}. Measures
+based on lexical overlap show the strongest performance gain - ROUGE-L (\%17), METEOR (\%50). This strongly indicates that the model has improved to produce the structured output format required by the task.
+BERTScore-F1 also shows a meaningful performance improvement of \%2 which indicates that the model is generating
+semantically better aligned free-form feedback.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{StudyCoach//report3/metrics_comparison.png}
+    \caption{Mixture-of-LoRA-Experts Model Performance}
+    \label{fig:molora-performance}
+\end{figure}
+
+We also measured BERTScore-F1 performance per type of figure (Figure \ref{fig:bertscore-by-fig-type}). Here
+we see a more pronounced difference with respect to the performance gain. Schematics (\%3) and 
+tables (\%3) show a better performance gain over plots (\%1).
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{StudyCoach//report3/fig_type_metrics.png}
+    \caption{BERTScore-F1 by Figure Type}
+    \label{fig:bertscore-by-fig-type}
+\end{figure}
+
+Finally, we measured verdict accuracy and model performance on intrinsic metrics. Except
+for FSR all other metrics show significant improvement (Table \ref{tab:intrinsic}).
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lrr}
+    \toprule
+    Metric & Baseline & MoE LoRA (K=4 r=16) \\
+    \midrule
+    Verdict Accuracy (\%)                         & 46.3 & 61.1 \\
+    \midrule
+    PC Recall (\%) [Partially-Correct Recall]     & 21.3 & 55.7 \\
+    FSR (\%) [Feedback Suppression Rate]          & 12.0 & 13.0 \\
+    VGS Pred (\%) [Visual Grounding Score]        & 69.4 & 84.3 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Evaluation Metrics}
+  \label{tab:intrinsic}
+\end{table}
+
+The MoE LoRA model scores \%15 higher in the visual grounding score (VGS). The ground truth data 
+has a VGS of \%92. So the fine tuned model likely learned that referring to figure data is important. 
+But coupled with the increase in verdict accuracy and BERTScore-F1, the increase of VGS likely 
+indicates that the fine tuned model achieves more accurate visual grounding.
+\clearpage
+
+\textbf{Do Experts Specialize on Different Visual Inputs?} \newline
+Given the divergent BERTScore-F1 gain based on figure type (Figure \ref{tab:metrics-by-fig-type}) it is natural to raise the above question. To verify that the performance improvements
+seen so far are due to expert specialization, we fine tune another baseline using vanilla
+LoRA (with r=64 to keep it parameter similar to 4x16 expert setup) and compare the per figure 
+BERTScore-F1 performance (Figure \ref{fig:lora-vs-molora}). 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{StudyCoach//report3/lora_vs_molora.png}
+    \caption{LoRA vs MoE LoRA Performance by Figure Type}
+    \label{fig:lora-vs-molora}
+\end{figure}
+
+This comparison shows that the MoE LoRA model does not differ significantly in performance 
+compared to the vanilla LoRA tuned model. To further confirm that expert specialization does
+not drive the performance improvements, we capture the average expert routing weights per 
+figure type during the test split evaluation. The heat map visualization (\ref{fig:expert-load}) shows that the 
+routing weights are almost identical.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\linewidth]{StudyCoach//report3/expert_load_heatmap.png}
+    \caption{Expert Load During Test Split Evaluation}
+    \label{fig:expert-load}
+\end{figure}
+
 \clearpage
 
 \subsection{Qualitative Analysis and Examples}
@@ -477,6 +696,95 @@ content, explaining why feedback quality improves even as PC Recall drops.}
 \label{tab:qual}
 \end{table*}
 
+\medskip
+\noindent\textbf{Effect of Visual CoT on failure modes.}
+Modification~4 (C4-CoT) forces the model to produce a \texttt{Visual Analysis}
+field describing key figure elements before rendering a verdict. Table~\ref{tab:cot_qual}
+pairs six examples where C4 and C4-CoT diverge on the same input, illustrating two
+patterns. \textit{CoT helps} (examples 1--3): the visual analysis step
+grounds the model in figure evidence, preventing verdict inflation---the model
+identifies specific values or patterns that contradict the student's claims instead
+of accepting them at face value. \textit{CoT hurts} (examples 4--6): the model
+identifies real discrepancies during visual analysis but over-penalizes them,
+downgrading ``Partially Correct'' to ``Incorrect'' or, in one case, over-reading
+the figure and inflating to ``Correct.'' The over-correction pattern accounts for
+the PC Recall drop ($-$4.9pp) despite the FSR improvement ($-$13.0pp): CoT
+shifts the decision boundary toward detecting errors but cannot calibrate the
+severity of those errors into the three-class distinction.
+
+\begin{table*}[!ht]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.02\linewidth}p{0.07\linewidth}p{0.19\linewidth}p{0.08\linewidth}p{0.09\linewidth}p{0.09\linewidth}p{0.32\linewidth}p{0.06\linewidth}@{}}
+\toprule
+\# & Error Type & Question (abbreviated) & GT & C4 & C4-CoT & CoT Visual Analysis (excerpt) & Effect \\
+\midrule
+1 &
+Factual &
+How does alpha affect accuracy for different sample sizes on CLASS? &
+Incorrect &
+\textbf{Correct} &
+\textbf{Incorrect} $\checkmark$ &
+``The figure clearly shows distinct, non-overlapping curves for different alpha values across all three loss functions'' &
+Helps \\
+\midrule
+2 &
+Conceptual &
+Which explanation method emphasizes localized features most? &
+Incorrect &
+\textbf{Correct} &
+\textbf{Incorrect} $\checkmark$ &
+``LIME shows the most focused, small-region highlighting\ldots Parzen's maps show broader, less localized changes'' &
+Helps \\
+\midrule
+3 &
+Omission &
+Role of temperature $t$ in CCA decoding? &
+PC &
+\textbf{Correct} &
+\textbf{PC} $\checkmark$ &
+``The loop uses $t$ in acceptance probabilities $\alpha_0, \alpha_1$\ldots student omitted this modulation role'' &
+Helps \\
+\midrule
+4 &
+Factual &
+Which method predicts motion of small object most accurately? &
+Incorrect &
+\textbf{Incorrect} $\checkmark$ &
+\textbf{Correct} &
+``Green arrows show motion; panel (c) ground truth\ldots'' Model over-reads figure as supporting student claim &
+Hurts \\
+\midrule
+5 &
+Conceptual &
+What is the purpose of the blank space $Z'_5$? &
+PC &
+\textbf{PC} $\checkmark$ &
+\textbf{Incorrect} &
+``Blank space is intentionally labeled as fifth component'' ---
+model flags student's ``leftover'' framing as fully wrong rather than partially right &
+Hurts \\
+\midrule
+6 &
+Omission &
+Which model performs best for response selection? &
+PC &
+\textbf{PC} $\checkmark$ &
+\textbf{Correct} &
+``KEHNN has highest scores in all four metrics: 0.786\ldots'' ---
+model confirms student's claim with specific values, missing the omission &
+Hurts \\
+\bottomrule
+\end{tabular}
+\caption{Qualitative comparison of C4 baseline vs.\ C4-CoT (Modification~4),
+Qwen3-VL-32B. $\checkmark$ marks the correct verdict. PC = Partially Correct.
+Examples 1--3: CoT prevents verdict inflation by grounding in figure evidence.
+Examples 4--6: CoT over-corrects or over-confirms, misclassifying the severity
+of the error.}
+\label{tab:cot_qual}
+\end{table*}
+
 \clearpage
 
 \section{\points{3} Insights}
@@ -533,7 +841,13 @@ section.
 
 \paragraph{Jiashan Cui} \textit{[To be filled in by Jiashan.]}
 
-\paragraph{Khubi Shah} \textit{[To be filled in by Khubi.]}
+\paragraph{Khubi Shah} Designed and implemented Modification~4 (Visual
+Chain-of-Thought Prompting). Created the CoT system prompt, inference scripts
+(\texttt{eval\_multimodal\_cot.py}, \texttt{eval\_cot.py}), and CoT-aware parser.
+Ran the full $N{=}108$ C4-CoT evaluation on Qwen3-VL-32B, computed intrinsic metrics
+(PC Recall, FSR, VGS), and performed qualitative comparison of C4 vs.\ C4-CoT
+(Table~\ref{tab:cot_qual}). Wrote the Modification~4 section and CoT-related
+additions to Insights.
 
 \bibliography{references}
 \bibliographystyle{iclr2024_conference}
