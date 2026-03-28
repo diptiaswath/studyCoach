@@ -1,19 +1,79 @@
 #!/usr/bin/env python3
-"""Evaluation Script for Qwen3.5-9B (Modification 2)
+"""Evaluation Script for Qwen3.5-9B (Modification 2: Architectural Ablation)
 
 This script runs the Modification 2 architectural ablation from Report 3:
 Testing Qwen3.5-9B (early fusion architecture) vs Qwen3-VL-8B (bolt-on ViT).
-
-Key differences from Qwen3-VL:
-- Model: Qwen/Qwen3.5-9B (early fusion, no separate vision encoder)
-- Thinking mode DISABLED: extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-- Sampling: temperature=0.0, top_p=1.0 for reproducibility
 
 Hypothesis: If the bolt-on ViT architecture of Qwen3-VL causes the PC Recall
 collapse observed under visual input, Qwen3.5-9B should show a smaller or
 reversed verdict gap (C4 accuracy >= C1 accuracy).
 
-Usage:
+================================================================================
+IMPLEMENTATION STEPS (from Report 3)
+================================================================================
+
+1. Confirm Together.ai access.
+   Verify Qwen/Qwen3.5-9B is available under the existing Together.ai API key
+   used for Report 2. Model is live as of March 2, 2026 ($0.10/1M input,
+   $0.15/1M output tokens).
+
+2. Disable thinking mode.
+   Qwen3.5-9B runs in thinking mode by default, which prepends a chain-of-thought
+   reasoning block before the final response. This will break the structured
+   output parser (which expects Verdict = ..., Error Category = ...,
+   Feedback = ...). Disable it explicitly:
+
+       extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+
+   Use sampling parameters: temperature=0.0 (greedy, for reproducibility),
+   top_p=1.0, presence_penalty=0.0.
+
+3. Use identical prompts.
+   Use the exact same prompt templates as Report 2 for all four conditions
+   (C1-C4). No prompt changes. The only change is the model ID string. This
+   ensures any performance difference is attributable to the model architecture,
+   not prompt variation.
+
+4. Run C1 and C4 on the H3/H4 evaluation set (N=108).
+   These are the two conditions that define the verdict-feedback gap. C1
+   (text-only) establishes the same-architecture text baseline. C4 (multimodal)
+   is the hypothesis-test condition: does early fusion eliminate the verdict
+   drop? Running all four conditions (C1-C4) is preferred if API budget allows.
+
+5. Parse outputs with the same extraction logic.
+   Qwen3.5-9B output formatting may differ slightly from Qwen3-VL (e.g., extra
+   whitespace, different capitalization of "Partially Correct" vs "partially
+   correct"). Before computing metrics, verify the parser correctly extracts
+   Verdict, Error Category, and Feedback fields from 5-10 sample outputs.
+   Normalize verdict strings to lowercase before comparison.
+
+6. Run the same three evaluation scripts:
+   - Verdict accuracy: compare predicted vs. ground-truth verdict labels
+   - Intrinsic metrics (PC Recall, FSR, VGS): same computation from raw
+     per-example outputs
+   - Feedback quality (LLM-as-Judge): run analyze_feedback_by_error_type.py
+     with model=claude-sonnet-4-6, temperature=0, N=108
+
+7. Interpret the result against two hypotheses:
+   - If C4 verdict accuracy >= C1 for Qwen3.5-9B: early fusion resolves the
+     architectural mismatch. Report 4 should use Qwen3.5-9B as the backbone
+     for fine-tuning on SPIQA+, not Qwen3-VL.
+   - If C4 verdict accuracy < C1 for Qwen3.5-9B: the bolt-on ViT is not the
+     cause. The failure is inherent to how visual input interacts with
+     three-class verdict decisions at this parameter scale.
+
+================================================================================
+KEY IMPLEMENTATION DETAILS
+================================================================================
+
+Model: Qwen/Qwen3.5-9B (early fusion, no separate vision encoder)
+Thinking mode: DISABLED via extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+Sampling: temperature=0.0, top_p=1.0, presence_penalty=0.0
+
+================================================================================
+USAGE
+================================================================================
+
     python src/eval_qwen35_9b.py \\
         --data data/test-A/SPIQA_testA_part1_output_latest.json \\
         --images data/test-A/SPIQA_testA_Images \\
